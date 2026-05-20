@@ -13,3 +13,5 @@ Task-oriented guides for setup, configuration, and common PicoClaw workflows.
 - [Using Antigravity Provider in PicoClaw](ANTIGRAVITY_USAGE.md): Google Cloud Code Assist setup and usage.
 
 Translations usually live beside the English source when available.
+
+Workflow test note: this documentation-only line exists to validate the personal fork PR flow from `main-thomas`.
