@@ -635,6 +635,8 @@ For detailed guides beyond this README:
 
 PRs welcome! The codebase is intentionally small and readable.
 
+> Maintainer note: Thomas's integration branch and personal fork workflow use `tbeaudouin05/picoclaw` for `main-thomas` PRs.
+
 See our [Community Roadmap](https://github.com/sipeed/picoclaw/issues/988) and [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 Developer group building, join after your first merged PR!
