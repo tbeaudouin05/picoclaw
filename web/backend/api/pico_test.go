@@ -532,6 +532,46 @@ func TestHandleWebSocketProxyReloadsGatewayTargetFromConfig(t *testing.T) {
 	}
 }
 
+func TestCreateWsProxyPreservesPathAndQuery(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	h := NewHandler(configPath)
+
+	proxy := h.createWsProxy("", tokenPrefix+"ui-token")
+	var capturedPath string
+	var capturedQuery string
+	var capturedProtocol string
+	proxy.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		capturedPath = req.URL.Path
+		capturedQuery = req.URL.RawQuery
+		capturedProtocol = req.Header.Get(protocolKey)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("proxied")),
+			Request:    req,
+		}, nil
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/pico/ws?session_id=test-session", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	rec := httptest.NewRecorder()
+	proxy.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if capturedPath != "/pico/ws" {
+		t.Fatalf("capturedPath = %q, want %q", capturedPath, "/pico/ws")
+	}
+	if capturedQuery != "session_id=test-session" {
+		t.Fatalf("capturedQuery = %q, want %q", capturedQuery, "session_id=test-session")
+	}
+	if capturedProtocol != tokenPrefix+"ui-token" {
+		t.Fatalf("forwarded protocol = %q, want %q", capturedProtocol, tokenPrefix+"ui-token")
+	}
+}
+
 func TestHandleWebSocketProxyLoadsCachedPicoTokenWhenMissing(t *testing.T) {
 	origMatcher := gatewayProcessMatcher
 	gatewayProcessMatcher = func(int) (bool, bool) { return true, true }
