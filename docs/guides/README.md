@@ -4,6 +4,7 @@ Task-oriented guides for setup, configuration, and common PicoClaw workflows.
 
 - [Docker & Quick Start Guide](docker.md): install and run PicoClaw with Docker or the launcher.
 - [Configuration Guide](configuration.md): environment variables, workspace layout, routing, and sandbox settings.
+- [Launcher Setup Guide](launcher-setup.md): connect desktop clients to a launcher running on another host via a manual tunnel today, with notes on the intended future app-managed flow.
 - [Session Guide](session-guide.md): how session scope affects memory sharing, summaries, and isolation.
 - [Routing Guide](routing-guide.md): agent dispatch, session overrides, and light-model routing.
 - [Chat Apps Configuration](chat-apps.md): supported chat platforms and channel-specific setup paths.

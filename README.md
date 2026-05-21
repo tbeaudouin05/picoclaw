@@ -231,6 +231,8 @@ Open the WebUI, then: **1)** Configure a Provider (add your LLM API key) -> **2)
 
 For detailed WebUI documentation, see [docs.picoclaw.io](https://docs.picoclaw.io).
 
+If your desktop app expects the launcher at `http://127.0.0.1:18800` but the launcher is running on another machine, see the [Launcher Setup Guide](docs/guides/launcher-setup.md) for the current manual SSH tunnel flow and the intended future app-managed behavior.
+
 <details>
 <summary><b>Docker (alternative)</b></summary>
 
