@@ -5,6 +5,7 @@ import {
   parseAssistantMessageUpdateState,
 } from "@/features/chat/assistant-message-state"
 import { normalizeUnixTimestamp } from "@/features/chat/state"
+import { playFinalResponseBeep } from "@/lib/notification-sound"
 import {
   type ChatAttachment,
   type ContextUsage,
@@ -83,6 +84,11 @@ function parseContextUsage(
   }
 }
 
+// Tracks whether the current agent turn (between typing.start and typing.stop)
+// has produced a user-facing text response. Used to gate the final-response
+// beep so it only fires for completed text answers, not tool/thought turns.
+let finalTextSeenInTurn = false
+
 export function handlePicoMessage(
   message: PicoMessage,
   expectedSessionId: string,
@@ -106,6 +112,10 @@ export function handlePicoMessage(
         Number.isFinite(Number(message.timestamp))
           ? normalizeUnixTimestamp(Number(message.timestamp))
           : Date.now()
+
+      if (kind === "normal" && content.trim().length > 0) {
+        finalTextSeenInTurn = true
+      }
 
       updateChatStore((prev) => ({
         messages: [
@@ -149,6 +159,9 @@ export function handlePicoMessage(
             found = true
             const { content, kind, toolCalls } =
               parseAssistantMessageUpdateState(payload, msg)
+            if (kind === "normal" && content.trim().length > 0) {
+              finalTextSeenInTurn = true
+            }
             return {
               ...msg,
               id: messageId,
@@ -164,6 +177,9 @@ export function handlePicoMessage(
 
           const { content, kind, toolCalls } =
             parseAssistantMessageUpdateState(payload)
+          if (kind === "normal" && content.trim().length > 0) {
+            finalTextSeenInTurn = true
+          }
 
           return [
             ...messages,
@@ -196,11 +212,16 @@ export function handlePicoMessage(
     }
 
     case "typing.start":
+      finalTextSeenInTurn = false
       updateChatStore({ isTyping: true })
       break
 
     case "typing.stop":
       updateChatStore({ isTyping: false })
+      if (finalTextSeenInTurn) {
+        playFinalResponseBeep()
+      }
+      finalTextSeenInTurn = false
       break
 
     case "error": {
@@ -213,6 +234,7 @@ export function handlePicoMessage(
       if (errorMessage) {
         toast.error(errorMessage)
       }
+      finalTextSeenInTurn = false
       updateChatStore((prev) => ({
         messages: requestId
           ? prev.messages.filter((msg) => msg.id !== requestId)
