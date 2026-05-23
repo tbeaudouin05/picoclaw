@@ -74,6 +74,11 @@ type AgentLoop struct {
 	reloadFunc func() error
 
 	providerFactory func(*config.ModelConfig) (providers.LLMProvider, string, error)
+
+	// configPath is the on-disk config file path. Populated via WithConfigPath
+	// so config-mutating tools (e.g. create_colleague) can persist changes
+	// without re-discovering the path.
+	configPath string
 }
 
 // processOptions configures how a message is processed

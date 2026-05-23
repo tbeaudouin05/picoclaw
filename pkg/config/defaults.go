@@ -417,6 +417,12 @@ func DefaultConfig() *Config {
 			AppendFile: ToolConfig{
 				Enabled: true,
 			},
+			CreateColleague: ToolConfig{
+				Enabled: true,
+			},
+			DeleteColleague: ToolConfig{
+				Enabled: true,
+			},
 			EditFile: ToolConfig{
 				Enabled: true,
 			},

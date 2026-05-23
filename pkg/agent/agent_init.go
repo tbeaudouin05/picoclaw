@@ -131,6 +131,21 @@ func registerSharedTools(
 			}
 		}
 
+		// Colleague management: mutate local AgentConfig entries in the config
+		// file. Requires the config path so SaveConfig can persist changes.
+		if cfg.Tools.IsToolEnabled("create_colleague") {
+			if al.configPath == "" {
+				logger.WarnCF("agent", "create_colleague enabled but config path not set; tool will refuse mutations", nil)
+			}
+			agent.Tools.Register(tools.NewCreateColleagueTool(cfg, al.configPath))
+		}
+		if cfg.Tools.IsToolEnabled("delete_colleague") {
+			if al.configPath == "" {
+				logger.WarnCF("agent", "delete_colleague enabled but config path not set; tool will refuse mutations", nil)
+			}
+			agent.Tools.Register(tools.NewDeleteColleagueTool(cfg, al.configPath))
+		}
+
 		// Hardware tools (I2C, SPI) - Linux only, returns error on other platforms
 		if cfg.Tools.IsToolEnabled("i2c") {
 			agent.Tools.Register(tools.NewI2CTool())

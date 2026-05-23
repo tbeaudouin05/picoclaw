@@ -835,6 +835,8 @@ type ToolsConfig struct {
 	MediaCleanup    MediaCleanupConfig `json:"media_cleanup"     yaml:"-"`
 	MCP             MCPConfig          `json:"mcp"               yaml:"-"`
 	AppendFile      ToolConfig         `json:"append_file"       yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_APPEND_FILE_"`
+	CreateColleague ToolConfig         `json:"create_colleague"  yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_CREATE_COLLEAGUE_"`
+	DeleteColleague ToolConfig         `json:"delete_colleague"  yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_DELETE_COLLEAGUE_"`
 	EditFile        ToolConfig         `json:"edit_file"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_EDIT_FILE_"`
 	FindSkills      ToolConfig         `json:"find_skills"       yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_FIND_SKILLS_"`
 	I2C             ToolConfig         `json:"i2c"               yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_I2C_"`
@@ -1556,6 +1558,10 @@ func (t *ToolsConfig) IsToolEnabled(name string) bool {
 		return t.MediaCleanup.Enabled
 	case "append_file":
 		return t.AppendFile.Enabled
+	case "create_colleague":
+		return t.CreateColleague.Enabled
+	case "delete_colleague":
+		return t.DeleteColleague.Enabled
 	case "edit_file":
 		return t.EditFile.Enabled
 	case "find_skills":

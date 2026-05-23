@@ -18,3 +18,11 @@ func WithRuntimeEvents(bus runtimeevents.Bus) AgentLoopOption {
 		al.ownsRuntimeEvents = false
 	}
 }
+
+// WithConfigPath records the on-disk config file path so tools that mutate
+// configuration (e.g. create_colleague) can persist changes back to it.
+func WithConfigPath(path string) AgentLoopOption {
+	return func(al *AgentLoop) {
+		al.configPath = path
+	}
+}
