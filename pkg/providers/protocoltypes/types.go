@@ -81,6 +81,7 @@ type Attachment struct {
 type Message struct {
 	Role             string         `json:"role"`
 	Content          string         `json:"content"`
+	Timestamp        int64          `json:"timestamp,omitempty"`
 	Media            []string       `json:"media,omitempty"`
 	Attachments      []Attachment   `json:"attachments,omitempty"`
 	ReasoningContent string         `json:"reasoning_content,omitempty"`

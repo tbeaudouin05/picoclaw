@@ -556,6 +556,9 @@ func (s *JSONLStore) addMsg(sessionKey string, msg providers.Message) error {
 	if messageutil.IsTransientAssistantThoughtMessage(msg) {
 		return nil
 	}
+	if msg.Timestamp == 0 {
+		msg.Timestamp = time.Now().UnixMilli()
+	}
 
 	l := s.sessionLock(sessionKey)
 	l.Lock()

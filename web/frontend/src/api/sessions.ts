@@ -14,6 +14,7 @@ export interface SessionDetail {
   messages: {
     role: "user" | "assistant"
     content: string
+    timestamp?: number
     kind?: "normal" | "thought" | "tool_calls"
     media?: string[]
     attachments?: {
