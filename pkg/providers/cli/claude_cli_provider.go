@@ -11,6 +11,14 @@ import (
 	"github.com/sipeed/picoclaw/pkg/isolation"
 )
 
+const (
+	claudeCodeDefaultModel           = "claude-code"
+	claudeCodeGeneralTaskModel       = "claude-opus-4-7"
+	claudeCodePlannedCodeChangeModel = "claude-sonnet-4-7"
+	claudeCodeTaskKindOption         = "task_kind"
+	claudeCodePlannedCodeChangeTask  = "planned_code_change"
+)
+
 // ClaudeCliProvider implements LLMProvider using the claude CLI as a subprocess.
 type ClaudeCliProvider struct {
 	command   string
@@ -36,7 +44,7 @@ func (p *ClaudeCliProvider) Chat(
 	if systemPrompt != "" {
 		args = append(args, "--system-prompt", systemPrompt)
 	}
-	if model != "" && model != "claude-code" {
+	if model := resolveClaudeCLIModel(model, options); model != "" {
 		args = append(args, "--model", model)
 	}
 	args = append(args, "-") // read from stdin
@@ -73,7 +81,24 @@ func (p *ClaudeCliProvider) Chat(
 
 // GetDefaultModel returns the default model identifier.
 func (p *ClaudeCliProvider) GetDefaultModel() string {
-	return "claude-code"
+	return claudeCodeDefaultModel
+}
+
+// resolveClaudeCLIModel returns the concrete Claude Code model to pass to the
+// CLI. Explicit caller-supplied models still win; otherwise the claude-code
+// sentinel routes general tasks to Opus 4.7 and already-planned code-change
+// execution to Sonnet 4.7.
+func resolveClaudeCLIModel(model string, options map[string]any) string {
+	trimmed := strings.TrimSpace(model)
+	if trimmed != "" && trimmed != claudeCodeDefaultModel {
+		return trimmed
+	}
+
+	if taskKind, ok := options[claudeCodeTaskKindOption].(string); ok && taskKind == claudeCodePlannedCodeChangeTask {
+		return claudeCodePlannedCodeChangeModel
+	}
+
+	return claudeCodeGeneralTaskModel
 }
 
 // messagesToPrompt converts messages to a CLI-compatible prompt string.

@@ -125,6 +125,57 @@ func TestClaudeCliProvider_GetDefaultModel(t *testing.T) {
 
 // --- Chat() tests ---
 
+func TestResolveClaudeCLIModel(t *testing.T) {
+	tests := []struct {
+		name    string
+		model   string
+		options map[string]any
+		want    string
+	}{
+		{
+			name:  "empty model defaults to Opus for general tasks",
+			model: "",
+			want:  claudeCodeGeneralTaskModel,
+		},
+		{
+			name:  "claude-code sentinel defaults to Opus for general tasks",
+			model: claudeCodeDefaultModel,
+			want:  claudeCodeGeneralTaskModel,
+		},
+		{
+			name:    "planned code change routes to Sonnet",
+			model:   claudeCodeDefaultModel,
+			options: map[string]any{claudeCodeTaskKindOption: claudeCodePlannedCodeChangeTask},
+			want:    claudeCodePlannedCodeChangeModel,
+		},
+		{
+			name:    "unknown task kind falls back to Opus",
+			model:   claudeCodeDefaultModel,
+			options: map[string]any{claudeCodeTaskKindOption: "general"},
+			want:    claudeCodeGeneralTaskModel,
+		},
+		{
+			name:    "explicit model overrides task routing",
+			model:   "claude-haiku-4-5",
+			options: map[string]any{claudeCodeTaskKindOption: claudeCodePlannedCodeChangeTask},
+			want:    "claude-haiku-4-5",
+		},
+		{
+			name:  "explicit model is trimmed",
+			model: "  claude-sonnet-4-6  ",
+			want:  "claude-sonnet-4-6",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveClaudeCLIModel(tt.model, tt.options); got != tt.want {
+				t.Fatalf("resolveClaudeCLIModel() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestChat_Success(t *testing.T) {
 	mockJSON := `{"type":"result","subtype":"success","is_error":false,"result":"Hello from mock!","session_id":"sess_123","total_cost_usd":0.005,"duration_ms":200,"duration_api_ms":150,"num_turns":1,"usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":100,"cache_read_input_tokens":0}}`
 	script := createMockCLI(t, mockJSON, "", 0)
@@ -347,7 +398,7 @@ func TestChat_PassesModelFlag(t *testing.T) {
 	}
 }
 
-func TestChat_SkipsModelFlagForClaudeCode(t *testing.T) {
+func TestChat_DefaultsToOpusForClaudeCode(t *testing.T) {
 	argsFile := filepath.Join(t.TempDir(), "args.txt")
 	script := createArgCaptureCLI(t, argsFile)
 
@@ -363,12 +414,15 @@ func TestChat_SkipsModelFlagForClaudeCode(t *testing.T) {
 
 	argsBytes, _ := os.ReadFile(argsFile)
 	args := string(argsBytes)
-	if strings.Contains(args, "--model") {
-		t.Errorf("CLI args should NOT contain --model for claude-code, got: %s", args)
+	if !strings.Contains(args, "--model") {
+		t.Errorf("CLI args missing --model, got: %s", args)
+	}
+	if !strings.Contains(args, claudeCodeGeneralTaskModel) {
+		t.Errorf("CLI args missing general task model, got: %s", args)
 	}
 }
 
-func TestChat_SkipsModelFlagForEmptyModel(t *testing.T) {
+func TestChat_DefaultsToOpusForEmptyModel(t *testing.T) {
 	argsFile := filepath.Join(t.TempDir(), "args.txt")
 	script := createArgCaptureCLI(t, argsFile)
 
@@ -384,8 +438,35 @@ func TestChat_SkipsModelFlagForEmptyModel(t *testing.T) {
 
 	argsBytes, _ := os.ReadFile(argsFile)
 	args := string(argsBytes)
-	if strings.Contains(args, "--model") {
-		t.Errorf("CLI args should NOT contain --model for empty model, got: %s", args)
+	if !strings.Contains(args, "--model") {
+		t.Errorf("CLI args missing --model, got: %s", args)
+	}
+	if !strings.Contains(args, claudeCodeGeneralTaskModel) {
+		t.Errorf("CLI args missing general task model, got: %s", args)
+	}
+}
+
+func TestChat_RoutesPlannedCodeChangeToSonnet(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "args.txt")
+	script := createArgCaptureCLI(t, argsFile)
+
+	p := NewClaudeCliProvider(t.TempDir())
+	p.command = script
+
+	_, err := p.Chat(context.Background(), []Message{
+		{Role: "user", Content: "Implement the planned change."},
+	}, nil, "", map[string]any{claudeCodeTaskKindOption: claudeCodePlannedCodeChangeTask})
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+
+	argsBytes, _ := os.ReadFile(argsFile)
+	args := string(argsBytes)
+	if !strings.Contains(args, "--model") {
+		t.Errorf("CLI args missing --model, got: %s", args)
+	}
+	if !strings.Contains(args, claudeCodePlannedCodeChangeModel) {
+		t.Errorf("CLI args missing planned code change model, got: %s", args)
 	}
 }
 
