@@ -54,6 +54,10 @@ func NewAgentLoop(
 	if workerPoolSize <= 0 {
 		workerPoolSize = 1
 	}
+	logger.InfoCF("agent", "Agent worker pool configured", map[string]any{
+		"max_parallel_turns": cfg.Agents.Defaults.MaxParallelTurns,
+		"worker_pool_size":   workerPoolSize,
+	})
 
 	al := &AgentLoop{
 		bus:               msgBus,
