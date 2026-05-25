@@ -183,6 +183,22 @@ func (p *Pipeline) CallLLM(
 		return exec.activeProvider.Chat(providerCtx, messagesForCall, toolDefsForCall, exec.llmModel, exec.llmOpts)
 	}
 
+	callLLMWithTiming := func(messagesForCall []providers.Message, toolDefsForCall []providers.ToolDefinition) (*providers.LLMResponse, error) {
+		start := time.Now()
+		resp, callErr := callLLM(messagesForCall, toolDefsForCall)
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			logger.WarnCF("agent", "LLM call completed slowly", map[string]any{
+				"agent_id":    ts.agent.ID,
+				"session_key": ts.sessionKey,
+				"iteration":   iteration,
+				"model":       exec.llmModel,
+				"duration_ms": elapsed.Milliseconds(),
+				"error":       callErr != nil,
+			})
+		}
+		return resp, callErr
+	}
+
 	// Retry loop
 	var err error
 	maxRetries := p.Cfg.Agents.Defaults.MaxLLMRetries
@@ -194,7 +210,7 @@ func (p *Pipeline) CallLLM(
 		backoffSecs = 2
 	}
 	for retry := 0; retry <= maxRetries; retry++ {
-		exec.response, err = callLLM(exec.callMessages, exec.providerToolDefs)
+		exec.response, err = callLLMWithTiming(exec.callMessages, exec.providerToolDefs)
 		if err == nil {
 			break
 		}

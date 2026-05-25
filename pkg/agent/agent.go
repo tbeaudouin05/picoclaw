@@ -206,9 +206,20 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 			// draining the inbound channel. The goroutine blocks on the semaphore.
 			go func(m bus.InboundMessage) {
 				// Acquire semaphore slot (blocks if at capacity)
+				workerWaitStart := time.Now()
 				select {
 				case al.workerSem <- struct{}{}:
 					// Got slot, start worker
+					if wait := time.Since(workerWaitStart); wait > 500*time.Millisecond {
+						logger.WarnCF("agent", "Worker semaphore acquisition was slow", map[string]any{
+							"session_key":     sessionKey,
+							"channel":         m.Channel,
+							"chat_id":         m.ChatID,
+							"wait_ms":         wait.Milliseconds(),
+							"worker_capacity": cap(al.workerSem),
+							"worker_in_use":   len(al.workerSem),
+						})
+					}
 				case <-ctx.Done():
 					// Context canceled while waiting for a slot — clean up the
 					// placeholder to prevent session-level deadlock.
