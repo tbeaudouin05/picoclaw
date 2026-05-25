@@ -40,6 +40,7 @@ func TestJSONUnmarshalPrivateFields(t *testing.T) {
 }
 
 func TestSecurityConfigIntegration(t *testing.T) {
+	isolateCredentialEnvForTest(t)
 	t.Run("Full workflow with security references", func(t *testing.T) {
 		tmpDir := t.TempDir()
 
@@ -171,6 +172,7 @@ func TestSecurityConfigWithAPIKeysArray(t *testing.T) {
 }
 
 func TestAllSecurityKeysAccessible(t *testing.T) {
+	isolateCredentialEnvForTest(t)
 	t.Run("All security keys accessible via Key() methods including file://", func(t *testing.T) {
 		tmpDir := t.TempDir()
 
