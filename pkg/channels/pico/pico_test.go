@@ -725,6 +725,40 @@ func TestBroadcastToSession_TargetsOnlyRequestedSession(t *testing.T) {
 	}
 }
 
+func TestBroadcastToSession_NoActiveConnectionsIsSendFailed(t *testing.T) {
+	ch := newTestPicoChannel(t)
+
+	err := ch.broadcastToSession("pico:missing-session", newMessage(TypeMessageCreate, map[string]any{
+		PayloadKeyContent: "hello",
+		"message_id":      "msg-1",
+	}))
+	if err == nil {
+		t.Fatal("expected send failure")
+	}
+	if !errors.Is(err, channels.ErrSendFailed) {
+		t.Fatalf("expected ErrSendFailed, got %v", err)
+	}
+}
+
+func TestBroadcastToSession_AllWriteFailuresAreSendFailed(t *testing.T) {
+	ch := newTestPicoChannel(t)
+
+	target := &picoConn{id: "closed-target", sessionID: "s-target"}
+	target.closed.Store(true)
+	ch.addConnForTest(target)
+
+	err := ch.broadcastToSession("pico:s-target", newMessage(TypeMessageCreate, map[string]any{
+		PayloadKeyContent: "hello",
+		"message_id":      "msg-1",
+	}))
+	if err == nil {
+		t.Fatal("expected send failure")
+	}
+	if !errors.Is(err, channels.ErrSendFailed) {
+		t.Fatalf("expected ErrSendFailed, got %v", err)
+	}
+}
+
 func TestSendMedia_ResolvesMediaBeforeDelivery(t *testing.T) {
 	ch := newTestPicoChannel(t)
 	store := media.NewFileMediaStore()
