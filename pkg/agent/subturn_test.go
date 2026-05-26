@@ -68,6 +68,125 @@ func (c *eventCollector) hasEventOfKind(kind runtimeevents.Kind) bool {
 	return false
 }
 
+func TestApplySubTurnModelConfigOverridesCopiedAgentModel(t *testing.T) {
+	al, cfg, _, _, cleanup := newTestAgentLoop(t)
+	defer cleanup()
+	cfg.ModelList = []*config.ModelConfig{{
+		ModelName:     "target-codex",
+		Model:         "openai/gpt-5.3-codex-spark",
+		APIKeys:       config.SimpleSecureStrings("test-key"),
+		Fallbacks:     []string{"target-fallback"},
+		ThinkingLevel: "high",
+	}, {
+		ModelName: "target-fallback",
+		Model:     "openai/gpt-5.4-mini",
+		APIKeys:   config.SimpleSecureStrings("fallback-key"),
+	}}
+
+	base := al.registry.GetDefaultAgent()
+	if base == nil {
+		t.Fatal("expected default agent")
+	}
+	child := *base
+
+	applySubTurnModelConfig(al, &child, "target-codex")
+
+	if child.Model != "target-codex" {
+		t.Fatalf("child.Model = %q, want targeted model", child.Model)
+	}
+	if base.Model == child.Model {
+		t.Fatalf("base agent model was not expected to match overridden child model")
+	}
+	if child.Candidates[0].Provider != "openai" || child.Candidates[0].Model != "gpt-5.3-codex-spark" {
+		t.Fatalf("candidate = %#v, want openai/gpt-5.3-codex-spark", child.Candidates[0])
+	}
+	if len(child.Candidates) != 2 || child.Candidates[1].Model != "gpt-5.4-mini" {
+		t.Fatalf("fallback candidate chain = %#v, want target plus configured fallback", child.Candidates)
+	}
+	if child.Provider == base.Provider {
+		t.Fatalf("child provider should use the target model config, not inherit the parent provider")
+	}
+	if child.ThinkingLevel != ThinkingHigh {
+		t.Fatalf("child.ThinkingLevel = %q, want %q", child.ThinkingLevel, ThinkingHigh)
+	}
+	fallbackKey := providers.ModelKey("openai", "gpt-5.4-mini")
+	if child.CandidateProviders[fallbackKey] == nil {
+		t.Fatalf("expected configured fallback provider %q to be populated", fallbackKey)
+	}
+	if child.Router != nil || len(child.LightCandidates) != 0 || child.LightProvider != nil {
+		t.Fatalf("targeted subturn should disable inherited model routing")
+	}
+}
+
+type subTurnTargetCaptureProvider struct {
+	mu     sync.Mutex
+	models []string
+}
+
+func (p *subTurnTargetCaptureProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	p.mu.Lock()
+	p.models = append(p.models, model)
+	p.mu.Unlock()
+	return &providers.LLMResponse{Content: "target provider response"}, nil
+}
+
+func (p *subTurnTargetCaptureProvider) GetDefaultModel() string { return "capture-default" }
+
+func (p *subTurnTargetCaptureProvider) capturedModels() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.models...)
+}
+
+func TestSpawnSubTurnUsesConfiguredTargetModelProviderForLLMCall(t *testing.T) {
+	al, cfg, _, _, cleanup := newTestAgentLoop(t)
+	defer cleanup()
+	capture := &subTurnTargetCaptureProvider{}
+	cfg.ModelList = []*config.ModelConfig{{
+		ModelName: "target-codex",
+		Model:     "openai/gpt-5.3-codex-spark",
+		APIKeys:   config.SimpleSecureStrings("test-key"),
+	}}
+	al.providerFactory = func(mc *config.ModelConfig) (providers.LLMProvider, string, error) {
+		if mc == nil || mc.ModelName != "target-codex" {
+			t.Fatalf("providerFactory called with %#v, want target-codex", mc)
+		}
+		return capture, "gpt-5.3-codex-spark", nil
+	}
+
+	parent := &turnState{
+		ctx:            context.Background(),
+		turnID:         "parent-target-model",
+		pendingResults: make(chan *tools.ToolResult, 10),
+		session:        &ephemeralSessionStore{},
+		agent:          al.registry.GetDefaultAgent(),
+	}
+
+	result, err := spawnSubTurn(context.Background(), al, parent, SubTurnConfig{
+		Model:        "target-codex",
+		SystemPrompt: "use configured target model",
+	})
+	if err != nil {
+		t.Fatalf("spawnSubTurn failed: %v", err)
+	}
+	if result == nil || result.ForLLM == "" {
+		t.Fatalf("expected subturn result, got %#v", result)
+	}
+	models := capture.capturedModels()
+	if len(models) != 1 {
+		t.Fatalf("captured model calls = %#v, want exactly one", models)
+	}
+	if models[0] != "gpt-5.3-codex-spark" {
+		t.Fatalf("LLM call model = %q, want configured target model id", models[0])
+	}
+}
+
 // ====================== Main Test Function ======================
 func TestSpawnSubTurn(t *testing.T) {
 	tests := []struct {
@@ -2236,6 +2355,78 @@ func TestSpawnSubTurn_TargetAgentID_UsesTargetAgent(t *testing.T) {
 	// used beta's model, not alpha's.
 	if got := rp.getLastModel(); got != "model-beta" {
 		t.Errorf("child turn used model %q, want %q", got, "model-beta")
+	}
+}
+
+func TestSpawnSubTurn_TargetAgentID_EmitsTargetAgentInRuntimeEvents(t *testing.T) {
+	al, cleanup := newMultiAgentLoop(t, &modelRecordingProvider{})
+	defer cleanup()
+
+	runtimeCh, closeRuntimeEvents := subscribeRuntimeEventsForTest(
+		t,
+		al,
+		8,
+		runtimeevents.KindAgentSubTurnSpawn,
+		runtimeevents.KindAgentSubTurnEnd,
+	)
+	defer closeRuntimeEvents()
+
+	alphaAgent, ok := al.registry.GetAgent("alpha")
+	if !ok {
+		t.Fatal("alpha agent not in registry")
+	}
+
+	parent := &turnState{
+		ctx:            context.Background(),
+		turnID:         "parent-alpha",
+		depth:          0,
+		childTurnIDs:   []string{},
+		pendingResults: make(chan *tools.ToolResult, 4),
+		concurrencySem: make(chan struct{}, testMaxConcurrentSubTurns),
+		session:        &ephemeralSessionStore{},
+		agent:          alphaAgent,
+	}
+
+	result, err := spawnSubTurn(context.Background(), al, parent, SubTurnConfig{
+		TargetAgentID: "beta",
+		SystemPrompt:  "task for beta",
+	})
+	if err != nil {
+		t.Fatalf("spawnSubTurn failed: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+
+	spawnEvt := waitForRuntimeEvent(t, runtimeCh, time.Second, func(evt runtimeevents.Event) bool {
+		return evt.Kind == runtimeevents.KindAgentSubTurnSpawn
+	})
+	if spawnEvt.Scope.AgentID != "beta" {
+		t.Fatalf("spawn event scope agent_id = %q, want beta", spawnEvt.Scope.AgentID)
+	}
+	if spawnEvt.Source.Name != "beta" {
+		t.Fatalf("spawn event source name = %q, want beta", spawnEvt.Source.Name)
+	}
+	spawnPayload, ok := spawnEvt.Payload.(SubTurnSpawnPayload)
+	if !ok {
+		t.Fatalf("spawn event payload type = %T, want SubTurnSpawnPayload", spawnEvt.Payload)
+	}
+	if spawnPayload.AgentID != "beta" {
+		t.Fatalf("spawn payload agent id = %q, want beta", spawnPayload.AgentID)
+	}
+
+	endEvt := waitForRuntimeEvent(t, runtimeCh, time.Second, func(evt runtimeevents.Event) bool {
+		return evt.Kind == runtimeevents.KindAgentSubTurnEnd
+	})
+	if endEvt.Scope.AgentID != "beta" {
+		t.Fatalf("end event scope agent_id = %q, want beta", endEvt.Scope.AgentID)
+	}
+	endPayload, ok := endEvt.Payload.(SubTurnEndPayload)
+	if !ok {
+		t.Fatalf("end event payload type = %T, want SubTurnEndPayload", endEvt.Payload)
+	}
+	if endPayload.AgentID != "beta" {
+		t.Fatalf("end payload agent id = %q, want beta", endPayload.AgentID)
 	}
 }
 

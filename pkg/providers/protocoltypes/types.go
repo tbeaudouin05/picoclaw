@@ -90,6 +90,7 @@ type Message struct {
 	Content          string         `json:"content"`
 	ModelName        string         `json:"model_name,omitempty"`
 	CreatedAt        *time.Time     `json:"created_at,omitempty"`
+	Timestamp        int64          `json:"timestamp,omitempty"`
 	Media            []string       `json:"media,omitempty"`
 	Attachments      []Attachment   `json:"attachments,omitempty"`
 	ReasoningContent string         `json:"reasoning_content,omitempty"`

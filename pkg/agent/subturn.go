@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -178,6 +179,46 @@ type SubTurnConfig struct {
 	// The target agent's workspace, model, tools, and system prompt are used
 	// instead of the caller's. If empty, the sub-turn runs as the parent agent.
 	TargetAgentID string
+}
+
+func applySubTurnModelConfig(al *AgentLoop, agent *AgentInstance, model string) {
+	if agent == nil {
+		return
+	}
+	model = strings.TrimSpace(model)
+	if model == "" || model == agent.Model {
+		return
+	}
+
+	fallbacks := []string(nil)
+	modelCfg, err := resolvedModelConfig(al.cfg, model, agent.Workspace)
+	if err == nil {
+		factory := providers.CreateProviderFromConfig
+		if al != nil && al.providerFactory != nil {
+			factory = al.providerFactory
+		}
+		provider, _, providerErr := factory(modelCfg)
+		if providerErr != nil {
+			logger.WarnCF("subturn", "target model provider init failed; inheriting parent provider",
+				map[string]any{"model": model, "error": providerErr.Error()})
+		} else {
+			agent.Provider = provider
+		}
+		fallbacks = modelCfg.Fallbacks
+		agent.ThinkingLevel = parseThinkingLevel(modelCfg.ThinkingLevel)
+	} else {
+		logger.WarnCF("subturn", "target model config not found; inheriting parent provider",
+			map[string]any{"model": model, "error": err.Error()})
+	}
+
+	agent.Model = model
+	agent.Fallbacks = fallbacks
+	agent.Candidates = resolveModelCandidates(al.cfg, al.cfg.Agents.Defaults.Provider, model, fallbacks)
+	agent.LightCandidates = nil
+	agent.LightProvider = nil
+	agent.Router = nil
+	agent.CandidateProviders = make(map[string]providers.LLMProvider)
+	populateCandidateProvidersFromNames(al.cfg, agent.Workspace, fallbacks, agent.CandidateProviders)
 }
 
 // ====================== Context Keys ======================
@@ -360,6 +401,7 @@ func spawnSubTurn(
 	}
 	ephemeralStore := newEphemeralSession(nil)
 	agent := *baseAgent // shallow copy
+	applySubTurnModelConfig(al, &agent, cfg.Model)
 	agent.Sessions = ephemeralStore
 	// Clone the tool registry so child turn's tool registrations
 	// don't pollute the parent's registry.

@@ -61,6 +61,10 @@ func NewAgentLoop(
 	if workerPoolSize <= 0 {
 		workerPoolSize = 1
 	}
+	logger.InfoCF("agent", "Agent worker pool configured", map[string]any{
+		"max_parallel_turns": cfg.Agents.Defaults.MaxParallelTurns,
+		"worker_pool_size":   workerPoolSize,
+	})
 
 	al := &AgentLoop{
 		bus:               msgBus,
@@ -315,9 +319,10 @@ func registerSharedTools(
 
 				// 5. Build SubTurnConfig
 				cfg := SubTurnConfig{
-					Model:        modelToUse,
-					Tools:        tlSlice,
-					SystemPrompt: systemPrompt,
+					Model:         modelToUse,
+					Tools:         tlSlice,
+					SystemPrompt:  systemPrompt,
+					TargetAgentID: targetAgentID,
 				}
 				if hasMaxTokens {
 					cfg.MaxTokens = maxTokens
@@ -339,12 +344,33 @@ func registerSharedTools(
 				spawnTool.SetAllowlistChecker(func(targetAgentID string) bool {
 					return registry.CanSpawnSubagent(currentAgentID, targetAgentID)
 				})
+				spawnTool.SetTargetModelResolver(func(targetAgentID string) string {
+					if targetAgentID == "" {
+						return agent.Model
+					}
+					if targetAgent, ok := al.GetRegistry().GetAgent(targetAgentID); ok {
+						return targetAgent.Model
+					}
+					return agent.Model
+				})
 
 				agent.Tools.Register(spawnTool)
 
 				// Also register the synchronous subagent tool
 				subagentTool := tools.NewSubagentTool(subagentManager)
 				subagentTool.SetSpawner(NewSubTurnSpawner(al))
+				subagentTool.SetAllowlistChecker(func(targetAgentID string) bool {
+					return registry.CanSpawnSubagent(currentAgentID, targetAgentID)
+				})
+				subagentTool.SetTargetModelResolver(func(targetAgentID string) string {
+					if targetAgentID == "" {
+						return agent.Model
+					}
+					if targetAgent, ok := al.GetRegistry().GetAgent(targetAgentID); ok {
+						return targetAgent.Model
+					}
+					return agent.Model
+				})
 				agent.Tools.Register(subagentTool)
 			}
 			if spawnStatusEnabled {
