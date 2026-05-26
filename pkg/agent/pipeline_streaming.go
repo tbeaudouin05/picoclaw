@@ -56,6 +56,7 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 		modelName: exec.llmModelName,
 	}
 
+	streamStart := time.Now()
 	logger.DebugCF("agent", "configured streaming enabled", map[string]any{
 		"agent_id": ts.agent.ID,
 		"channel":  ts.channel,
@@ -106,7 +107,7 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 			},
 		)
 	}
-	logConfiguredStreamingSummary(ts, exec, chunkCount, firstChunkAt, lastChunkAt, streamErr)
+	logConfiguredStreamingSummary(ts, exec, streamStart, chunkCount, firstChunkAt, lastChunkAt, streamErr)
 	if streamErr == nil {
 		if updateErr := publisher.Err(); updateErr != nil {
 			logFields := map[string]any{
@@ -168,6 +169,7 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 func logConfiguredStreamingSummary(
 	ts *turnState,
 	exec *turnExecution,
+	streamStart time.Time,
 	chunkCount int,
 	firstChunkAt time.Time,
 	lastChunkAt time.Time,
@@ -176,12 +178,18 @@ func logConfiguredStreamingSummary(
 	fields := map[string]any{
 		"chunks": chunkCount,
 	}
+	if !streamStart.IsZero() {
+		fields["duration_ms"] = time.Since(streamStart).Milliseconds()
+	}
 	if ts != nil {
 		fields["agent_id"] = ts.agent.ID
 		fields["channel"] = ts.channel
 	}
 	if exec != nil {
 		fields["model"] = exec.llmModel
+	}
+	if !firstChunkAt.IsZero() {
+		fields["first_chunk_ms"] = firstChunkAt.Sub(streamStart).Milliseconds()
 	}
 	if !firstChunkAt.IsZero() && !lastChunkAt.IsZero() {
 		fields["chunk_span_ms"] = lastChunkAt.Sub(firstChunkAt).Milliseconds()

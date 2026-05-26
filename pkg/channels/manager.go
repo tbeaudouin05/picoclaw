@@ -1483,7 +1483,7 @@ func splitOutboundMessageContent(msg bus.OutboundMessage, maxLen int) []string {
 // sendWithRetry sends a message through the channel with rate limiting and
 // retry logic. It classifies errors to determine the retry strategy:
 //   - ErrNotRunning / ErrSendFailed: permanent, no retry
-//   - ErrRateLimit: fixed delay retry
+//   - ErrRateLimit: platform retry-after delay when available, otherwise fixed delay
 //   - ErrTemporary / unknown: exponential backoff retry
 func (m *Manager) sendWithRetry(
 	ctx context.Context,
@@ -1562,10 +1562,21 @@ func (m *Manager) sendWithRetry(
 
 		retries++
 
-		// Rate limit error — fixed delay
+		// Rate limit error — prefer the platform-provided retry-after delay.
 		if errors.Is(lastErr, ErrRateLimit) {
+			delay := rateLimitDelay
+			if after, ok := retryAfter(lastErr); ok {
+				delay = after
+			}
+			logger.WarnCF("channels", "Channel send rate limited", map[string]any{
+				"channel":        name,
+				"chat_id":        outboundMessageChatID(msg),
+				"retry_after_ms": delay.Milliseconds(),
+				"attempt":        attempt + 1,
+				"error":          lastErr.Error(),
+			})
 			select {
-			case <-time.After(rateLimitDelay):
+			case <-time.After(delay):
 				continue
 			case <-ctx.Done():
 				return nil, false
@@ -1582,12 +1593,17 @@ func (m *Manager) sendWithRetry(
 	}
 
 	// All retries exhausted or permanent failure
-	logger.ErrorCF("channels", "Send failed", map[string]any{
-		"channel":     name,
-		"chat_id":     outboundMessageChatID(msg),
-		"error":       lastErr.Error(),
-		"retries":     retries,
-		"duration_ms": time.Since(sendStart).Milliseconds(),
+	failureMsg := "Send failed"
+	if errors.Is(lastErr, ErrRateLimit) {
+		failureMsg = "Channel send failed after platform rate limit"
+	}
+	logger.ErrorCF("channels", failureMsg, map[string]any{
+		"channel":            name,
+		"chat_id":            outboundMessageChatID(msg),
+		"error":              lastErr.Error(),
+		"retries":            retries,
+		"duration_ms":        time.Since(sendStart).Milliseconds(),
+		"channel_rate_limit": errors.Is(lastErr, ErrRateLimit),
 	})
 	m.publishOutboundFailed(name, msg, lastErr, false)
 
