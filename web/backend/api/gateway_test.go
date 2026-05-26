@@ -102,6 +102,9 @@ func resetGatewayTestState(t *testing.T) {
 	originalRestartForceKillWindow := gatewayRestartForceKillWindow
 	originalRestartPollInterval := gatewayRestartPollInterval
 	t.Setenv("PICOCLAW_HOME", t.TempDir())
+	t.Setenv("PICOCLAW_CHANNELS_TELEGRAM_TOKEN", "")
+	t.Setenv("PICOCLAW_CHANNELS_SLACK_BOT_TOKEN", "")
+	t.Setenv("PICOCLAW_CHANNELS_SLACK_APP_TOKEN", "")
 	t.Cleanup(func() {
 		gatewayHealthGet = originalHealthGet
 		gatewayProcessMatcher = originalProcessMatcher
@@ -1364,7 +1367,7 @@ func TestGatewayStatusNoRestartRequiredForNonSensitiveChanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadConfig() error = %v", err)
 	}
-	updatedCfg.Agents.Defaults.MaxTokens = 2000
+	updatedCfg.Agents.Defaults.Workspace = filepath.Join(t.TempDir(), "workspace")
 	if err := config.SaveConfig(configPath, updatedCfg); err != nil {
 		t.Fatalf("SaveConfig() error = %v", err)
 	}
