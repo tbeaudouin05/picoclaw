@@ -953,13 +953,6 @@ func TestRuntime_RunColdPathOnce_DraftSaveFailureRollsBackAppliedSkill(t *testin
 		t.Fatalf("AppendLearningRecords: %v", err)
 	}
 
-	if err := os.Chmod(paths.RootDir, 0o555); err != nil {
-		t.Fatalf("Chmod(root read-only): %v", err)
-	}
-	t.Cleanup(func() {
-		_ = os.Chmod(paths.RootDir, 0o755)
-	})
-
 	rt, err := evolution.NewRuntime(evolution.RuntimeOptions{
 		Config: config.EvolutionConfig{Enabled: true, Mode: "apply"},
 		Now:    func() time.Time { return time.Unix(1700001000, 0).UTC() },
@@ -977,6 +970,9 @@ func TestRuntime_RunColdPathOnce_DraftSaveFailureRollsBackAppliedSkill(t *testin
 				ChangeKind:      evolution.ChangeKindCreate,
 				HumanSummary:    "weather helper",
 				BodyOrPatch:     "---\nname: weather\ndescription: weather helper\n---\n# Weather\n## Start Here\nUse native-name query first.\n",
+			},
+			beforeReturn: func() error {
+				return os.MkdirAll(paths.SkillDrafts, 0o755)
 			},
 		},
 		Organizer:      evolution.NewOrganizer(evolution.OrganizerOptions{MinCaseCount: 3, MinSuccessRate: 0.7}),

@@ -16,8 +16,9 @@ import (
 )
 
 type stubDraftGenerator struct {
-	draft evolution.SkillDraft
-	err   error
+	draft        evolution.SkillDraft
+	err          error
+	beforeReturn func() error
 }
 
 func (g stubDraftGenerator) GenerateDraft(
@@ -25,6 +26,11 @@ func (g stubDraftGenerator) GenerateDraft(
 	_ evolution.LearningRecord,
 	_ []skills.SkillInfo,
 ) (evolution.SkillDraft, error) {
+	if g.beforeReturn != nil {
+		if err := g.beforeReturn(); err != nil {
+			return evolution.SkillDraft{}, err
+		}
+	}
 	return g.draft, g.err
 }
 
