@@ -31,14 +31,19 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 	}
 	ts.captureRestorePoint(history, summary)
 
-	messages := ts.agent.ContextBuilder.BuildMessagesFromPrompt(
-		promptBuildRequestForTurn(ts, history, summary, ts.userMessage, ts.media),
-	)
+	contextualSkills := ts.activeSkills
+	if ts.agent.ContextBuilder != nil {
+		contextualSkills = ts.agent.ContextBuilder.ResolveActiveSkillsForContext(ts.activeSkills)
+	}
+	ts.recordSkillContextSnapshot(skillContextTriggerInitialBuild, contextualSkills)
+	initialPromptReq := promptBuildRequestForTurn(ts, history, summary, ts.userMessage, ts.media, cfg)
+	initialPromptReq.ActiveSkills = append([]string(nil), contextualSkills...)
+	messages := ts.agent.ContextBuilder.BuildMessagesFromPrompt(initialPromptReq)
 
 	messages = resolveMediaRefs(messages, p.MediaStore, maxMediaSize)
 
 	if !ts.opts.NoHistory {
-		toolDefs := ts.agent.Tools.ToProviderDefs()
+		toolDefs := filterToolsByTurnProfile(ts.agent.Tools.ToProviderDefs(), ts.profile)
 		if isOverContextBudget(ts.agent.ContextWindow, messages, toolDefs, ts.agent.MaxTokens) {
 			logger.WarnCF("agent", "Proactive compression: context budget exceeded before LLM call",
 				map[string]any{"session_key": ts.sessionKey})
@@ -61,10 +66,45 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 				history = resp.History
 				summary = resp.Summary
 			}
-			messages = ts.agent.ContextBuilder.BuildMessagesFromPrompt(
-				promptBuildRequestForTurn(ts, history, summary, ts.userMessage, ts.media),
+			originalHistoryCount := len(history)
+			var fit bool
+			history, messages, fit = trimHistoryToFitContextWindow(
+				history,
+				func(trimmedHistory []providers.Message) []providers.Message {
+					rebuildPromptReq := promptBuildRequestForTurn(
+						ts,
+						trimmedHistory,
+						summary,
+						ts.userMessage,
+						ts.media,
+						cfg,
+					)
+					rebuildPromptReq.ActiveSkills = append([]string(nil), contextualSkills...)
+					rebuilt := ts.agent.ContextBuilder.BuildMessagesFromPrompt(rebuildPromptReq)
+					return resolveMediaRefs(rebuilt, p.MediaStore, maxMediaSize)
+				},
+				ts.agent.ContextWindow,
+				toolDefs,
+				ts.agent.MaxTokens,
 			)
-			messages = resolveMediaRefs(messages, p.MediaStore, maxMediaSize)
+			if dropped := originalHistoryCount - len(history); dropped > 0 {
+				logger.WarnCF("agent", "Trimmed rebuilt history after proactive compaction", map[string]any{
+					"session_key":     ts.sessionKey,
+					"dropped_msgs":    dropped,
+					"remaining_msgs":  len(history),
+					"context_window":  ts.agent.ContextWindow,
+					"max_tokens":      ts.agent.MaxTokens,
+					"still_overlimit": !fit,
+				})
+			} else if !fit {
+				logger.WarnCF("agent", "Context still exceeds budget "+
+					"after proactive compaction rebuild", map[string]any{
+					"session_key":    ts.sessionKey,
+					"history_msgs":   len(history),
+					"context_window": ts.agent.ContextWindow,
+					"max_tokens":     ts.agent.MaxTokens,
+				})
+			}
 		}
 	}
 
@@ -84,6 +124,11 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 	if usedLight && ts.agent.LightProvider != nil {
 		activeProvider = ts.agent.LightProvider
 	}
+	activeModelName := strings.TrimSpace(ts.agent.Model)
+	if usedLight {
+		activeModelName = strings.TrimSpace(sideQuestionModelName(ts.agent, true))
+	}
+	activeModelName = resolvedCandidateModelName(activeCandidates, activeModelName)
 
 	exec := newTurnExecution(
 		ts.agent,
@@ -94,6 +139,14 @@ func (p *Pipeline) SetupTurn(ctx context.Context, ts *turnState) (*turnExecution
 	)
 	exec.activeCandidates = activeCandidates
 	exec.activeModel = activeModel
+	exec.activeModelConfig = resolveActiveModelConfig(
+		p.Cfg,
+		ts.agent.Workspace,
+		activeCandidates,
+		activeModel,
+		p.Cfg.Agents.Defaults.Provider,
+	)
+	exec.llmModelName = activeModelName
 	exec.activeProvider = activeProvider
 	exec.usedLight = usedLight
 

@@ -30,6 +30,7 @@ import (
 	_ "github.com/sipeed/picoclaw/pkg/channels/pico"
 	_ "github.com/sipeed/picoclaw/pkg/channels/qq"
 	_ "github.com/sipeed/picoclaw/pkg/channels/slack"
+	_ "github.com/sipeed/picoclaw/pkg/channels/slack_webhook"
 	_ "github.com/sipeed/picoclaw/pkg/channels/teams_webhook"
 	_ "github.com/sipeed/picoclaw/pkg/channels/telegram"
 	_ "github.com/sipeed/picoclaw/pkg/channels/vk"
@@ -348,7 +349,11 @@ func createStartupProvider(
 		return &startupBlockedProvider{reason: reason}, "", nil
 	}
 
-	return providers.CreateProvider(cfg)
+	provider, modelID, err := providers.CreateProvider(cfg)
+	if err != nil {
+		return nil, "", err
+	}
+	return provider, modelID, nil
 }
 
 func setupAndStartServices(
@@ -645,6 +650,9 @@ func restartServices(
 	})
 	if fms, ok := runningServices.MediaStore.(*media.FileMediaStore); ok {
 		fms.Start()
+	}
+	if runningServices.ChannelManager != nil {
+		runningServices.ChannelManager.SetMediaStore(runningServices.MediaStore)
 	}
 	al.SetMediaStore(runningServices.MediaStore)
 

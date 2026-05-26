@@ -420,6 +420,7 @@ func spawnSubTurn(
 		Dispatch:                dispatch,
 		SenderID:                parentTS.opts.Dispatch.SenderID(),
 		SenderDisplayName:       parentTS.opts.SenderDisplayName,
+		TurnProfile:             parentTS.profile,
 		SystemPromptOverride:    cfg.ActualSystemPrompt,
 		InitialSteeringMessages: cfg.InitialMessages,
 		DefaultResponse:         "",
@@ -427,6 +428,9 @@ func spawnSubTurn(
 		SendResponse:            false,
 		NoHistory:               true, // SubTurns don't use session history
 		SkipInitialSteeringPoll: true,
+	}
+	if !opts.TurnProfile.Enabled {
+		opts.TurnProfile = parentTS.opts.TurnProfile
 	}
 
 	// Create event scope for the child turn

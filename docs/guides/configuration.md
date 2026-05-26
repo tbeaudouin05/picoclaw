@@ -69,6 +69,80 @@ PicoClaw stores data in your configured workspace (default: `~/.picoclaw/workspa
 
 > **Note:** Changes to `AGENT.md`, `SOUL.md`, `USER.md` and `memory/MEMORY.md` are automatically detected at runtime via file modification time (mtime) tracking. You do **not** need to restart the gateway after editing these files — the agent picks up the new content on the next request.
 
+### Agent Self-Evolution
+
+The `evolution` block controls PicoClaw's self-evolution runtime. When enabled, the agent records completed turns as learning records. In higher modes it can group repeated successful patterns, generate skill drafts, and optionally apply accepted drafts into workspace skills.
+
+```json
+{
+  "evolution": {
+    "enabled": false,
+    "mode": "observe",
+    "state_dir": "",
+    "min_task_count": 2,
+    "min_success_ratio": 0.7,
+    "cold_path_trigger": "after_turn",
+    "cold_path_times": []
+  }
+}
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | Enables learning-record capture for completed agent turns. Heartbeat turns are ignored. |
+| `mode` | `observe` | `observe` records data only. `draft` can generate candidate skill drafts. `apply` can apply accepted drafts to workspace skills. |
+| `state_dir` | `""` | Optional directory for evolution state. Leave empty to use the default under the workspace. |
+| `min_task_count` | `2` | Minimum related task records required before a pattern is eligible for draft generation. |
+| `min_success_ratio` | `0.7` | Minimum success ratio for a task cluster. Use a value greater than `0` and up to `1`. |
+| `cold_path_trigger` | `after_turn` | Runs draft generation `after_turn`, on a `scheduled` cadence, or disables automatic cold-path runs when set to `manual`. There is no user-facing manual trigger yet. Applies only in `draft` and `apply` modes. |
+| `cold_path_times` | `[]` | Scheduled run times used when `cold_path_trigger` is `scheduled`, written as `HH:MM` strings. |
+
+Use `observe` first if you want to inspect learning records without generating skill changes. Use `draft` when you want PicoClaw to prepare reviewable improvements. Use `apply` only when you are comfortable letting accepted drafts update workspace skills.
+
+### Request Context Policy
+
+`turn_profile` is an optional request context policy under `agents.defaults.turn_profile`. Leave it unset or set `"enabled": false` to keep PicoClaw's normal behavior. When `"enabled": true`, the same policy applies to every new turn.
+
+Each block uses the same `mode` values:
+
+| Mode | Meaning |
+| --- | --- |
+| `default` | Keep PicoClaw's normal behavior for that block. Missing blocks and missing `mode` fields are treated as `default`. |
+| `off` | Disable that block for the turn. |
+| `custom` | Use an allow list. In this version, `custom` is supported only for `skills` and `tools`; using it for `history` or `system_prompt` is a validation error. |
+
+Profile blocks:
+
+| Block | What it controls |
+| --- | --- |
+| `history` | Whether the turn reads prior session history and summary, writes user/assistant/tool messages, ingests context, and runs compaction or summarization. |
+| `system_prompt` | Whether PicoClaw injects its default identity, workspace instructions, memory, runtime context, and summary. External request system prompts are still allowed when this is `off`. |
+| `skills` | Whether the skill catalog and active skill prompt content are loaded. `custom.allow` keeps only the listed skill names in prompt context. |
+| `tools` | Which callable tools are exposed to the model and allowed at execution time. `custom.allow` keeps only listed registered tool names. |
+
+When `system_prompt.mode` is `off`, tools are still visible, and no external system prompt is supplied, PicoClaw uses its existing tool-use rule as the minimal fallback prompt. If `tools.mode` is `off`, no fallback prompt is added.
+
+Example clean web policy:
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "turn_profile": {
+        "enabled": true,
+        "history": { "mode": "off" },
+        "system_prompt": { "mode": "off" },
+        "skills": { "mode": "off" },
+        "tools": {
+          "mode": "custom",
+          "allow": ["web_search", "web_fetch"]
+        }
+      }
+    }
+  }
+}
+```
+
 ### Web launcher dashboard
 
 **picoclaw-launcher** serves a browser UI that requires password sign-in first. On first run, open `/launcher-setup` to create the dashboard password. Later manual sign-ins use `/launcher-login`.
@@ -713,6 +787,55 @@ Resolution rules:
 - If `provider` is set, PicoClaw sends `model` unchanged.
 - If `provider` is omitted, PicoClaw treats the first `/` segment in `model` as the provider and everything after that first `/` as the runtime model ID.
 - This means `"model": "openrouter/openai/gpt-5.4"` still works as a compatibility form and sends `openai/gpt-5.4` to OpenRouter.
+
+#### Streaming Configuration
+
+Provider streaming uses a double opt-in and is disabled by default. The agent only tries streaming when the current channel has `settings.streaming.enabled: true`, the active model entry has `streaming.enabled: true`, and both the provider and channel support streaming. If any condition is missing, PicoClaw uses the normal non-streaming request path.
+
+Pico WebUI is the first fully wired channel. Pico creates the first assistant message with the existing `message.create` wire message, then updates that same message with `message.update`; no new Pico wire message type is introduced.
+
+Leave `streaming` unset when you do not want streaming. An omitted `streaming` block means disabled; you do not need to write `"streaming": {"enabled": false}`.
+
+Opt-in example:
+
+```json
+{
+  "model_list": [
+    {
+      "model_name": "gpt-5.4",
+      "provider": "openai",
+      "model": "gpt-5.4",
+      "api_keys": ["sk-your-openai-key"],
+      "streaming": {
+        "enabled": true
+      }
+    }
+  ],
+  "channel_list": {
+    "pico": {
+      "enabled": true,
+      "type": "pico",
+      "settings": {
+        "token": "YOUR_PICO_TOKEN",
+        "streaming": {
+          "enabled": true
+        }
+      }
+    }
+  }
+}
+```
+
+| Field | Type | Default | Description |
+| ----- | ---- | ------- | ----------- |
+| `channel_list.<name>.settings.streaming.enabled` | bool | `false` | Allows this channel to display provider streaming output |
+| `channel_list.<name>.settings.streaming.throttle_seconds` | int | Pico default after enabling: `0` | Minimum interval for intermediate updates; final content is always flushed |
+| `channel_list.<name>.settings.streaming.min_growth_chars` | int | Pico default after enabling: `1` | Minimum character growth before sending an intermediate update; final content is always flushed |
+| `model_list[].streaming.enabled` | bool | `false` | Allows this model entry to try provider streaming requests |
+
+Legacy Telegram environment variables remain compatible: `PICOCLAW_CHANNELS_TELEGRAM_STREAMING_ENABLED`, `PICOCLAW_CHANNELS_TELEGRAM_STREAMING_THROTTLE_SECONDS`, and `PICOCLAW_CHANNELS_TELEGRAM_STREAMING_MIN_GROWTH_CHARS`. They only apply to Telegram settings and do not enable or modify Pico `settings.streaming`.
+
+Failure behavior is intentionally conservative: if streaming fails before any visible chunk is sent, PicoClaw retries once through the normal `Chat()` path. If a chunk has already been shown to the user, PicoClaw does not send a second non-streaming answer, because that would duplicate visible output.
 
 #### Vendor-Specific Examples
 

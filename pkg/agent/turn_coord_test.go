@@ -10,6 +10,8 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/routing"
+	"github.com/sipeed/picoclaw/pkg/session"
 )
 
 // =============================================================================
@@ -36,8 +38,43 @@ func (p *simpleConvProvider) GetDefaultModel() string {
 	return "simple-model"
 }
 
+type sequenceProvider struct {
+	responses []*providers.LLMResponse
+	errors    []error
+	callCount int
+	mu        sync.Mutex
+}
+
+func (p *sequenceProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	idx := p.callCount
+	p.callCount++
+
+	if idx < len(p.errors) && p.errors[idx] != nil {
+		return nil, p.errors[idx]
+	}
+	if idx < len(p.responses) && p.responses[idx] != nil {
+		return p.responses[idx], nil
+	}
+	return &providers.LLMResponse{Content: "ok", FinishReason: "stop"}, nil
+}
+
+func (p *sequenceProvider) GetDefaultModel() string {
+	return "sequence-model"
+}
+
 type nativeSearchCaptureProvider struct {
 	lastOpts map[string]any
+	messages []providers.Message
+	tools    []providers.ToolDefinition
 }
 
 func (p *nativeSearchCaptureProvider) Chat(
@@ -47,6 +84,8 @@ func (p *nativeSearchCaptureProvider) Chat(
 	model string,
 	opts map[string]any,
 ) (*providers.LLMResponse, error) {
+	p.messages = append([]providers.Message(nil), messages...)
+	p.tools = append([]providers.ToolDefinition(nil), tools...)
 	p.lastOpts = make(map[string]any, len(opts))
 	for k, v := range opts {
 		p.lastOpts[k] = v
@@ -198,6 +237,15 @@ func makeTestProcessOpts(sessionKey string) processOptions {
 	}
 }
 
+type saveFailingSessionStore struct {
+	session.SessionStore
+	err error
+}
+
+func (s *saveFailingSessionStore) Save(_ string) error {
+	return s.err
+}
+
 // =============================================================================
 // Pipeline Method Tests: SetupTurn
 // =============================================================================
@@ -258,6 +306,190 @@ func TestPipeline_CallLLM_SimpleResponse(t *testing.T) {
 	}
 	if exec.response.Content == "" {
 		t.Error("expected non-empty content")
+	}
+}
+
+func TestPipeline_SetupTurn_ModelNameDoesNotUseFallbackAliasBeforeFallback(t *testing.T) {
+	al, agent, cleanup := newTurnCoordTestLoop(t, &simpleConvProvider{})
+	defer cleanup()
+
+	agent.Model = "primary-model"
+	agent.Candidates = []providers.FallbackCandidate{
+		{Provider: "openai", Model: "gpt-5.4"},
+		{Provider: "anthropic", Model: "claude-sonnet", IdentityKey: "model_name:fallback-model"},
+	}
+
+	pipeline := NewPipeline(al)
+	ts := newTurnState(agent, makeTestProcessOpts("test-session"), turnEventScope{
+		turnID:  "turn-1",
+		context: newTurnContext(nil, nil, nil),
+	})
+
+	exec, err := pipeline.SetupTurn(context.Background(), ts)
+	if err != nil {
+		t.Fatalf("SetupTurn failed: %v", err)
+	}
+	if exec.llmModelName != "primary-model" {
+		t.Fatalf("exec.llmModelName = %q, want %q", exec.llmModelName, "primary-model")
+	}
+}
+
+func TestPipeline_CallLLM_UsesSuccessfulFallbackIdentityAlias(t *testing.T) {
+	provider := &sequenceProvider{
+		errors: []error{
+			errors.New("status: 429 - rate limit exceeded"),
+			nil,
+		},
+		responses: []*providers.LLMResponse{
+			nil,
+			{Content: "fallback answer", FinishReason: "stop"},
+		},
+	}
+	al, agent, cleanup := newTurnCoordTestLoop(t, provider)
+	defer cleanup()
+
+	agent.Model = "primary-model"
+	agent.Candidates = []providers.FallbackCandidate{
+		{Provider: "openai", Model: "gpt-5.4", IdentityKey: "model_name:primary"},
+		{Provider: "openai", Model: "gpt-5.4", IdentityKey: "model_name:secondary"},
+	}
+	al.fallback = providers.NewFallbackChain(providers.NewCooldownTracker(), nil)
+
+	pipeline := NewPipeline(al)
+	ts := newTurnState(agent, makeTestProcessOpts("test-session"), turnEventScope{
+		turnID:  "turn-1",
+		context: newTurnContext(nil, nil, nil),
+	})
+
+	exec, err := pipeline.SetupTurn(context.Background(), ts)
+	if err != nil {
+		t.Fatalf("SetupTurn failed: %v", err)
+	}
+
+	ctrl, err := pipeline.CallLLM(context.Background(), context.Background(), ts, exec, 1)
+	if err != nil {
+		t.Fatalf("CallLLM failed: %v", err)
+	}
+	if ctrl != ControlBreak {
+		t.Fatalf("expected ControlBreak, got %v", ctrl)
+	}
+	if exec.llmModelName != "secondary" {
+		t.Fatalf("exec.llmModelName = %q, want %q", exec.llmModelName, "secondary")
+	}
+}
+
+func TestPipeline_CallLLM_UsesSuccessfulFallbackDisplayNameWithoutAlias(t *testing.T) {
+	provider := &sequenceProvider{
+		errors: []error{
+			errors.New("status: 429 - rate limit exceeded"),
+			nil,
+		},
+		responses: []*providers.LLMResponse{
+			nil,
+			{Content: "fallback answer", FinishReason: "stop"},
+		},
+	}
+	al, agent, cleanup := newTurnCoordTestLoop(t, provider)
+	defer cleanup()
+
+	agent.Model = "primary-model"
+	agent.Candidates = []providers.FallbackCandidate{
+		{Provider: "openai", Model: "gpt-5.4", IdentityKey: "model_name:primary", DisplayName: "primary-model"},
+		{Provider: "anthropic", Model: "claude-sonnet", DisplayName: "anthropic/claude-sonnet"},
+	}
+	al.fallback = providers.NewFallbackChain(providers.NewCooldownTracker(), nil)
+
+	pipeline := NewPipeline(al)
+	ts := newTurnState(agent, makeTestProcessOpts("test-session"), turnEventScope{
+		turnID:  "turn-1",
+		context: newTurnContext(nil, nil, nil),
+	})
+
+	exec, err := pipeline.SetupTurn(context.Background(), ts)
+	if err != nil {
+		t.Fatalf("SetupTurn failed: %v", err)
+	}
+
+	ctrl, err := pipeline.CallLLM(context.Background(), context.Background(), ts, exec, 1)
+	if err != nil {
+		t.Fatalf("CallLLM failed: %v", err)
+	}
+	if ctrl != ControlBreak {
+		t.Fatalf("expected ControlBreak, got %v", ctrl)
+	}
+	if exec.llmModelName != "anthropic/claude-sonnet" {
+		t.Fatalf("exec.llmModelName = %q, want %q", exec.llmModelName, "anthropic/claude-sonnet")
+	}
+}
+
+func TestPipeline_SetupTurn_UsesLightCandidateDisplayName(t *testing.T) {
+	al, agent, cleanup := newTurnCoordTestLoop(t, &simpleConvProvider{})
+	defer cleanup()
+
+	agent.Model = "primary-model"
+	agent.Candidates = []providers.FallbackCandidate{
+		{Provider: "openai", Model: "gpt-5.4", IdentityKey: "model_name:primary", DisplayName: "primary-model"},
+	}
+	agent.LightCandidates = []providers.FallbackCandidate{
+		{Provider: "openai", Model: "gpt-5.4-mini", IdentityKey: "model_name:light-model", DisplayName: "light-model"},
+	}
+	agent.Router = routing.New(routing.RouterConfig{LightModel: "light-model", Threshold: 1})
+
+	pipeline := NewPipeline(al)
+	opts := makeTestProcessOpts("test-session")
+	opts.UserMessage = ""
+	ts := newTurnState(agent, opts, turnEventScope{
+		turnID:  "turn-1",
+		context: newTurnContext(nil, nil, nil),
+	})
+
+	exec, err := pipeline.SetupTurn(context.Background(), ts)
+	if err != nil {
+		t.Fatalf("SetupTurn failed: %v", err)
+	}
+	if !exec.usedLight {
+		t.Fatal("expected light routing to be used")
+	}
+	if exec.llmModelName != "light-model" {
+		t.Fatalf("exec.llmModelName = %q, want %q", exec.llmModelName, "light-model")
+	}
+}
+
+func TestRunTurn_FinalizeSaveErrorEmitsErrorTurnEnd(t *testing.T) {
+	al, agent, cleanup := newTurnCoordTestLoop(t, &simpleConvProvider{})
+	defer cleanup()
+
+	saveErr := errors.New("session save failed")
+	agent.Sessions = &saveFailingSessionStore{
+		SessionStore: session.NewSessionManager(""),
+		err:          saveErr,
+	}
+
+	sub := al.SubscribeEvents(8)
+	defer al.UnsubscribeEvents(sub.ID)
+
+	if _, err := al.ProcessDirect(context.Background(), "hello", "session-save-fail"); err == nil {
+		t.Fatal("expected ProcessDirect to fail")
+	}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case evt := <-sub.C:
+			if evt.Kind != EventKindTurnEnd {
+				continue
+			}
+			payload, ok := evt.Payload.(TurnEndPayload)
+			if !ok {
+				t.Fatalf("TurnEnd payload type = %T", evt.Payload)
+			}
+			if payload.Status != TurnEndStatusError {
+				t.Fatalf("TurnEnd status = %q, want %q", payload.Status, TurnEndStatusError)
+			}
+			return
+		case <-deadline:
+			t.Fatal("timed out waiting for turn_end event")
+		}
 	}
 }
 
@@ -778,5 +1010,32 @@ func TestTurnState_HardAbortRequested(t *testing.T) {
 
 	if !ts.hardAbortRequested() {
 		t.Error("expected hard abort to be requested")
+	}
+}
+
+func TestTurnState_SkillContextSnapshotsTrackLatestSuccessfulPath(t *testing.T) {
+	ts := &turnState{}
+
+	ts.recordSkillContextSnapshot(skillContextTriggerInitialBuild, []string{"skill-a"})
+	ts.recordSkillContextSnapshot(skillContextTriggerContextRetryRebuild, []string{"skill-b", "skill-c"})
+
+	if got := ts.attemptedSkillsSnapshot(); len(got) != 3 || got[0] != "skill-a" || got[1] != "skill-b" ||
+		got[2] != "skill-c" {
+		t.Fatalf("attemptedSkillsSnapshot = %v, want [skill-a skill-b skill-c]", got)
+	}
+
+	if got := ts.latestSkillContextSnapshot(); len(got) != 2 || got[0] != "skill-b" || got[1] != "skill-c" {
+		t.Fatalf("latestSkillContextSnapshot = %v, want [skill-b skill-c]", got)
+	}
+
+	snapshots := ts.skillContextSnapshotsSnapshot()
+	if len(snapshots) != 2 {
+		t.Fatalf("len(skillContextSnapshotsSnapshot()) = %d, want 2", len(snapshots))
+	}
+	if snapshots[0].Sequence != 1 || snapshots[0].Trigger != skillContextTriggerInitialBuild {
+		t.Fatalf("snapshots[0] = %+v, want sequence=1 trigger=%q", snapshots[0], skillContextTriggerInitialBuild)
+	}
+	if snapshots[1].Sequence != 2 || snapshots[1].Trigger != skillContextTriggerContextRetryRebuild {
+		t.Fatalf("snapshots[1] = %+v, want sequence=2 trigger=%q", snapshots[1], skillContextTriggerContextRetryRebuild)
 	}
 }

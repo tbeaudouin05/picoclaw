@@ -1,73 +1,18 @@
 import { useMemo, useState } from "react"
 
-const PROVIDER_ICON_SLUGS: Record<string, string> = {
-  openai: "openai",
-  elevenlabs: "elevenlabs",
-  anthropic: "anthropic",
-  azure: "microsoftazure",
-  gemini: "googlegemini",
-  deepseek: "deepseek",
-  "qwen-portal": "alibabacloud",
-  "qwen-intl": "alibabacloud",
-  groq: "groq",
-  openrouter: "openrouter",
-  nvidia: "nvidia",
-  cerebras: "cerebras",
-  volcengine: "bytedance",
-  "github-copilot": "githubcopilot",
-  ollama: "ollama",
-  mistral: "mistralai",
-  zhipu: "zhipu",
-}
-
-const PROVIDER_DOMAINS: Record<string, string> = {
-  openai: "openai.com",
-  elevenlabs: "elevenlabs.io",
-  anthropic: "anthropic.com",
-  azure: "azure.com",
-  gemini: "gemini.google.com",
-  deepseek: "deepseek.com",
-  "qwen-portal": "qwenlm.ai",
-  "qwen-intl": "alibabacloud.com",
-  moonshot: "moonshot.ai",
-  groq: "groq.com",
-  openrouter: "openrouter.ai",
-  nvidia: "nvidia.com",
-  cerebras: "cerebras.ai",
-  volcengine: "volcengine.com",
-  shengsuanyun: "shengsuanyun.com",
-  antigravity: "antigravity.google",
-  "github-copilot": "github.com",
-  ollama: "ollama.com",
-  lmstudio: "lmstudio.ai",
-  mistral: "mistral.ai",
-  avian: "avian.io",
-  vllm: "vllm.ai",
-  zhipu: "zhipuai.cn",
-  zai: "z.ai",
-  mimo: "xiaomi.com",
-  venice: "venice.ai",
-  vivgrid: "vivgrid.com",
-  minimax: "minimaxi.com",
-  longcat: "longcat.chat",
-  modelscope: "modelscope.cn",
-}
+import type { ProviderCatalogEntry } from "./provider-registry"
 
 interface ProviderIconProps {
-  providerKey: string
-  providerLabel: string
+  provider: Pick<ProviderCatalogEntry, "key" | "label" | "iconSlug" | "domain">
 }
 
-export function ProviderIcon({
-  providerKey,
-  providerLabel,
-}: ProviderIconProps) {
+export function ProviderIcon({ provider }: ProviderIconProps) {
   const [sourceIndex, setSourceIndex] = useState(0)
   const [loadFailed, setLoadFailed] = useState(false)
-  const initial = providerLabel.trim().charAt(0).toUpperCase() || "?"
+  const initial = provider.label.trim().charAt(0).toUpperCase() || "?"
   const iconUrls = useMemo(() => {
-    const slug = PROVIDER_ICON_SLUGS[providerKey]
-    const domain = PROVIDER_DOMAINS[providerKey]
+    const slug = provider.iconSlug
+    const domain = provider.domain
     const urls: string[] = []
     if (slug) {
       urls.push(`https://cdn.simpleicons.org/${slug}`)
@@ -76,13 +21,13 @@ export function ProviderIcon({
       urls.push(`https://www.google.com/s2/favicons?domain=${domain}&sz=64`)
     }
     return urls
-  }, [providerKey])
+  }, [provider.domain, provider.iconSlug])
 
   const iconUrl = iconUrls[sourceIndex]
 
   if (!iconUrl || loadFailed) {
     return (
-      <span className="inline-flex size-4 shrink-0 items-center justify-center rounded-sm border border-black/10 bg-white text-[9px] font-semibold text-black/70 dark:border-white/20 dark:text-black/70">
+      <span className="inline-flex size-4 shrink-0 items-center justify-center rounded-sm border border-black/10 bg-white text-[9px] font-semibold text-black/70 dark:border-white/20 dark:text-white/70">
         {initial}
       </span>
     )
@@ -92,7 +37,7 @@ export function ProviderIcon({
     <span className="inline-flex size-4 shrink-0 items-center justify-center overflow-hidden rounded-sm border border-black/10 bg-white p-0.5 dark:border-white/20">
       <img
         src={iconUrl}
-        alt={`${providerLabel} logo`}
+        alt={`${provider.label} logo`}
         className="size-full object-contain"
         loading="lazy"
         referrerPolicy="no-referrer"
