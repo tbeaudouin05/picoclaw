@@ -65,6 +65,15 @@ type AgentLoop struct {
 	// workerSem limits concurrent turn processing workers.
 	workerSem chan struct{}
 
+	// llmSem bounds the number of concurrent LLM provider calls across the
+	// agent loop (main pipeline, subturns, side questions, summarization). A
+	// nil semaphore means unlimited. It is sized once at construction, mirroring
+	// workerSem, and is acquired only immediately around provider calls — never
+	// while tools run. llmSlotWaitTimeout is how long an LLM step waits for a
+	// free slot before failing.
+	llmSem             chan struct{}
+	llmSlotWaitTimeout time.Duration
+
 	// activeTurnStates tracks active turns per session to prevent duplicates.
 	activeTurnStates sync.Map
 	subTurnCounter   atomic.Int64

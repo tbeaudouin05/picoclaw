@@ -402,6 +402,36 @@ type AgentDefaults struct {
 	TurnProfile               TurnProfileConfig  `json:"turn_profile,omitempty"`
 	MaxLLMRetries             int                `json:"max_llm_retries,omitempty"        env:"PICOCLAW_AGENTS_DEFAULTS_MAX_LLM_RETRIES"`
 	LLMRetryBackoffSecs       int                `json:"llm_retry_backoff_secs,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_LLM_RETRY_BACKOFF_SECS"`
+	// MaxConcurrentLLMCalls bounds the number of LLM provider calls the agent
+	// loop may have in flight at once across all turns, subagents, side
+	// questions, and summarization. A value <= 0 means unlimited.
+	MaxConcurrentLLMCalls int `json:"max_concurrent_llm_calls,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_MAX_CONCURRENT_LLM_CALLS"`
+	// LLMSlotWaitTimeout is how long, in seconds, an LLM step waits for a free
+	// concurrency slot before failing. Unset or nonpositive defaults to 30s.
+	LLMSlotWaitTimeout int `json:"llm_slot_wait_timeout,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_LLM_SLOT_WAIT_TIMEOUT"`
+}
+
+// DefaultLLMSlotWaitTimeout is the fallback wait time for a free LLM
+// concurrency slot when llm_slot_wait_timeout is unset or nonpositive.
+const DefaultLLMSlotWaitTimeout = 30 * time.Second
+
+// MaxConcurrentLLMCallsLimit returns the configured ceiling on concurrent LLM
+// provider calls. A return value of 0 means unlimited (no semaphore).
+func (d *AgentDefaults) MaxConcurrentLLMCallsLimit() int {
+	if d.MaxConcurrentLLMCalls <= 0 {
+		return 0
+	}
+	return d.MaxConcurrentLLMCalls
+}
+
+// GetLLMSlotWaitTimeout returns how long an LLM step should wait for a free
+// concurrency slot. It defaults to DefaultLLMSlotWaitTimeout when the
+// configured value is unset or nonpositive.
+func (d *AgentDefaults) GetLLMSlotWaitTimeout() time.Duration {
+	if d.LLMSlotWaitTimeout > 0 {
+		return time.Duration(d.LLMSlotWaitTimeout) * time.Second
+	}
+	return DefaultLLMSlotWaitTimeout
 }
 
 const DefaultMaxMediaSize = 20 * 1024 * 1024 // 20 MB

@@ -16,9 +16,10 @@ Each rate-limited model gets a token bucket:
 
 ```
 AgentLoop.callLLM()
+  ├─ acquireLLMSlot()                ← block on global concurrency semaphore (see below)
   └─ FallbackChain.Execute()         ← iterate candidates
        ├─ CooldownTracker.IsAvailable()   ← skip if post-429 cooldown active
-       ├─ RateLimiterRegistry.Wait()      ← NEW: block until token available
+       ├─ RateLimiterRegistry.Wait()      ← block until token available
        └─ provider.Chat()                 ← actual LLM HTTP call
 ```
 
@@ -87,6 +88,41 @@ For `model_list` aliases that resolve to the same underlying provider/model, rat
 The bucket starts **full** (burst = RPM). For `rpm: 3`, the first 3 requests fire instantly; subsequent requests are spaced ~20 s apart.
 
 To reduce burstiness for strict APIs, set a lower `rpm` and rely on the steady-state refill.
+
+## Global concurrency limit
+
+`rpm` throttles the *rate* of requests per model. A separate, complementary control bounds the *number of in-flight LLM provider calls* across the whole agent loop, regardless of model:
+
+```yaml
+agents:
+  defaults:
+    max_concurrent_llm_calls: 4   # at most 4 provider calls in flight at once; 0 = unlimited
+    llm_slot_wait_timeout: 30     # seconds an LLM step waits for a free slot before failing
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `max_concurrent_llm_calls` | `int` | `0` | Maximum simultaneous LLM provider calls. `<= 0` means unlimited (no semaphore). |
+| `llm_slot_wait_timeout` | `int` (seconds) | `30` | How long an LLM step waits for a free slot before failing. Unset or `<= 0` falls back to 30s. |
+
+### How it works
+
+A single shared semaphore lives on the agent loop and is acquired **immediately around each provider call** — never while tools run. Coverage is global:
+
+- **Main pipeline** (`Pipeline.CallLLM`) — one acquire per call covers the configured-streaming, fallback, and single-provider paths, so fallback candidates within one step do **not** double-count.
+- **Subagents / delegation** — run through the same pipeline, so they share the limit automatically.
+- **Side questions** (`/btw`) and **history summarization** (legacy and seahorse context managers) bypass the pipeline but acquire the same slot.
+
+Retries and backoff sleeps release the slot between attempts, so a backing-off call never occupies a slot. A provider call that is waiting inside the per-model RPM limiter still owns its global concurrency slot, because that wait is part of the provider-call attempt.
+
+### Timeout behaviour
+
+When the pool is full, an LLM step blocks until a slot frees up, `llm_slot_wait_timeout` elapses, or the request context is canceled:
+
+- **Timeout elapsed** → the step fails with `no LLM concurrency slot available within <timeout> (max_concurrent_llm_calls=N)`. This capacity error is not retried by the normal LLM retry loop. If you enable a low `max_concurrent_llm_calls`, choose a wait timeout long enough for the longest expected provider call plus possible RPM wait.
+- **Context canceled** (turn aborted/shut down) → the step fails with the context error.
+
+The limit is sized once at startup (like `max_parallel_turns`); changing it requires a restart.
 
 ## Files changed
 

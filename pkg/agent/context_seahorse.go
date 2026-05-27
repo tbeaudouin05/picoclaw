@@ -33,7 +33,7 @@ func newSeahorseContextManager(_ json.RawMessage, al *AgentLoop) (ContextManager
 	dbPath := agent.Workspace + "/sessions/seahorse.db"
 
 	// Create CompleteFn from provider
-	completeFn := providerToCompleteFn(agent.Provider, agent.Model)
+	completeFn := providerToCompleteFn(al, agent.Provider, agent.Model)
 
 	// Create engine
 	engine, err := seahorse.NewEngine(seahorse.Config{
@@ -65,8 +65,17 @@ func newSeahorseContextManager(_ json.RawMessage, al *AgentLoop) (ContextManager
 }
 
 // providerToCompleteFn wraps providers.LLMProvider as a seahorse.CompleteFn.
-func providerToCompleteFn(provider providers.LLMProvider, model string) seahorse.CompleteFn {
+// When al is non-nil, each summarization call acquires a global LLM concurrency
+// slot so seahorse summarization shares the same ceiling as pipeline traffic.
+func providerToCompleteFn(al *AgentLoop, provider providers.LLMProvider, model string) seahorse.CompleteFn {
 	return func(ctx context.Context, prompt string, opts seahorse.CompleteOptions) (string, error) {
+		if al != nil {
+			releaseSlot, slotErr := al.acquireLLMSlot(ctx)
+			if slotErr != nil {
+				return "", slotErr
+			}
+			defer releaseSlot()
+		}
 		resp, err := provider.Chat(
 			ctx,
 			[]providers.Message{{Role: "user", Content: prompt}},

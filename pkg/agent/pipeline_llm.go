@@ -158,6 +158,17 @@ func (p *Pipeline) CallLLM(
 	// provider call, including configured streaming, so Pico/web and chat turns
 	// cannot remain stuck forever if the provider stream never returns.
 	callLLM := func(messagesForCall []providers.Message, toolDefsForCall []providers.ToolDefinition) (*providers.LLMResponse, error) {
+		// Acquire a global LLM concurrency slot immediately around the provider
+		// call (covers the streaming, fallback, and single-provider paths below
+		// with a single acquire — no double-counting in fallback). The slot is
+		// released as soon as this call returns, so retries/backoff and tool
+		// execution never hold a slot.
+		releaseSlot, slotErr := al.acquireLLMSlot(turnCtx)
+		if slotErr != nil {
+			return nil, slotErr
+		}
+		defer releaseSlot()
+
 		providerCtx, providerCancel := context.WithTimeout(turnCtx, llmCallTimeout(exec))
 		ts.setProviderCancel(providerCancel)
 		defer func() {
