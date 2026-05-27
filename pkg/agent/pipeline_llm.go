@@ -178,7 +178,14 @@ func (p *Pipeline) CallLLM(
 
 		al.activeRequests.Add(1)
 		defer al.activeRequests.Done()
-		watchdogDone := startLLMCallWatchdog(providerCtx, ts, exec, iteration, len(messagesForCall), len(toolDefsForCall))
+		watchdogDone := startLLMCallWatchdog(
+			providerCtx,
+			ts,
+			exec,
+			iteration,
+			len(messagesForCall),
+			len(toolDefsForCall),
+		)
 		defer close(watchdogDone)
 
 		if response, handled, streamErr := p.tryConfiguredStreamingLLM(
