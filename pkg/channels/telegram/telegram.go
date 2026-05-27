@@ -510,7 +510,11 @@ func wrapTelegramSendError(prefix string, err error) error {
 	}
 	errText := strings.ToLower(err.Error())
 	if strings.Contains(errText, "429") || strings.Contains(errText, "too many requests") {
-		return fmt.Errorf("%s: %w", prefix, channels.WithRetryAfter(channels.ErrRateLimit, telegramRetryAfterFromText(errText)))
+		return fmt.Errorf(
+			"%s: %w",
+			prefix,
+			channels.WithRetryAfter(channels.ErrRateLimit, telegramRetryAfterFromText(errText)),
+		)
 	}
 	return fmt.Errorf("%s: %w", prefix, channels.ErrTemporary)
 }

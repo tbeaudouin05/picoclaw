@@ -66,17 +66,27 @@ func NewAgentLoop(
 		"worker_pool_size":   workerPoolSize,
 	})
 
+	// Build the global LLM concurrency limiter. A limit <= 0 leaves llmSem nil,
+	// meaning unlimited provider concurrency.
+	llmSem, llmSlotWaitTimeout := newLLMConcurrencyLimiter(cfg)
+	logger.InfoCF("agent", "LLM concurrency limiter configured", map[string]any{
+		"max_concurrent_llm_calls": cfg.Agents.Defaults.MaxConcurrentLLMCallsLimit(),
+		"llm_slot_wait_timeout":    llmSlotWaitTimeout.String(),
+	})
+
 	al := &AgentLoop{
-		bus:               msgBus,
-		cfg:               cfg,
-		registry:          registry,
-		state:             stateManager,
-		fallback:          fallbackChain,
-		cmdRegistry:       commands.NewRegistry(commands.BuiltinDefinitions()),
-		evolution:         bridge,
-		steering:          newSteeringQueue(parseSteeringMode(cfg.Agents.Defaults.SteeringMode)),
-		workerSem:         make(chan struct{}, workerPoolSize),
-		ownsRuntimeEvents: true,
+		bus:                msgBus,
+		cfg:                cfg,
+		registry:           registry,
+		state:              stateManager,
+		fallback:           fallbackChain,
+		cmdRegistry:        commands.NewRegistry(commands.BuiltinDefinitions()),
+		evolution:          bridge,
+		steering:           newSteeringQueue(parseSteeringMode(cfg.Agents.Defaults.SteeringMode)),
+		workerSem:          make(chan struct{}, workerPoolSize),
+		llmSem:             llmSem,
+		llmSlotWaitTimeout: llmSlotWaitTimeout,
+		ownsRuntimeEvents:  true,
 	}
 	for _, opt := range opts {
 		if opt != nil {

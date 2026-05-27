@@ -940,8 +940,16 @@ func (c *PicoChannel) broadcastToSession(chatID string, msg PicoMessage) error {
 
 	connections := c.sessionConnectionsSnapshot(sessionID)
 	if len(connections) == 0 {
-		logger.WarnCF("pico", "Pico outbound delivery has no active connections", picoDeliveryLogFields(chatID, sessionID, msg, nil, 0, 0, nil))
-		return fmt.Errorf("pico websocket delivery: no active connections for session %s: %w", sessionID, channels.ErrSendFailed)
+		logger.WarnCF(
+			"pico",
+			"Pico outbound delivery has no active connections",
+			picoDeliveryLogFields(chatID, sessionID, msg, nil, 0, 0, nil),
+		)
+		return fmt.Errorf(
+			"pico websocket delivery: no active connections for session %s: %w",
+			sessionID,
+			channels.ErrSendFailed,
+		)
 	}
 
 	sent := 0
@@ -951,18 +959,35 @@ func (c *PicoChannel) broadcastToSession(chatID string, msg PicoMessage) error {
 		if err := pc.writeJSON(msg); err != nil {
 			failed++
 			lastErr = err
-			logger.WarnCF("pico", "Pico outbound WebSocket write failed", picoDeliveryLogFields(chatID, sessionID, msg, pc, sent, failed, err))
+			logger.WarnCF(
+				"pico",
+				"Pico outbound WebSocket write failed",
+				picoDeliveryLogFields(chatID, sessionID, msg, pc, sent, failed, err),
+			)
 		} else {
 			sent++
 		}
 	}
 
 	if sent == 0 {
-		logger.WarnCF("pico", "Pico outbound delivery failed for all connections", picoDeliveryLogFields(chatID, sessionID, msg, nil, sent, failed, lastErr))
-		return fmt.Errorf("pico websocket delivery: all %d connection writes failed for session %s: %w", failed, sessionID, channels.ErrSendFailed)
+		logger.WarnCF(
+			"pico",
+			"Pico outbound delivery failed for all connections",
+			picoDeliveryLogFields(chatID, sessionID, msg, nil, sent, failed, lastErr),
+		)
+		return fmt.Errorf(
+			"pico websocket delivery: all %d connection writes failed for session %s: %w",
+			failed,
+			sessionID,
+			channels.ErrSendFailed,
+		)
 	}
 	if failed > 0 {
-		logger.WarnCF("pico", "Pico outbound delivery partially failed", picoDeliveryLogFields(chatID, sessionID, msg, nil, sent, failed, lastErr))
+		logger.WarnCF(
+			"pico",
+			"Pico outbound delivery partially failed",
+			picoDeliveryLogFields(chatID, sessionID, msg, nil, sent, failed, lastErr),
+		)
 	}
 	return nil
 }

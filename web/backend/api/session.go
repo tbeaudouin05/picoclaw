@@ -540,7 +540,12 @@ func sessionTranscriptMessages(
 				toolFeedbackMaxArgsLength,
 				msg.CreatedAt,
 			)
-			visibleToolMessages := visibleAssistantToolMessages(msg.ToolCalls, msg.ModelName, msg.Timestamp, msg.CreatedAt)
+			visibleToolMessages := visibleAssistantToolMessages(
+				msg.ToolCalls,
+				msg.ModelName,
+				msg.Timestamp,
+				msg.CreatedAt,
+			)
 
 			// Pico web chat can persist both visible `message` tool output and a
 			// later plain assistant reply in the same turn. Hide only the fixed
