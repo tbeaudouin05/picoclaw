@@ -48,6 +48,121 @@ func TestHandleIncoming_RejectsNonAllowedSender(t *testing.T) {
 	}
 }
 
+func TestHandleIncoming_GroupBotEchoIsDropped(t *testing.T) {
+	messageBus := bus.NewMessageBus()
+	ch := &WhatsAppNativeChannel{
+		BaseChannel: channels.NewBaseChannel("whatsapp_native", config.WhatsAppSettings{}, messageBus, nil),
+		runCtx:      context.Background(),
+	}
+
+	evt := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				IsFromMe: true,
+				Sender:   types.NewJID("bot", types.DefaultUserServer),
+				Chat:     types.NewJID("group1", types.GroupServer),
+			},
+			ID:       "mid-echo",
+			PushName: "Bot",
+		},
+		Message: &waE2E.Message{
+			Conversation: proto.String("hello from bot"),
+		},
+	}
+
+	ch.handleIncoming(evt)
+
+	select {
+	case <-messageBus.InboundChan():
+		t.Fatal("expected group bot echo to be dropped with no inbound message")
+	default:
+		// dropped as expected
+	}
+}
+
+func TestHandleIncoming_GroupUserMessageIsProcessed(t *testing.T) {
+	messageBus := bus.NewMessageBus()
+	ch := &WhatsAppNativeChannel{
+		BaseChannel: channels.NewBaseChannel("whatsapp_native", config.WhatsAppSettings{}, messageBus, nil),
+		runCtx:      context.Background(),
+	}
+
+	evt := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				IsFromMe: false,
+				Sender:   types.NewJID("1001", types.DefaultUserServer),
+				Chat:     types.NewJID("group1", types.GroupServer),
+			},
+			ID:       "mid-group",
+			PushName: "Alice",
+		},
+		Message: &waE2E.Message{
+			Conversation: proto.String("hello group"),
+		},
+	}
+
+	ch.handleIncoming(evt)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	select {
+	case <-ctx.Done():
+		t.Fatal("timeout: expected group message to be processed")
+	case inbound, ok := <-messageBus.InboundChan():
+		if !ok {
+			t.Fatal("channel closed unexpectedly")
+		}
+		if inbound.Context.ChatType != "group" {
+			t.Fatalf("expected ChatType=group, got %q", inbound.Context.ChatType)
+		}
+		if inbound.Content != "hello group" {
+			t.Fatalf("content=%q", inbound.Content)
+		}
+	}
+}
+
+func TestHandleIncoming_DirectSelfChatIsFromMeIsProcessed(t *testing.T) {
+	messageBus := bus.NewMessageBus()
+	ch := &WhatsAppNativeChannel{
+		BaseChannel: channels.NewBaseChannel("whatsapp_native", config.WhatsAppSettings{}, messageBus, nil),
+		runCtx:      context.Background(),
+	}
+
+	evt := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				IsFromMe: true,
+				Sender:   types.NewJID("1001", types.DefaultUserServer),
+				Chat:     types.NewJID("1001", types.DefaultUserServer),
+			},
+			ID:       "mid-self",
+			PushName: "Me",
+		},
+		Message: &waE2E.Message{
+			Conversation: proto.String("self note"),
+		},
+	}
+
+	ch.handleIncoming(evt)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	select {
+	case <-ctx.Done():
+		t.Fatal("timeout: expected direct self-chat message to be processed")
+	case inbound, ok := <-messageBus.InboundChan():
+		if !ok {
+			t.Fatal("channel closed unexpectedly")
+		}
+		if inbound.Content != "self note" {
+			t.Fatalf("content=%q", inbound.Content)
+		}
+	}
+}
+
 func TestHandleIncoming_DoesNotConsumeGenericCommandsLocally(t *testing.T) {
 	messageBus := bus.NewMessageBus()
 	ch := &WhatsAppNativeChannel{
