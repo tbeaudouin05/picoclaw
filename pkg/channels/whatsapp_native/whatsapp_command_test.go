@@ -239,3 +239,118 @@ func TestHandleIncoming_DoesNotConsumeGenericCommandsLocally(t *testing.T) {
 		}
 	}
 }
+
+func TestHandleIncoming_GroupTriggerName(t *testing.T) {
+	tests := []struct {
+		name                       string
+		groupTriggerName           string
+		requireTriggerNameInDirect bool
+		chat                       types.JID
+		content                    string
+		wantForwarded              bool
+	}{
+		{
+			name:             "group drops when trigger name absent",
+			groupTriggerName: "Alice",
+			chat:             types.NewJID("group1", types.GroupServer),
+			content:          "hello everyone",
+			wantForwarded:    false,
+		},
+		{
+			name:             "group passes when trigger name present case insensitive",
+			groupTriggerName: "Alice",
+			chat:             types.NewJID("group1", types.GroupServer),
+			content:          "hey alice can you help?",
+			wantForwarded:    true,
+		},
+		{
+			name:             "group passes when trigger name present with punctuation",
+			groupTriggerName: "Alice",
+			chat:             types.NewJID("group1", types.GroupServer),
+			content:          "Alice, can you help?",
+			wantForwarded:    true,
+		},
+		{
+			name:             "group passes when trigger name unset",
+			groupTriggerName: "",
+			chat:             types.NewJID("group1", types.GroupServer),
+			content:          "hello everyone",
+			wantForwarded:    true,
+		},
+		{
+			name:                       "direct bypasses trigger name by default",
+			groupTriggerName:           "Alice",
+			requireTriggerNameInDirect: false,
+			chat:                       types.NewJID("1001", types.DefaultUserServer),
+			content:                    "hello privately",
+			wantForwarded:              true,
+		},
+		{
+			name:                       "direct drops when trigger name is required and absent",
+			groupTriggerName:           "Alice",
+			requireTriggerNameInDirect: true,
+			chat:                       types.NewJID("1001", types.DefaultUserServer),
+			content:                    "hello privately",
+			wantForwarded:              false,
+		},
+		{
+			name:                       "direct passes when trigger name is required and present",
+			groupTriggerName:           "Alice",
+			requireTriggerNameInDirect: true,
+			chat:                       types.NewJID("1001", types.DefaultUserServer),
+			content:                    "Alice please respond",
+			wantForwarded:              true,
+		},
+		{
+			name:             "substring is not a word match",
+			groupTriggerName: "Alice",
+			chat:             types.NewJID("group1", types.GroupServer),
+			content:          "malice should not trigger",
+			wantForwarded:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			messageBus := bus.NewMessageBus()
+			ch := &WhatsAppNativeChannel{
+				BaseChannel: channels.NewBaseChannel("whatsapp_native", config.WhatsAppSettings{}, messageBus, nil),
+				config: &config.WhatsAppSettings{
+					GroupTriggerName:           tt.groupTriggerName,
+					RequireTriggerNameInDirect: tt.requireTriggerNameInDirect,
+				},
+				runCtx: context.Background(),
+			}
+
+			evt := &events.Message{
+				Info: types.MessageInfo{
+					MessageSource: types.MessageSource{
+						Sender: types.NewJID("1001", types.DefaultUserServer),
+						Chat:   tt.chat,
+					},
+					ID:       "mid-trigger",
+					PushName: "Alice",
+				},
+				Message: &waE2E.Message{
+					Conversation: proto.String(tt.content),
+				},
+			}
+
+			ch.handleIncoming(evt)
+
+			select {
+			case inbound := <-messageBus.InboundChan():
+				if !tt.wantForwarded {
+					t.Fatalf("expected message to be dropped, got inbound content %q", inbound.Content)
+				}
+				if inbound.Content != tt.content {
+					t.Fatalf("content=%q", inbound.Content)
+				}
+			default:
+				if tt.wantForwarded {
+					t.Fatal("expected message to be forwarded")
+				}
+			}
+		})
+	}
+}
