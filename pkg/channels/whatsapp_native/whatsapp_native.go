@@ -386,6 +386,15 @@ func (c *WhatsAppNativeChannel) handleIncoming(evt *events.Message) {
 	}
 
 	if !c.IsAllowedSender(sender) {
+		fields := map[string]any{
+			"sender_jid":  senderID,
+			"sender_user": evt.Info.Sender.User,
+		}
+		if !evt.Info.SenderAlt.IsEmpty() {
+			fields["sender_alt_jid"] = evt.Info.SenderAlt.String()
+			fields["sender_alt_user"] = evt.Info.SenderAlt.User
+		}
+		logger.WarnCF("whatsapp", "Message rejected by allowlist", fields)
 		return
 	}
 

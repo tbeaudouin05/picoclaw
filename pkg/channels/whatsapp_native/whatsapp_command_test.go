@@ -17,6 +17,37 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 )
 
+func TestHandleIncoming_RejectsNonAllowedSender(t *testing.T) {
+	messageBus := bus.NewMessageBus()
+	ch := &WhatsAppNativeChannel{
+		BaseChannel: channels.NewBaseChannel("whatsapp_native", config.WhatsAppSettings{}, messageBus, []string{"9999"}),
+		runCtx:      context.Background(),
+	}
+
+	evt := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Sender: types.NewJID("1001", types.DefaultUserServer),
+				Chat:   types.NewJID("1001", types.DefaultUserServer),
+			},
+			ID:       "mid2",
+			PushName: "Eve",
+		},
+		Message: &waE2E.Message{
+			Conversation: proto.String("should be blocked"),
+		},
+	}
+
+	ch.handleIncoming(evt)
+
+	select {
+	case <-messageBus.InboundChan():
+		t.Fatal("expected no message to be forwarded for rejected sender")
+	default:
+		// rejected as expected
+	}
+}
+
 func TestHandleIncoming_DoesNotConsumeGenericCommandsLocally(t *testing.T) {
 	messageBus := bus.NewMessageBus()
 	ch := &WhatsAppNativeChannel{
