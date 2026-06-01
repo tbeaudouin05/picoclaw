@@ -242,6 +242,9 @@ func (c *WhatsAppChannel) handleIncomingMessage(msg map[string]any) {
 	}
 
 	if !c.IsAllowedSender(sender) {
+		logger.WarnCF("whatsapp", "Message rejected by allowlist", map[string]any{
+			"sender_id": senderID,
+		})
 		return
 	}
 

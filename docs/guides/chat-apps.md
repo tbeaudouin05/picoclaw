@@ -183,7 +183,27 @@ PicoClaw can connect to WhatsApp in two ways:
 }
 ```
 
-If `session_store_path` is empty, the session is stored in `<workspace>/whatsapp/`. Run `picoclaw gateway`; on first run, scan the QR code printed in the terminal with WhatsApp → Linked Devices.
+If `session_store_path` is empty, the session is stored in `<workspace>/whatsapp/`.
+
+**Native login / QR flow**
+
+1. Build or install a binary with native WhatsApp support enabled (`-tags whatsapp_native`), for example:
+
+   ```bash
+   make build-whatsapp-native
+   ```
+
+2. Start the gateway in a terminal where you can see stdout/stderr:
+
+   ```bash
+   picoclaw gateway
+   ```
+
+3. On first run, PicoClaw prints a WhatsApp login QR code. Open WhatsApp on your phone and go to **Settings → Linked Devices → Link a Device**, then scan the QR code.
+4. After the scan succeeds, whatsmeow stores the session in `session_store_path` (or `<workspace>/whatsapp/` when empty). Subsequent restarts reuse that session and normally do not print another QR code.
+5. To force a fresh login, stop PicoClaw and rotate the configured WhatsApp session store path, then start `picoclaw gateway` again and scan the new QR code.
+
+When `allow_from` is configured and a sender is rejected, PicoClaw logs the rejected WhatsApp sender JID. For native WhatsApp, the log also includes the alternative sender JID when WhatsApp provides it, which can help correlate a privacy LID such as `...@lid` with the corresponding phone-number JID such as `...@s.whatsapp.net`.
 
 </details>
 
