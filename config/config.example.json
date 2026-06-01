@@ -162,7 +162,8 @@
         "use_native": false,
         "session_store_path": "",
         "group_trigger_name": "",
-        "require_trigger_name_in_direct": false
+        "require_trigger_name_in_direct": false,
+        "allow_initial_direct_reply": false
       }
     },
     "feishu": {

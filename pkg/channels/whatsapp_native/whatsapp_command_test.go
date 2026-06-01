@@ -7,7 +7,10 @@ import (
 	"testing"
 	"time"
 
+	waCommon "go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
+	waWeb "go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
@@ -352,5 +355,144 @@ func TestHandleIncoming_GroupTriggerName(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestHandleIncoming_AllowInitialDirectReply(t *testing.T) {
+	tests := []struct {
+		name                       string
+		groupTriggerName           string
+		requireTriggerNameInDirect bool
+		chat                       types.JID
+		directSeenPre              []string // JIDs pre-seeded as already seen
+		content                    string
+		wantForwarded              bool
+	}{
+		{
+			name:                       "direct first message bypasses trigger when allow_initial_direct_reply",
+			groupTriggerName:           "Alice",
+			requireTriggerNameInDirect: true,
+			chat:                       types.NewJID("1001", types.DefaultUserServer),
+			content:                    "hello without trigger",
+			wantForwarded:              true,
+		},
+		{
+			name:                       "direct second message requires trigger when require_trigger_name_in_direct",
+			groupTriggerName:           "Alice",
+			requireTriggerNameInDirect: true,
+			chat:                       types.NewJID("1001", types.DefaultUserServer),
+			directSeenPre:              []string{"1001@s.whatsapp.net"},
+			content:                    "hello without trigger",
+			wantForwarded:              false,
+		},
+		{
+			name:                       "direct second message passes when trigger present",
+			groupTriggerName:           "Alice",
+			requireTriggerNameInDirect: true,
+			chat:                       types.NewJID("1001", types.DefaultUserServer),
+			directSeenPre:              []string{"1001@s.whatsapp.net"},
+			content:                    "Alice help me",
+			wantForwarded:              true,
+		},
+		{
+			name:                       "group first message is unaffected by allow_initial_direct_reply",
+			groupTriggerName:           "Alice",
+			requireTriggerNameInDirect: false,
+			chat:                       types.NewJID("group1", types.GroupServer),
+			content:                    "hello without trigger",
+			wantForwarded:              false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newMemDirectSeenStore()
+			for _, jid := range tt.directSeenPre {
+				_ = store.markDirectMessageSeen(jid)
+			}
+
+			messageBus := bus.NewMessageBus()
+			ch := &WhatsAppNativeChannel{
+				BaseChannel: channels.NewBaseChannel("whatsapp_native", config.WhatsAppSettings{}, messageBus, nil),
+				config: &config.WhatsAppSettings{
+					GroupTriggerName:           tt.groupTriggerName,
+					RequireTriggerNameInDirect: tt.requireTriggerNameInDirect,
+					AllowInitialDirectReply:    true,
+				},
+				directSeen: store,
+				runCtx:     context.Background(),
+			}
+
+			senderJID := types.NewJID("1001", types.DefaultUserServer)
+			evt := &events.Message{
+				Info: types.MessageInfo{
+					MessageSource: types.MessageSource{
+						Sender: senderJID,
+						Chat:   tt.chat,
+					},
+					ID:       "mid-initial",
+					PushName: "Alice",
+				},
+				Message: &waE2E.Message{
+					Conversation: proto.String(tt.content),
+				},
+			}
+
+			ch.handleIncoming(evt)
+
+			select {
+			case inbound := <-messageBus.InboundChan():
+				if !tt.wantForwarded {
+					t.Fatalf("expected message to be dropped, got inbound content %q", inbound.Content)
+				}
+				if inbound.Content != tt.content {
+					t.Fatalf("content=%q", inbound.Content)
+				}
+			default:
+				if tt.wantForwarded {
+					t.Fatal("expected message to be forwarded")
+				}
+			}
+		})
+	}
+}
+
+func TestDirectSeenStoreSeedFromHistorySync(t *testing.T) {
+	store := newMemDirectSeenStore()
+	sync := &waHistorySync.HistorySync{
+		Conversations: []*waHistorySync.Conversation{
+			{
+				ID: proto.String("1001@s.whatsapp.net"),
+				Messages: []*waHistorySync.HistorySyncMsg{
+					{Message: &waWeb.WebMessageInfo{Key: &waCommon.MessageKey{RemoteJID: proto.String("1001@s.whatsapp.net")}}},
+				},
+			},
+			{
+				ID: proto.String("group1@g.us"),
+				Messages: []*waHistorySync.HistorySyncMsg{
+					{Message: &waWeb.WebMessageInfo{Key: &waCommon.MessageKey{RemoteJID: proto.String("group1@g.us")}}},
+				},
+			},
+			{
+				ID: proto.String("empty@s.whatsapp.net"),
+			},
+		},
+	}
+
+	count, err := store.seedFromHistorySync(sync)
+	if err != nil {
+		t.Fatalf("seedFromHistorySync error: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("seeded count=%d, want 1", count)
+	}
+	if first, _ := store.consumeInitialDirectReply("1001@s.whatsapp.net"); first {
+		t.Fatal("expected historical direct conversation to be marked seen")
+	}
+	if first, _ := store.consumeInitialDirectReply("group1@g.us"); !first {
+		t.Fatal("expected group history not to be marked as direct seen")
+	}
+	if first, _ := store.consumeInitialDirectReply("empty@s.whatsapp.net"); !first {
+		t.Fatal("expected empty direct conversation not to be marked seen")
 	}
 }

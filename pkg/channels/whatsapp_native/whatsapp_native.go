@@ -52,6 +52,7 @@ type WhatsAppNativeChannel struct {
 	storePath    string
 	client       *whatsmeow.Client
 	container    *sqlstore.Container
+	directSeen   directSeenStore // non-nil when AllowInitialDirectReply is enabled
 	mu           sync.Mutex
 	runCtx       context.Context
 	runCancel    context.CancelFunc
@@ -132,6 +133,15 @@ func (c *WhatsAppNativeChannel) Start(ctx context.Context) error {
 	c.runCtx, c.runCancel = context.WithCancel(ctx)
 
 	client.AddEventHandler(c.eventHandler)
+
+	if c.config != nil && c.config.AllowInitialDirectReply {
+		store, err := newDirectSeenStore(db)
+		if err != nil {
+			logger.WarnCF("whatsapp", "Failed to init direct_seen store; allow_initial_direct_reply disabled", map[string]any{"err": err.Error()})
+		} else {
+			c.directSeen = store
+		}
+	}
 
 	c.mu.Lock()
 	c.container = container
@@ -262,16 +272,18 @@ func (c *WhatsAppNativeChannel) Stop(ctx context.Context) error {
 	c.mu.Unlock()
 
 	if container != nil {
-		_ = container.Close()
+		_ = container.Close() // also closes the underlying *sql.DB
 	}
 	c.SetRunning(false)
 	return nil
 }
 
 func (c *WhatsAppNativeChannel) eventHandler(evt any) {
-	switch evt.(type) {
+	switch e := evt.(type) {
 	case *events.Message:
-		c.handleIncoming(evt.(*events.Message))
+		c.handleIncoming(e)
+	case *events.HistorySync:
+		c.handleHistorySync(e)
 	case *events.Disconnected:
 		logger.InfoCF("whatsapp", "WhatsApp disconnected, will attempt reconnection", nil)
 		c.reconnectMu.Lock()
@@ -293,6 +305,20 @@ func (c *WhatsAppNativeChannel) eventHandler(evt any) {
 			defer c.wg.Done()
 			c.reconnectWithBackoff()
 		}()
+	}
+}
+
+func (c *WhatsAppNativeChannel) handleHistorySync(evt *events.HistorySync) {
+	if evt == nil || evt.Data == nil || c.directSeen == nil {
+		return
+	}
+	count, err := c.directSeen.seedFromHistorySync(evt.Data)
+	if err != nil {
+		logger.WarnCF("whatsapp", "direct_seen history sync seed failed", map[string]any{"err": err.Error()})
+		return
+	}
+	if count > 0 {
+		logger.DebugCF("whatsapp", "Seeded direct_seen from WhatsApp history sync", map[string]any{"direct_conversations": count})
 	}
 }
 
@@ -370,18 +396,17 @@ func (c *WhatsAppNativeChannel) handleIncoming(evt *events.Message) {
 	if evt.Info.PushName != "" {
 		metadata["user_name"] = evt.Info.PushName
 	}
-	if evt.Info.Chat.Server == types.GroupServer {
+	isGroup := evt.Info.Chat.Server == types.GroupServer
+	peerKind := "direct"
+	if isGroup {
 		metadata["peer_kind"] = "group"
 		metadata["peer_id"] = chatID
+		peerKind = "group"
 	} else {
 		metadata["peer_kind"] = "direct"
-		metadata["peer_id"] = senderID
+		metadata["peer_id"] = chatID
 	}
 
-	peerKind := "direct"
-	if evt.Info.Chat.Server == types.GroupServer {
-		peerKind = "group"
-	}
 	messageID := evt.Info.ID
 	sender := bus.SenderInfo{
 		Platform:    "whatsapp",
@@ -402,9 +427,17 @@ func (c *WhatsAppNativeChannel) handleIncoming(evt *events.Message) {
 		logger.WarnCF("whatsapp", "Message rejected by allowlist", fields)
 		return
 	}
-
-	if shouldRequireTriggerName(evt.Info.Chat.Server == types.GroupServer, c.config) && shouldDropGroupMessageForTriggerName(groupTriggerName(c.config), content) {
-		logger.DebugCF("whatsapp", "WhatsApp group message ignored: trigger name absent", map[string]any{
+	skipTriggerCheck := false
+	if !isGroup && c.config != nil && c.config.AllowInitialDirectReply && c.directSeen != nil && shouldRequireTriggerName(false, c.config) {
+		consumed, err := c.directSeen.consumeInitialDirectReply(chatID)
+		if err != nil {
+			logger.WarnCF("whatsapp", "direct_seen check failed", map[string]any{"err": err.Error()})
+		} else if consumed {
+			skipTriggerCheck = true
+		}
+	}
+	if !skipTriggerCheck && shouldRequireTriggerName(isGroup, c.config) && shouldDropGroupMessageForTriggerName(groupTriggerName(c.config), content) {
+		logger.DebugCF("whatsapp", "WhatsApp message ignored: trigger name absent", map[string]any{
 			"chat": chatID,
 		})
 		return
