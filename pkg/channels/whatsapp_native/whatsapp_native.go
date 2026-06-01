@@ -403,6 +403,13 @@ func (c *WhatsAppNativeChannel) handleIncoming(evt *events.Message) {
 		return
 	}
 
+	if evt.Info.Chat.Server == types.GroupServer && shouldDropGroupMessageForTriggerName(groupTriggerName(c.config), content) {
+		logger.DebugCF("whatsapp", "WhatsApp group message ignored: trigger name absent", map[string]any{
+			"chat": chatID,
+		})
+		return
+	}
+
 	logger.DebugCF(
 		"whatsapp",
 		"WhatsApp message received",

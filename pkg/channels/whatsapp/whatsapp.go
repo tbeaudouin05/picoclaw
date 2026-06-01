@@ -248,6 +248,13 @@ func (c *WhatsAppChannel) handleIncomingMessage(msg map[string]any) {
 		return
 	}
 
+	if chatID != senderID && shouldDropGroupMessageForTriggerName(groupTriggerName(c.config), content) {
+		logger.DebugCF("whatsapp", "WhatsApp group message ignored: trigger name absent", map[string]any{
+			"chat": chatID,
+		})
+		return
+	}
+
 	inboundCtx := bus.InboundContext{
 		Channel:   "whatsapp",
 		ChatID:    chatID,

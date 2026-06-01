@@ -160,7 +160,8 @@
       "settings": {
         "bridge_url": "ws://localhost:3001",
         "use_native": false,
-        "session_store_path": ""
+        "session_store_path": "",
+        "group_trigger_name": ""
       }
     },
     "feishu": {
