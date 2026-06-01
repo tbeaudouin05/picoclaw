@@ -123,6 +123,40 @@ func TestHandleIncoming_GroupUserMessageIsProcessed(t *testing.T) {
 	}
 }
 
+func TestHandleIncoming_DirectOutgoingDMIsDropped(t *testing.T) {
+	messageBus := bus.NewMessageBus()
+	ch := &WhatsAppNativeChannel{
+		BaseChannel: channels.NewBaseChannel("whatsapp_native", config.WhatsAppSettings{}, messageBus, nil),
+		runCtx:      context.Background(),
+	}
+
+	// Linked account (thomas) sends a DM to someone else (domenico).
+	// IsFromMe=true, Chat.User != Sender.User → must be dropped.
+	evt := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				IsFromMe: true,
+				Sender:   types.NewJID("thomas", types.DefaultUserServer),
+				Chat:     types.NewJID("domenico", types.DefaultUserServer),
+			},
+			ID:       "mid-outgoing",
+			PushName: "Thomas",
+		},
+		Message: &waE2E.Message{
+			Conversation: proto.String("hey domenico"),
+		},
+	}
+
+	ch.handleIncoming(evt)
+
+	select {
+	case <-messageBus.InboundChan():
+		t.Fatal("expected outgoing DM from linked account to be dropped")
+	default:
+		// dropped as expected
+	}
+}
+
 func TestHandleIncoming_DirectSelfChatIsFromMeIsProcessed(t *testing.T) {
 	messageBus := bus.NewMessageBus()
 	ch := &WhatsAppNativeChannel{

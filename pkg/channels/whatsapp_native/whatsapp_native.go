@@ -346,9 +346,9 @@ func (c *WhatsAppNativeChannel) handleIncoming(evt *events.Message) {
 	if evt.Message == nil {
 		return
 	}
-	// Drop our own echoed messages from groups; WhatsApp mirrors sent messages back.
-	// IsFromMe on a non-group chat means the user is messaging themselves (self-chat), which we keep.
-	if evt.Info.IsFromMe && evt.Info.Chat.Server == types.GroupServer {
+	// Drop outgoing messages: group echoes and DMs sent from the linked account to others.
+	// Self-chat (Chat.User == Sender.User) is kept so the account owner can interact with the agent.
+	if evt.Info.IsFromMe && evt.Info.Chat.User != evt.Info.Sender.User {
 		return
 	}
 	senderID := evt.Info.Sender.String()
