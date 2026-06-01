@@ -14,6 +14,16 @@ func groupTriggerName(cfg *config.WhatsAppSettings) string {
 	return cfg.GroupTriggerName
 }
 
+func shouldRequireTriggerName(isGroup bool, cfg *config.WhatsAppSettings) bool {
+	if isGroup {
+		return true
+	}
+	if cfg == nil {
+		return false
+	}
+	return cfg.RequireTriggerNameInDirect
+}
+
 func shouldDropGroupMessageForTriggerName(groupTriggerName, content string) bool {
 	name := strings.TrimSpace(groupTriggerName)
 	if name == "" {

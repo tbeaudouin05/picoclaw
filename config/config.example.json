@@ -161,7 +161,8 @@
         "bridge_url": "ws://localhost:3001",
         "use_native": false,
         "session_store_path": "",
-        "group_trigger_name": ""
+        "group_trigger_name": "",
+        "require_trigger_name_in_direct": false
       }
     },
     "feishu": {

@@ -38,12 +38,13 @@ func TestHandleIncomingMessage_DoesNotConsumeGenericCommandsLocally(t *testing.T
 
 func TestHandleIncomingMessage_GroupTriggerName(t *testing.T) {
 	tests := []struct {
-		name             string
-		groupTriggerName string
-		from             string
-		chat             string
-		content          string
-		wantForwarded    bool
+		name                       string
+		groupTriggerName           string
+		requireTriggerNameInDirect bool
+		from                       string
+		chat                       string
+		content                    string
+		wantForwarded              bool
 	}{
 		{
 			name:             "group drops when trigger name absent",
@@ -78,12 +79,31 @@ func TestHandleIncomingMessage_GroupTriggerName(t *testing.T) {
 			wantForwarded:    true,
 		},
 		{
-			name:             "direct bypasses trigger name",
-			groupTriggerName: "Alice",
-			from:             "user1",
-			chat:             "user1",
-			content:          "hello privately",
-			wantForwarded:    true,
+			name:                       "direct bypasses trigger name by default",
+			groupTriggerName:           "Alice",
+			requireTriggerNameInDirect: false,
+			from:                       "user1",
+			chat:                       "user1",
+			content:                    "hello privately",
+			wantForwarded:              true,
+		},
+		{
+			name:                       "direct drops when trigger name is required and absent",
+			groupTriggerName:           "Alice",
+			requireTriggerNameInDirect: true,
+			from:                       "user1",
+			chat:                       "user1",
+			content:                    "hello privately",
+			wantForwarded:              false,
+		},
+		{
+			name:                       "direct passes when trigger name is required and present",
+			groupTriggerName:           "Alice",
+			requireTriggerNameInDirect: true,
+			from:                       "user1",
+			chat:                       "user1",
+			content:                    "Alice please respond",
+			wantForwarded:              true,
 		},
 		{
 			name:             "substring is not a word match",
@@ -100,8 +120,11 @@ func TestHandleIncomingMessage_GroupTriggerName(t *testing.T) {
 			messageBus := bus.NewMessageBus()
 			ch := &WhatsAppChannel{
 				BaseChannel: channels.NewBaseChannel("whatsapp", config.WhatsAppSettings{}, messageBus, nil),
-				config:      &config.WhatsAppSettings{GroupTriggerName: tt.groupTriggerName},
-				ctx:         context.Background(),
+				config: &config.WhatsAppSettings{
+					GroupTriggerName:           tt.groupTriggerName,
+					RequireTriggerNameInDirect: tt.requireTriggerNameInDirect,
+				},
+				ctx: context.Background(),
 			}
 
 			ch.handleIncomingMessage(map[string]any{

@@ -521,10 +521,11 @@ func (c StreamingConfig) WithDefaults(throttleSeconds, minGrowthChars int) Strea
 }
 
 type WhatsAppSettings struct {
-	BridgeURL        string `json:"bridge_url"          yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_BRIDGE_URL"`
-	UseNative        bool   `json:"use_native"          yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_USE_NATIVE"`
-	SessionStorePath string `json:"session_store_path"  yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_SESSION_STORE_PATH"`
-	GroupTriggerName string `json:"group_trigger_name" yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_GROUP_TRIGGER_NAME"`
+	BridgeURL                  string `json:"bridge_url"                     yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_BRIDGE_URL"`
+	UseNative                  bool   `json:"use_native"                     yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_USE_NATIVE"`
+	SessionStorePath           string `json:"session_store_path"             yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_SESSION_STORE_PATH"`
+	GroupTriggerName           string `json:"group_trigger_name"            yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_GROUP_TRIGGER_NAME"`
+	RequireTriggerNameInDirect bool   `json:"require_trigger_name_in_direct" yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_REQUIRE_TRIGGER_NAME_IN_DIRECT"`
 }
 
 type TelegramSettings struct {
