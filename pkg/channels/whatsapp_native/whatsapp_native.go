@@ -53,6 +53,8 @@ type WhatsAppNativeChannel struct {
 	client       *whatsmeow.Client
 	container    *sqlstore.Container
 	directSeen   directSeenStore // non-nil when AllowInitialDirectReply is enabled
+	aiToggle     aiToggleStore   // per-chat AI auto-response toggle; non-nil after Start
+	cmdDedupe    cmdDedupeStore  // deduplicates toggle command confirmations on redelivery; non-nil after Start
 	mu           sync.Mutex
 	runCtx       context.Context
 	runCancel    context.CancelFunc
@@ -141,6 +143,20 @@ func (c *WhatsAppNativeChannel) Start(ctx context.Context) error {
 		} else {
 			c.directSeen = store
 		}
+	}
+
+	toggleStore, err := newAIToggleStore(db)
+	if err != nil {
+		logger.WarnCF("whatsapp", "Failed to init ai_toggle store; AI toggle commands disabled", map[string]any{"err": err.Error()})
+	} else {
+		c.aiToggle = toggleStore
+	}
+
+	dedupeStore, err := newCmdDedupeStore(db)
+	if err != nil {
+		logger.WarnCF("whatsapp", "Failed to init cmd_dedupe store; command dedup disabled", map[string]any{"err": err.Error()})
+	} else {
+		c.cmdDedupe = dedupeStore
 	}
 
 	c.mu.Lock()
@@ -427,6 +443,83 @@ func (c *WhatsAppNativeChannel) handleIncoming(evt *events.Message) {
 		logger.WarnCF("whatsapp", "Message rejected by allowlist", fields)
 		return
 	}
+
+	// Apply the group trigger-name gate before processing toggle commands so
+	// that /ai on/off cannot bypass the trigger requirement in group chats.
+	if isGroup && shouldDropGroupMessageForTriggerName(groupTriggerName(c.config), content) {
+		logger.DebugCF("whatsapp", "WhatsApp message ignored: trigger name absent", map[string]any{
+			"chat": chatID,
+		})
+		return
+	}
+
+	if c.aiToggle != nil {
+		// Strip trigger-name prefix for command parsing whenever a trigger name
+		// is configured and required for this message type (groups always;
+		// direct chats when RequireTriggerNameInDirect=true).
+		cmdContent := content
+		if tn := groupTriggerName(c.config); tn != "" && shouldRequireTriggerName(isGroup, c.config) {
+			cmdContent = stripTriggerNamePrefix(tn, content)
+		}
+		if enable, isCmd := parseAIToggleCommand(cmdContent); isCmd {
+			// Check dedupe before mutating state so a redelivered command
+			// is silently skipped without re-applying state.
+			if c.cmdDedupe != nil {
+				seen, dedupeErr := c.cmdDedupe.isSeen(chatID, messageID)
+				if dedupeErr != nil {
+					logger.WarnCF("whatsapp", "cmd_dedupe check failed", map[string]any{"err": dedupeErr.Error()})
+				} else if seen {
+					return
+				}
+			}
+			// Mutate state first; only record dedupe and send confirmation on success.
+			if err := c.aiToggle.setEnabled(chatID, enable); err != nil {
+				logger.WarnCF("whatsapp", "ai_toggle set failed", map[string]any{"err": err.Error()})
+				c.mu.Lock()
+				client := c.client
+				c.mu.Unlock()
+				if client != nil && client.IsConnected() {
+					if to, err2 := parseJID(chatID); err2 == nil {
+						errMsg := &waE2E.Message{Conversation: proto.String("Failed to update AI toggle state. Please try again.")}
+						if _, err2 = client.SendMessage(c.runCtx, to, errMsg); err2 != nil {
+							logger.WarnCF("whatsapp", "ai_toggle error reply send failed", map[string]any{"err": err2.Error()})
+						}
+					}
+				}
+				return
+			}
+			// State persisted; record dedupe so redelivery skips the confirmation.
+			if c.cmdDedupe != nil {
+				if err := c.cmdDedupe.markSeen(chatID, messageID); err != nil {
+					logger.WarnCF("whatsapp", "cmd_dedupe mark failed", map[string]any{"err": err.Error()})
+				}
+			}
+			reply := "AI responses disabled for this chat."
+			if enable {
+				reply = "AI responses enabled for this chat."
+			}
+			c.mu.Lock()
+			client := c.client
+			c.mu.Unlock()
+			if client != nil && client.IsConnected() {
+				if to, err := parseJID(chatID); err == nil {
+					waMsg := &waE2E.Message{Conversation: proto.String(reply)}
+					if _, err := client.SendMessage(c.runCtx, to, waMsg); err != nil {
+						logger.WarnCF("whatsapp", "ai_toggle confirmation send failed", map[string]any{"err": err.Error()})
+					}
+				}
+			}
+			return
+		}
+
+		if enabled, err := c.aiToggle.isEnabled(chatID); err != nil {
+			logger.WarnCF("whatsapp", "ai_toggle check failed", map[string]any{"err": err.Error()})
+		} else if !enabled {
+			logger.DebugCF("whatsapp", "AI disabled for chat, dropping message", map[string]any{"chat": chatID})
+			return
+		}
+	}
+
 	skipTriggerCheck := false
 	if !isGroup && c.config != nil && c.config.AllowInitialDirectReply && c.directSeen != nil && shouldRequireTriggerName(false, c.config) {
 		consumed, err := c.directSeen.consumeInitialDirectReply(chatID)
@@ -436,7 +529,7 @@ func (c *WhatsAppNativeChannel) handleIncoming(evt *events.Message) {
 			skipTriggerCheck = true
 		}
 	}
-	if !skipTriggerCheck && shouldRequireTriggerName(isGroup, c.config) && shouldDropGroupMessageForTriggerName(groupTriggerName(c.config), content) {
+	if !skipTriggerCheck && !isGroup && shouldRequireTriggerName(false, c.config) && shouldDropGroupMessageForTriggerName(groupTriggerName(c.config), content) {
 		logger.DebugCF("whatsapp", "WhatsApp message ignored: trigger name absent", map[string]any{
 			"chat": chatID,
 		})
