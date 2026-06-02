@@ -67,3 +67,30 @@ func containsWordFold(content, word string) bool {
 func isWordRune(r rune) bool {
 	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_'
 }
+
+// stripTriggerNamePrefix removes a leading trigger-name word from content
+// (case-insensitive, whole-word) and returns the trimmed remainder.
+// If triggerName is empty or not the leading word, content is returned as-is.
+// Used to allow "bot /ai off" to be recognized as "/ai off" for command parsing.
+func stripTriggerNamePrefix(triggerName, content string) string {
+	tn := strings.TrimSpace(triggerName)
+	if tn == "" {
+		return content
+	}
+	trimmed := strings.TrimSpace(content)
+	tnRunes := []rune(tn)
+	contentRunes := []rune(trimmed)
+	if len(contentRunes) < len(tnRunes) {
+		return content
+	}
+	for i, r := range tnRunes {
+		if !strings.EqualFold(string(contentRunes[i:i+1]), string([]rune{r})) {
+			return content
+		}
+	}
+	after := contentRunes[len(tnRunes):]
+	if len(after) > 0 && isWordRune(after[0]) {
+		return content
+	}
+	return strings.TrimSpace(string(after))
+}
