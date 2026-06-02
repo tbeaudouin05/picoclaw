@@ -327,14 +327,23 @@ func (al *AgentLoop) continueWithSteeringMessages(
 			ChatType: inferChatTypeFromSessionScope(scope),
 		}
 	}
-	return al.runAgentLoop(ctx, agent, processOptions{
+	opts := processOptions{
 		Dispatch:                dispatch,
 		DefaultResponse:         defaultResponse,
 		EnableSummary:           true,
 		SendResponse:            false,
 		InitialSteeringMessages: steeringMsgs,
 		SkipInitialSteeringPoll: true,
-	})
+	}
+	var err error
+	opts, err = resolveTurnProfileOptions(al.GetConfig(), opts)
+	if err != nil {
+		return "", err
+	}
+	if err := al.injectRuntimeSchoolConfig(ctx, &opts); err != nil {
+		return "", err
+	}
+	return al.runAgentLoop(ctx, agent, opts)
 }
 
 func (al *AgentLoop) agentForSession(sessionKey string) *AgentInstance {

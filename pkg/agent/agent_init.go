@@ -16,6 +16,7 @@ import (
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/school"
 	"github.com/sipeed/picoclaw/pkg/skills"
 	"github.com/sipeed/picoclaw/pkg/state"
 	"github.com/sipeed/picoclaw/pkg/tools"
@@ -56,6 +57,11 @@ func NewAgentLoop(
 		})
 	}
 
+	schoolRuntime, err := school.NewRuntime(cfg.RuntimeSchool)
+	if err != nil {
+		logger.ErrorCF("agent", "Failed to initialize runtime school config", map[string]any{"error": err.Error()})
+	}
+
 	// Determine worker pool size from config (default: 1 = sequential)
 	workerPoolSize := cfg.Agents.Defaults.MaxParallelTurns
 	if workerPoolSize <= 0 {
@@ -82,6 +88,7 @@ func NewAgentLoop(
 		fallback:           fallbackChain,
 		cmdRegistry:        commands.NewRegistry(commands.BuiltinDefinitions()),
 		evolution:          bridge,
+		schoolRuntime:      schoolRuntime,
 		steering:           newSteeringQueue(parseSteeringMode(cfg.Agents.Defaults.SteeringMode)),
 		workerSem:          make(chan struct{}, workerPoolSize),
 		llmSem:             llmSem,
@@ -112,7 +119,7 @@ func NewAgentLoop(
 	al.contextManager = al.resolveContextManager()
 
 	// Register shared tools to all agents (now that al is created)
-	registerSharedTools(al, cfg, msgBus, registry, provider)
+	registerSharedTools(al, cfg, msgBus, registry, provider, schoolRuntime)
 
 	return al
 }
@@ -123,6 +130,7 @@ func registerSharedTools(
 	msgBus interfaces.MessageBus,
 	registry *AgentRegistry,
 	provider providers.LLMProvider,
+	schoolRuntime *school.Runtime,
 ) {
 	allowReadPaths := buildAllowReadPatterns(cfg)
 	var ttsProvider tts.TTSProvider
@@ -172,7 +180,10 @@ func registerSharedTools(
 			agent.Tools.Register(tools.NewSerialTool())
 		}
 
-		// Message tool
+		if schoolRuntime != nil && schoolRuntime.AdminUpdatesEnabled() {
+			agent.Tools.Register(tools.NewSchoolConfigUpdateTool(schoolRuntime.Store(), schoolRuntime.SchoolConfigID(), schoolRuntime.AdminUpdateChannels()))
+		}
+
 		if cfg.Tools.IsToolEnabled("message") {
 			messageTool := tools.NewMessageTool()
 			messageTool.SetSendCallback(func(
