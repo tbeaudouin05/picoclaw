@@ -540,6 +540,54 @@ func TestHandleIncoming_AllowsLIDSenderMatchedByPhoneAlt(t *testing.T) {
 	}
 }
 
+func TestHandleIncoming_AllowsLIDSenderByLookupWhenSenderAltEmpty(t *testing.T) {
+	messageBus := bus.NewMessageBus()
+	ch := &WhatsAppNativeChannel{
+		BaseChannel: channels.NewBaseChannel("whatsapp_native", config.WhatsAppSettings{}, messageBus, []string{"1001@s.whatsapp.net"}),
+		runCtx:      context.Background(),
+		lidLookupFn: func(lid types.JID) (string, string, string) {
+			if lid == types.NewJID("lid-user", types.HiddenUserServer) {
+				return "1001@s.whatsapp.net", "found", ""
+			}
+			return "", "not_found", ""
+		},
+	}
+
+	evt := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Sender: types.NewJID("lid-user", types.HiddenUserServer),
+				Chat:   types.NewJID("lid-user", types.HiddenUserServer),
+			},
+			ID:       "mid-lid-allowed-by-lookup",
+			PushName: "Alice",
+		},
+		Message: &waE2E.Message{Conversation: proto.String("hello via lookup")},
+	}
+
+	ch.handleIncoming(evt)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	select {
+	case <-ctx.Done():
+		t.Fatal("timeout: expected LID sender to be allowed by lookup-derived phone JID when SenderAlt is absent")
+	case inbound, ok := <-messageBus.InboundChan():
+		if !ok {
+			t.Fatal("channel closed unexpectedly")
+		}
+		if inbound.Content != "hello via lookup" {
+			t.Fatalf("content=%q", inbound.Content)
+		}
+		if inbound.Context.SenderID != "lid-user@lid" {
+			t.Fatalf("context SenderID=%q, want raw LID sender context", inbound.Context.SenderID)
+		}
+		if inbound.Sender.PlatformID != "1001@s.whatsapp.net" {
+			t.Fatalf("sender PlatformID=%q, want lookup-derived phone JID used for allowlist gate", inbound.Sender.PlatformID)
+		}
+	}
+}
+
 func TestHandleIncoming_RejectsLIDSenderWhenPhoneAltNotAllowed(t *testing.T) {
 	messageBus := bus.NewMessageBus()
 	ch := &WhatsAppNativeChannel{
