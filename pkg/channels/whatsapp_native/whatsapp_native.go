@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -455,17 +456,11 @@ func (c *WhatsAppNativeChannel) handleIncoming(evt *events.Message) {
 	allowedSender, allowed := c.allowedWhatsAppSender(sender, evt.Info.SenderAlt)
 
 	if !allowed {
-		fields := map[string]any{
-			"sender_jid":  senderID,
-			"sender_user": evt.Info.Sender.User,
-		}
-		if !evt.Info.SenderAlt.IsEmpty() {
-			fields["sender_alt_jid"] = evt.Info.SenderAlt.String()
-			fields["sender_alt_user"] = evt.Info.SenderAlt.User
-		}
-		logger.WarnCF("whatsapp", "Message rejected by allowlist", fields)
+		logger.WarnCF("whatsapp", "Message rejected by allowlist", c.buildInboundDiagnosticFields(evt))
 		return
 	}
+
+	logger.InfoCF("whatsapp", "WhatsApp inbound sender diagnostic", c.buildInboundDiagnosticFields(evt))
 
 	// Apply the group trigger-name gate before processing toggle commands so
 	// that /ai on/off cannot bypass the trigger requirement in group chats.
@@ -562,7 +557,11 @@ func (c *WhatsAppNativeChannel) handleIncoming(evt *events.Message) {
 	logger.DebugCF(
 		"whatsapp",
 		"WhatsApp message received",
-		map[string]any{"sender_id": senderID, "content_preview": utils.Truncate(content, 50)},
+		map[string]any{
+			"sender_id":  senderID,
+			"message_id": messageID,
+			"chat_id":    chatID,
+		},
 	)
 
 	inboundCtx := bus.InboundContext{
@@ -575,6 +574,180 @@ func (c *WhatsAppNativeChannel) handleIncoming(evt *events.Message) {
 	}
 
 	c.HandleInboundContext(c.runCtx, chatID, content, mediaPaths, inboundCtx, allowedSender)
+}
+
+func (c *WhatsAppNativeChannel) buildInboundDiagnosticFields(evt *events.Message) map[string]any {
+	fields := map[string]any{
+		"message_id":               evt.Info.ID,
+		"chat_jid":                 evt.Info.Chat.String(),
+		"chat_server":              evt.Info.Chat.Server,
+		"sender_jid":               evt.Info.Sender.String(),
+		"sender_server":            evt.Info.Sender.Server,
+		"sender_is_lid":            evt.Info.Sender.Server == types.HiddenUserServer,
+		"sender_is_s_whatsapp_net": evt.Info.Sender.Server == types.DefaultUserServer,
+		"addressing_mode":          string(evt.Info.AddressingMode),
+		"is_group":                 evt.Info.IsGroup,
+		"is_from_me":               evt.Info.IsFromMe,
+	}
+
+	addJIDDiagnosticField(fields, "sender_alt_jid", evt.Info.SenderAlt)
+	addJIDDiagnosticField(fields, "recipient_alt_jid", evt.Info.RecipientAlt)
+	addJIDDiagnosticField(fields, "broadcast_list_owner_jid", evt.Info.BroadcastListOwner)
+	addJIDDiagnosticField(fields, "msg_meta_target_sender_jid", evt.Info.MsgMetaInfo.TargetSender)
+	addJIDDiagnosticField(fields, "msg_meta_target_chat_jid", evt.Info.MsgMetaInfo.TargetChat)
+	addJIDDiagnosticField(fields, "msg_meta_thread_sender_jid", evt.Info.MsgMetaInfo.ThreadMessageSenderJID)
+
+	if evt.Info.MsgMetaInfo.TargetID != "" {
+		fields["msg_meta_target_id"] = evt.Info.MsgMetaInfo.TargetID
+	}
+	if evt.Info.MsgMetaInfo.ThreadMessageID != "" {
+		fields["msg_meta_thread_message_id"] = evt.Info.MsgMetaInfo.ThreadMessageID
+	}
+	if evt.Info.DeviceSentMeta != nil && evt.Info.DeviceSentMeta.DestinationJID != "" {
+		fields["device_sent_destination_jid"] = evt.Info.DeviceSentMeta.DestinationJID
+	}
+
+	if pn, status, errText := lookupPNForLID(c.client, evt.Info.Sender); status != "" {
+		fields["sender_lid_lookup_status"] = status
+		if pn != "" {
+			fields["sender_lid_lookup_pn_jid"] = pn
+		}
+		if errText != "" {
+			fields["sender_lid_lookup_error"] = errText
+		}
+	}
+	if lid, status, errText := lookupLIDForPN(c.client, evt.Info.SenderAlt); status != "" {
+		fields["sender_alt_lid_lookup_status"] = status
+		if lid != "" {
+			fields["sender_alt_lid_lookup_jid"] = lid
+		}
+		if errText != "" {
+			fields["sender_alt_lid_lookup_error"] = errText
+		}
+	}
+	if lid, status, errText := lookupLIDForPN(c.client, evt.Info.RecipientAlt); status != "" {
+		fields["recipient_alt_lid_lookup_status"] = status
+		if lid != "" {
+			fields["recipient_alt_lid_lookup_jid"] = lid
+		}
+		if errText != "" {
+			fields["recipient_alt_lid_lookup_error"] = errText
+		}
+	}
+
+	return fields
+}
+
+func addJIDDiagnosticField(fields map[string]any, key string, jid types.JID) {
+	if jid.IsEmpty() {
+		return
+	}
+	fields[key] = jid.String()
+	fields[key+"_server"] = jid.Server
+}
+
+func lookupPNForLID(client *whatsmeow.Client, lid types.JID) (string, string, string) {
+	if client == nil {
+		return "", "client_unavailable", ""
+	}
+	if lid.IsEmpty() {
+		return "", "", ""
+	}
+	if lid.Server != types.HiddenUserServer {
+		return "", "", ""
+	}
+	return callJIDStoreLookup(client, "LIDs", "GetPNForLID", lid, types.DefaultUserServer)
+}
+
+func lookupLIDForPN(client *whatsmeow.Client, pn types.JID) (string, string, string) {
+	if client == nil {
+		return "", "client_unavailable", ""
+	}
+	if pn.IsEmpty() {
+		return "", "", ""
+	}
+	if pn.Server != types.DefaultUserServer {
+		return "", "", ""
+	}
+	return callJIDStoreLookup(client, "LIDs", "GetLIDForPN", pn, types.HiddenUserServer)
+}
+
+func callJIDStoreLookup(client *whatsmeow.Client, storeFieldName, methodName string, input types.JID, expectedServer string) (string, string, string) {
+	return callJIDStoreLookupOnStore(client.Store, storeFieldName, methodName, input, expectedServer)
+}
+
+func callJIDStoreLookupOnStore(store any, storeFieldName, methodName string, input types.JID, expectedServer string) (jidText, status, errText string) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			status = "mapping_lookup_panic"
+			errText = fmt.Sprintf("%v", recovered)
+			jidText = ""
+		}
+	}()
+
+	storeValue := reflect.ValueOf(store)
+	if !storeValue.IsValid() {
+		return "", "store_unavailable", ""
+	}
+	if storeValue.Kind() != reflect.Ptr && storeValue.Kind() != reflect.Interface {
+		return "", "store_unavailable", ""
+	}
+	if storeValue.IsNil() {
+		return "", "store_unavailable", ""
+	}
+
+	storeElem := storeValue.Elem()
+	if !storeElem.IsValid() {
+		return "", "store_unavailable", ""
+	}
+
+	field := storeElem.FieldByName(storeFieldName)
+	if !field.IsValid() {
+		return "", "mapping_api_unavailable", ""
+	}
+	if field.Kind() == reflect.Interface && field.IsNil() {
+		return "", "mapping_store_unavailable", ""
+	}
+
+	methodTarget := field
+	if field.Kind() == reflect.Interface || field.Kind() == reflect.Ptr {
+		if field.IsNil() {
+			return "", "mapping_store_unavailable", ""
+		}
+		methodTarget = field.Elem()
+	}
+
+	method := methodTarget.MethodByName(methodName)
+	if !method.IsValid() {
+		return "", "mapping_api_unavailable", ""
+	}
+
+	results := method.Call([]reflect.Value{
+		reflect.ValueOf(context.Background()),
+		reflect.ValueOf(input),
+	})
+	if len(results) != 2 {
+		return "", "mapping_api_unavailable", ""
+	}
+
+	if errVal := results[1]; !errVal.IsNil() {
+		if err, ok := errVal.Interface().(error); ok {
+			return "", "lookup_error", err.Error()
+		}
+		return "", "lookup_error", "unknown error"
+	}
+
+	jid, ok := results[0].Interface().(types.JID)
+	if !ok {
+		return "", "mapping_api_unavailable", ""
+	}
+	if jid.IsEmpty() {
+		return "", "not_found", ""
+	}
+	if expectedServer != "" && jid.Server != expectedServer {
+		return jid.String(), "lookup_mismatch", ""
+	}
+	return jid.String(), "found", ""
 }
 
 func (c *WhatsAppNativeChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]string, error) {
