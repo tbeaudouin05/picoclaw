@@ -53,9 +53,10 @@ type WhatsAppNativeChannel struct {
 	storePath    string
 	client       *whatsmeow.Client
 	container    *sqlstore.Container
-	directSeen   directSeenStore // non-nil when AllowInitialDirectReply is enabled
-	aiToggle     aiToggleStore   // per-chat AI auto-response toggle; non-nil after Start
-	cmdDedupe    cmdDedupeStore  // deduplicates toggle command confirmations on redelivery; non-nil after Start
+	directSeen   directSeenStore                          // non-nil when AllowInitialDirectReply is enabled
+	aiToggle     aiToggleStore                            // per-chat AI auto-response toggle; non-nil after Start
+	cmdDedupe    cmdDedupeStore                           // deduplicates toggle command confirmations on redelivery; non-nil after Start
+	lidLookupFn  func(types.JID) (string, string, string) // test hook; defaults to lookupPNForLID(client, lid)
 	mu           sync.Mutex
 	runCtx       context.Context
 	runCancel    context.CancelFunc
@@ -398,16 +399,30 @@ func (c *WhatsAppNativeChannel) allowedWhatsAppSender(sender bus.SenderInfo, sen
 	if c.IsAllowedSender(sender) {
 		return sender, true
 	}
-	if senderAlt.IsEmpty() {
-		return bus.SenderInfo{}, false
+	if !senderAlt.IsEmpty() {
+		altID := senderAlt.String()
+		if altID != "" && altID != sender.PlatformID {
+			altSender := whatsappSenderInfo(altID, sender.DisplayName)
+			if c.IsAllowedSender(altSender) {
+				return altSender, true
+			}
+		}
 	}
-	altID := senderAlt.String()
-	if altID == "" || altID == sender.PlatformID {
-		return bus.SenderInfo{}, false
-	}
-	altSender := whatsappSenderInfo(altID, sender.DisplayName)
-	if c.IsAllowedSender(altSender) {
-		return altSender, true
+
+	senderJID, err := parseJID(sender.PlatformID)
+	if err == nil && senderJID.Server == types.HiddenUserServer {
+		lookupFn := c.lidLookupFn
+		if lookupFn == nil {
+			lookupFn = func(lid types.JID) (string, string, string) {
+				return lookupPNForLID(c.client, lid)
+			}
+		}
+		if pnJID, status, _ := lookupFn(senderJID); status == "found" && pnJID != "" {
+			lookupSender := whatsappSenderInfo(pnJID, sender.DisplayName)
+			if c.IsAllowedSender(lookupSender) {
+				return lookupSender, true
+			}
+		}
 	}
 	return bus.SenderInfo{}, false
 }
