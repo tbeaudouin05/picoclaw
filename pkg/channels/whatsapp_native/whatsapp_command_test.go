@@ -496,3 +496,155 @@ func TestDirectSeenStoreSeedFromHistorySync(t *testing.T) {
 		t.Fatal("expected empty direct conversation not to be marked seen")
 	}
 }
+
+func TestHandleIncoming_AllowsLIDSenderMatchedByPhoneAlt(t *testing.T) {
+	messageBus := bus.NewMessageBus()
+	ch := &WhatsAppNativeChannel{
+		BaseChannel: channels.NewBaseChannel("whatsapp_native", config.WhatsAppSettings{}, messageBus, []string{"1001@s.whatsapp.net"}),
+		runCtx:      context.Background(),
+	}
+
+	evt := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Sender:    types.NewJID("lid-user", types.HiddenUserServer),
+				SenderAlt: types.NewJID("1001", types.DefaultUserServer),
+				Chat:      types.NewJID("lid-user", types.HiddenUserServer),
+			},
+			ID:       "mid-lid-allowed-by-phone",
+			PushName: "Alice",
+		},
+		Message: &waE2E.Message{Conversation: proto.String("hello from lid")},
+	}
+
+	ch.handleIncoming(evt)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	select {
+	case <-ctx.Done():
+		t.Fatal("timeout: expected LID sender to be allowed by phone-number SenderAlt")
+	case inbound, ok := <-messageBus.InboundChan():
+		if !ok {
+			t.Fatal("channel closed unexpectedly")
+		}
+		if inbound.Content != "hello from lid" {
+			t.Fatalf("content=%q", inbound.Content)
+		}
+		if inbound.Context.SenderID != "lid-user@lid" {
+			t.Fatalf("context SenderID=%q, want raw LID sender context", inbound.Context.SenderID)
+		}
+		if inbound.Sender.PlatformID != "1001@s.whatsapp.net" {
+			t.Fatalf("sender PlatformID=%q, want phone-number SenderAlt identity used for allowlist gate", inbound.Sender.PlatformID)
+		}
+	}
+}
+
+func TestHandleIncoming_RejectsLIDSenderWhenPhoneAltNotAllowed(t *testing.T) {
+	messageBus := bus.NewMessageBus()
+	ch := &WhatsAppNativeChannel{
+		BaseChannel: channels.NewBaseChannel("whatsapp_native", config.WhatsAppSettings{}, messageBus, []string{"9999@s.whatsapp.net"}),
+		runCtx:      context.Background(),
+	}
+
+	evt := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Sender:    types.NewJID("lid-user", types.HiddenUserServer),
+				SenderAlt: types.NewJID("1001", types.DefaultUserServer),
+				Chat:      types.NewJID("lid-user", types.HiddenUserServer),
+			},
+			ID:       "mid-lid-rejected-by-phone",
+			PushName: "Mallory",
+		},
+		Message: &waE2E.Message{Conversation: proto.String("blocked lid")},
+	}
+
+	ch.handleIncoming(evt)
+
+	select {
+	case <-messageBus.InboundChan():
+		t.Fatal("expected no message to be forwarded when neither LID nor phone-number SenderAlt is allowed")
+	default:
+		// rejected as expected
+	}
+}
+
+func TestHandleIncoming_AllowsLIDSenderByLIDDirectly(t *testing.T) {
+	messageBus := bus.NewMessageBus()
+	ch := &WhatsAppNativeChannel{
+		BaseChannel: channels.NewBaseChannel("whatsapp_native", config.WhatsAppSettings{}, messageBus, []string{"lid-user@lid"}),
+		runCtx:      context.Background(),
+	}
+
+	evt := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Sender: types.NewJID("lid-user", types.HiddenUserServer),
+				Chat:   types.NewJID("lid-user", types.HiddenUserServer),
+			},
+			ID:       "mid-lid-allowed-directly",
+			PushName: "Alice",
+		},
+		Message: &waE2E.Message{Conversation: proto.String("hello by lid")},
+	}
+
+	ch.handleIncoming(evt)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	select {
+	case <-ctx.Done():
+		t.Fatal("timeout: expected LID sender to be allowed directly")
+	case inbound, ok := <-messageBus.InboundChan():
+		if !ok {
+			t.Fatal("channel closed unexpectedly")
+		}
+		if inbound.Content != "hello by lid" {
+			t.Fatalf("content=%q", inbound.Content)
+		}
+	}
+}
+
+func TestHandleIncoming_AllowsPhoneSenderMatchedByLIDAlt(t *testing.T) {
+	messageBus := bus.NewMessageBus()
+	ch := &WhatsAppNativeChannel{
+		BaseChannel: channels.NewBaseChannel("whatsapp_native", config.WhatsAppSettings{}, messageBus, []string{"lid-user@lid"}),
+		runCtx:      context.Background(),
+	}
+
+	evt := &events.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{
+				Sender:    types.NewJID("1001", types.DefaultUserServer),
+				SenderAlt: types.NewJID("lid-user", types.HiddenUserServer),
+				Chat:      types.NewJID("1001", types.DefaultUserServer),
+			},
+			ID:       "mid-phone-allowed-by-lid",
+			PushName: "Alice",
+		},
+		Message: &waE2E.Message{Conversation: proto.String("hello from phone")},
+	}
+
+	ch.handleIncoming(evt)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	select {
+	case <-ctx.Done():
+		t.Fatal("timeout: expected phone sender to be allowed by LID SenderAlt")
+	case inbound, ok := <-messageBus.InboundChan():
+		if !ok {
+			t.Fatal("channel closed unexpectedly")
+		}
+		if inbound.Content != "hello from phone" {
+			t.Fatalf("content=%q", inbound.Content)
+		}
+		if inbound.Context.SenderID != "1001@s.whatsapp.net" {
+			t.Fatalf("context SenderID=%q, want raw phone sender context", inbound.Context.SenderID)
+		}
+		if inbound.Sender.PlatformID != "lid-user@lid" {
+			t.Fatalf("sender PlatformID=%q, want LID SenderAlt identity used for allowlist gate", inbound.Sender.PlatformID)
+		}
+	}
+}
