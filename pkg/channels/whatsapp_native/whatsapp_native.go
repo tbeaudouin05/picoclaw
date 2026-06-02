@@ -384,6 +384,33 @@ func (c *WhatsAppNativeChannel) reconnectWithBackoff() {
 	}
 }
 
+func whatsappSenderInfo(platformID, displayName string) bus.SenderInfo {
+	return bus.SenderInfo{
+		Platform:    "whatsapp",
+		PlatformID:  platformID,
+		CanonicalID: identity.BuildCanonicalID("whatsapp", platformID),
+		DisplayName: displayName,
+	}
+}
+
+func (c *WhatsAppNativeChannel) allowedWhatsAppSender(sender bus.SenderInfo, senderAlt types.JID) (bus.SenderInfo, bool) {
+	if c.IsAllowedSender(sender) {
+		return sender, true
+	}
+	if senderAlt.IsEmpty() {
+		return bus.SenderInfo{}, false
+	}
+	altID := senderAlt.String()
+	if altID == "" || altID == sender.PlatformID {
+		return bus.SenderInfo{}, false
+	}
+	altSender := whatsappSenderInfo(altID, sender.DisplayName)
+	if c.IsAllowedSender(altSender) {
+		return altSender, true
+	}
+	return bus.SenderInfo{}, false
+}
+
 func (c *WhatsAppNativeChannel) handleIncoming(evt *events.Message) {
 	if evt.Message == nil {
 		return
@@ -424,14 +451,10 @@ func (c *WhatsAppNativeChannel) handleIncoming(evt *events.Message) {
 	}
 
 	messageID := evt.Info.ID
-	sender := bus.SenderInfo{
-		Platform:    "whatsapp",
-		PlatformID:  senderID,
-		CanonicalID: identity.BuildCanonicalID("whatsapp", senderID),
-		DisplayName: evt.Info.PushName,
-	}
+	sender := whatsappSenderInfo(senderID, evt.Info.PushName)
+	allowedSender, allowed := c.allowedWhatsAppSender(sender, evt.Info.SenderAlt)
 
-	if !c.IsAllowedSender(sender) {
+	if !allowed {
 		fields := map[string]any{
 			"sender_jid":  senderID,
 			"sender_user": evt.Info.Sender.User,
@@ -551,7 +574,7 @@ func (c *WhatsAppNativeChannel) handleIncoming(evt *events.Message) {
 		Raw:       metadata,
 	}
 
-	c.HandleInboundContext(c.runCtx, chatID, content, mediaPaths, inboundCtx, sender)
+	c.HandleInboundContext(c.runCtx, chatID, content, mediaPaths, inboundCtx, allowedSender)
 }
 
 func (c *WhatsAppNativeChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]string, error) {
