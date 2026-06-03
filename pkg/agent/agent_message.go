@@ -198,6 +198,9 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 	if err != nil {
 		return "", err
 	}
+	if err := al.injectRuntimeSchoolConfig(ctx, &opts); err != nil {
+		return "", err
+	}
 
 	// context-dependent commands check their own Runtime fields and report
 	// "unavailable" when the required capability is nil.

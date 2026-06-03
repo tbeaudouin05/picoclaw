@@ -26,6 +26,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
+	"github.com/sipeed/picoclaw/pkg/school"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/state"
 	"github.com/sipeed/picoclaw/pkg/utils"
@@ -61,6 +62,9 @@ type AgentLoop struct {
 	pendingSkills  sync.Map
 	pendingStops   sync.Map
 	mu             sync.RWMutex
+
+	// Runtime school config provider injects current school config into prompt context.
+	schoolRuntime *school.Runtime
 
 	// workerSem limits concurrent turn processing workers.
 	workerSem chan struct{}
@@ -345,6 +349,13 @@ func (al *AgentLoop) Close() {
 	}
 
 	al.GetRegistry().Close()
+	if schoolRuntime := al.getSchoolRuntime(); schoolRuntime != nil {
+		if err := schoolRuntime.Close(); err != nil {
+			logger.ErrorCF("agent", "Failed to close runtime school config", map[string]any{
+				"error": err.Error(),
+			})
+		}
+	}
 	if al.hooks != nil {
 		al.hooks.Close()
 	}
@@ -424,14 +435,18 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 		return fmt.Errorf("context canceled after registry creation: %w", err)
 	}
 
-	// Ensure shared tools are re-registered on the new registry
-	registerSharedTools(al, cfg, al.bus, registry, provider)
-
 	newEvolution, evolutionErr := newEvolutionBridge(registry, cfg, provider)
 	if evolutionErr != nil {
 		logger.WarnCF("agent", "Failed to reinitialize evolution bridge during reload",
 			map[string]any{"error": evolutionErr.Error()})
 	}
+	newSchoolRuntime, schoolRuntimeErr := school.NewRuntime(cfg.RuntimeSchool)
+	if schoolRuntimeErr != nil {
+		logger.ErrorCF("agent", "Failed to reinitialize runtime school config during reload", map[string]any{"error": schoolRuntimeErr.Error()})
+	}
+
+	// Ensure shared tools are re-registered on the new registry using the new runtime.
+	registerSharedTools(al, cfg, al.bus, registry, provider, newSchoolRuntime)
 	if newEvolution != nil {
 		newEvolution.setCurrentCheck(al.isCurrentEvolutionBridge)
 		if err := newEvolution.subscribeRuntimeEvents(al.runtimeEvents.Channel()); err != nil {
@@ -445,11 +460,13 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 	al.mu.Lock()
 	oldRegistry := al.registry
 	oldEvolution := al.evolution
+	oldSchoolRuntime := al.schoolRuntime
 
 	// Store new values
 	al.cfg = cfg
 	al.registry = registry
 	al.evolution = newEvolution
+	al.schoolRuntime = newSchoolRuntime
 
 	// Also update fallback chain with new config; rebuild rate limiter registry.
 	newRL := providers.NewRateLimiterRegistry()
@@ -480,6 +497,12 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 	if oldEvolution != nil {
 		if err := oldEvolution.Close(); err != nil {
 			logger.WarnCF("agent", "Failed to close previous evolution bridge during reload",
+				map[string]any{"error": err.Error()})
+		}
+	}
+	if oldSchoolRuntime != nil {
+		if err := oldSchoolRuntime.Close(); err != nil {
+			logger.WarnCF("agent", "Failed to close previous runtime school config during reload",
 				map[string]any{"error": err.Error()})
 		}
 	}
