@@ -440,7 +440,7 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 		logger.WarnCF("agent", "Failed to reinitialize evolution bridge during reload",
 			map[string]any{"error": evolutionErr.Error()})
 	}
-	newSchoolRuntime, schoolRuntimeErr := school.NewRuntime(cfg.RuntimeSchool)
+	newSchoolRuntime, schoolRuntimeErr := school.NewRuntime(cfg.RuntimeState)
 	if schoolRuntimeErr != nil {
 		logger.ErrorCF("agent", "Failed to reinitialize runtime school config during reload", map[string]any{"error": schoolRuntimeErr.Error()})
 	}

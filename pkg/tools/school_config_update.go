@@ -96,7 +96,7 @@ func (t *SchoolConfigUpdateTool) Execute(ctx context.Context, args map[string]an
 		return ErrorResult(fmt.Sprintf("failed to update school config: %v", err)).WithError(err)
 	}
 	sort.Strings(changed)
-	resp := map[string]any{"status": "ok", "config_id": updated.ID, "config_version": updated.ConfigVersion, "updated_at": updated.UpdatedAt, "changed_paths": changed}
+	resp := map[string]any{"status": "ok", "state_id": updated.ID, "config_version": updated.ConfigVersion, "updated_at": updated.UpdatedAt, "changed_paths": changed}
 	data, _ := json.Marshal(resp)
 	return SilentResult(string(data))
 }

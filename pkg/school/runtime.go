@@ -10,12 +10,12 @@ import (
 
 type Runtime struct {
 	store Store
-	cfg   config.RuntimeSchoolConfig
+	cfg   config.RuntimeStateConfig
 	mu    sync.Mutex
 	init  bool
 }
 
-func NewRuntime(cfg config.RuntimeSchoolConfig) (*Runtime, error) {
+func NewRuntime(cfg config.RuntimeStateConfig) (*Runtime, error) {
 	if !cfg.Enabled {
 		return nil, nil
 	}
@@ -40,14 +40,14 @@ func (r *Runtime) Store() Store {
 	return r.store
 }
 
-func (r *Runtime) SchoolConfigID() string {
+func (r *Runtime) SchoolStateID() string {
 	if r == nil {
-		return MainConfigID
+		return MainStateID
 	}
-	if strings.TrimSpace(r.cfg.ConfigID) == "" {
-		return MainConfigID
+	if strings.TrimSpace(r.cfg.StateID) == "" {
+		return MainStateID
 	}
-	return strings.TrimSpace(r.cfg.ConfigID)
+	return strings.TrimSpace(r.cfg.StateID)
 }
 
 func (r *Runtime) AdminUpdatesEnabled() bool { return r != nil && r.cfg.AdminUpdatesEnabled }
@@ -95,7 +95,7 @@ func (r *Runtime) RuntimePrompt(ctx context.Context) (string, error) {
 	if err := r.EnsureInitialized(ctx); err != nil {
 		return "", err
 	}
-	cfg, err := r.store.GetConfig(ctx, r.SchoolConfigID())
+	cfg, err := r.store.GetConfig(ctx, r.SchoolStateID())
 	if err != nil {
 		return "", err
 	}

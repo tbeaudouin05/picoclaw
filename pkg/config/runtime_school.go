@@ -2,9 +2,9 @@ package config
 
 import "encoding/json"
 
-type RuntimeSchoolConfig struct {
+type RuntimeStateConfig struct {
 	Enabled             bool         `json:"enabled,omitempty" yaml:"-"`
-	ConfigID            string       `json:"config_id,omitempty" yaml:"-"`
+	StateID             string       `json:"state_id,omitempty" yaml:"-"`
 	TursoURL            string       `json:"turso_url,omitempty" yaml:"-"`
 	TursoAuthToken      SecureString `json:"-" yaml:"turso_auth_token,omitempty"`
 	InjectChannels      []string     `json:"inject_channels,omitempty" yaml:"-"`
@@ -12,18 +12,18 @@ type RuntimeSchoolConfig struct {
 	AdminUpdatesEnabled bool         `json:"admin_updates_enabled,omitempty" yaml:"-"`
 }
 
-func (c RuntimeSchoolConfig) MarshalJSON() ([]byte, error) {
-	type publicRuntimeSchoolConfig struct {
+func (c RuntimeStateConfig) MarshalJSON() ([]byte, error) {
+	type publicRuntimeStateConfig struct {
 		Enabled             bool     `json:"enabled,omitempty"`
-		ConfigID            string   `json:"config_id,omitempty"`
+		StateID             string   `json:"state_id,omitempty"`
 		TursoURL            string   `json:"turso_url,omitempty"`
 		InjectChannels      []string `json:"inject_channels,omitempty"`
 		AdminUpdateChannels []string `json:"admin_update_channels,omitempty"`
 		AdminUpdatesEnabled bool     `json:"admin_updates_enabled,omitempty"`
 	}
-	return json.Marshal(publicRuntimeSchoolConfig{
+	return json.Marshal(publicRuntimeStateConfig{
 		Enabled:             c.Enabled,
-		ConfigID:            c.ConfigID,
+		StateID:             c.StateID,
 		TursoURL:            c.TursoURL,
 		InjectChannels:      c.InjectChannels,
 		AdminUpdateChannels: c.AdminUpdateChannels,
