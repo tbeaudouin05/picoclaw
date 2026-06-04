@@ -198,7 +198,7 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 	if err != nil {
 		return "", err
 	}
-	if err := al.injectRuntimeSchoolConfig(ctx, &opts); err != nil {
+	if err := al.injectRuntimeLiveConfig(ctx, &opts); err != nil {
 		return "", err
 	}
 

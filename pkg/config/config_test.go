@@ -3009,3 +3009,81 @@ func testChannelsConfigWithTokens() ChannelsConfig {
 	}
 	return channels
 }
+
+func TestLiveConfigMarshalJSONRedactsAuthToken(t *testing.T) {
+	cfg := LiveConfig{
+		Enabled:  true,
+		RecordID: "main",
+		Driver: LiveConfigDriver{Turso: &LiveConfigTursoDriver{
+			URL:       "libsql://example.turso.io",
+			AuthToken: *NewSecureString("super-secret-token"),
+			Schema:    LiveConfigSchema{Table: "live_config"},
+		}},
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("MarshalJSON() error = %v", err)
+	}
+	text := string(data)
+	if strings.Contains(text, "super-secret-token") || strings.Contains(text, "auth_token") {
+		t.Fatalf("live config JSON leaked auth token: %s", text)
+	}
+	if !strings.Contains(text, "live_config") || !strings.Contains(text, "libsql://example.turso.io") {
+		t.Fatalf("live config JSON missing public fields: %s", text)
+	}
+}
+
+func TestLoadConfigV3RuntimeStateFailsWithLiveConfigHint(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	data := `{"version":3,"agents":{"defaults":{}},"model_list":[],"channel_list":{},"runtime_state":{"enabled":true,"turso_url":"libsql://old"}}`
+	if err := os.WriteFile(configPath, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadConfig(configPath)
+	if err == nil {
+		t.Fatal("expected runtime_state migration error")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "runtime_state was removed") || !strings.Contains(msg, "live_config.driver.turso") {
+		t.Fatalf("error missing live_config hint: %v", err)
+	}
+}
+
+func TestMigrateV3ToV4HappyPath(t *testing.T) {
+	m := map[string]any{"version": float64(3), "agents": map[string]any{"defaults": map[string]any{}}}
+	if err := migrateV3ToV4(m); err != nil {
+		t.Fatalf("migrateV3ToV4() error = %v", err)
+	}
+	if m["version"] != 4 {
+		t.Fatalf("version = %v, want 4", m["version"])
+	}
+}
+
+func TestLiveConfigYAMLContainsOnlyTursoAuthToken(t *testing.T) {
+	cfg := &Config{LiveConfig: LiveConfig{
+		Enabled:             true,
+		RecordID:            "main",
+		InjectChannels:      []string{"whatsapp"},
+		AdminUpdateChannels: []string{"telegram"},
+		AdminUpdatesEnabled: true,
+		Driver: LiveConfigDriver{Turso: &LiveConfigTursoDriver{
+			URL:       "libsql://example.turso.io",
+			AuthToken: *NewSecureString("super-secret-token"),
+			Schema:    LiveConfigSchema{Table: "live_config"},
+		}},
+	}}
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("yaml.Marshal() error = %v", err)
+	}
+	text := string(data)
+	for _, forbidden := range []string{"enabled", "record_id", "inject_channels", "admin_update_channels", "admin_updates_enabled", "libsql://example.turso.io"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("live config YAML leaked non-secret field %q: %s", forbidden, text)
+		}
+	}
+	if !strings.Contains(text, "auth_token") {
+		t.Fatalf("live config YAML missing auth_token: %s", text)
+	}
+}

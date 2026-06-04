@@ -1,4 +1,4 @@
-package school
+package liveconfig
 
 import (
 	"bytes"
@@ -17,9 +17,10 @@ type TursoHTTPStore struct {
 	endpoint string
 	token    string
 	client   *http.Client
+	schema   Schema
 }
 
-func NewTursoHTTPStore(databaseURL, authToken string) (*TursoHTTPStore, error) {
+func NewTursoHTTPStore(databaseURL, authToken string, schema Schema) (*TursoHTTPStore, error) {
 	databaseURL = strings.TrimSpace(databaseURL)
 	authToken = strings.TrimSpace(authToken)
 	if databaseURL == "" {
@@ -27,6 +28,10 @@ func NewTursoHTTPStore(databaseURL, authToken string) (*TursoHTTPStore, error) {
 	}
 	if authToken == "" {
 		return nil, fmt.Errorf("turso auth token is required")
+	}
+	normalizedSchema, err := schema.normalized()
+	if err != nil {
+		return nil, err
 	}
 	httpURL, err := tursoHTTPBaseURL(databaseURL)
 	if err != nil {
@@ -36,6 +41,7 @@ func NewTursoHTTPStore(databaseURL, authToken string) (*TursoHTTPStore, error) {
 		endpoint: strings.TrimRight(httpURL, "/") + "/v2/pipeline",
 		token:    authToken,
 		client:   &http.Client{Timeout: 15 * time.Second},
+		schema:   normalizedSchema,
 	}, nil
 }
 
@@ -61,13 +67,18 @@ func tursoHTTPBaseURL(raw string) (string, error) {
 func (s *TursoHTTPStore) Close() error { return nil }
 
 func (s *TursoHTTPStore) InitSchema(ctx context.Context) error {
-	_, err := s.execute(ctx, "CREATE TABLE IF NOT EXISTS school_config (id TEXT PRIMARY KEY, config_version INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), config_json TEXT NOT NULL)")
+	sql := fmt.Sprintf(
+		"CREATE TABLE IF NOT EXISTS %s (%s TEXT PRIMARY KEY, %s INTEGER NOT NULL DEFAULT 1, %s TEXT NOT NULL DEFAULT (strftime('%%Y-%%m-%%dT%%H:%%M:%%fZ','now')), %s TEXT NOT NULL)",
+		s.schema.Table, s.schema.IDColumn, s.schema.VersionColumn, s.schema.UpdatedColumn, s.schema.PayloadColumn,
+	)
+	_, err := s.execute(ctx, sql)
 	return err
 }
 
-func (s *TursoHTTPStore) GetConfig(ctx context.Context, id string) (*Config, error) {
+func (s *TursoHTTPStore) GetRecord(ctx context.Context, id string) (*Record, error) {
 	id = cleanID(id)
-	res, err := s.execute(ctx, "SELECT id, config_version, updated_at, config_json FROM school_config WHERE id = ?", textArg(id))
+	sql := fmt.Sprintf("SELECT %s, %s, %s, %s FROM %s WHERE %s = ?", s.schema.IDColumn, s.schema.VersionColumn, s.schema.UpdatedColumn, s.schema.PayloadColumn, s.schema.Table, s.schema.IDColumn)
+	res, err := s.execute(ctx, sql, textArg(id))
 	if err != nil {
 		return nil, err
 	}
@@ -76,13 +87,13 @@ func (s *TursoHTTPStore) GetConfig(ctx context.Context, id string) (*Config, err
 	}
 	row := res.Rows[0]
 	if len(row) < 4 {
-		return nil, fmt.Errorf("school_config row has %d columns, want 4", len(row))
+		return nil, fmt.Errorf("%s row has %d columns, want 4", s.schema.Table, len(row))
 	}
 	version, err := row[1].Int64()
 	if err != nil {
-		return nil, fmt.Errorf("decode config_version: %w", err)
+		return nil, fmt.Errorf("decode %s: %w", s.schema.VersionColumn, err)
 	}
-	return &Config{
+	return &Record{
 		ID:            row[0].String(),
 		ConfigVersion: version,
 		UpdatedAt:     row[2].String(),
@@ -90,38 +101,46 @@ func (s *TursoHTTPStore) GetConfig(ctx context.Context, id string) (*Config, err
 	}, nil
 }
 
-func (s *TursoHTTPStore) UpdateConfig(ctx context.Context, id string, expectedVersion int64, configJSON json.RawMessage) (*Config, error) {
+func (s *TursoHTTPStore) UpdateRecord(ctx context.Context, id string, expectedVersion int64, configJSON json.RawMessage) (*Record, error) {
 	id = cleanID(id)
 	configJSON = json.RawMessage(strings.TrimSpace(string(configJSON)))
 	if len(configJSON) == 0 || !json.Valid(configJSON) {
 		return nil, fmt.Errorf("config_json must be valid JSON")
 	}
-	res, err := s.execute(ctx, "UPDATE school_config SET config_version = config_version + 1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), config_json = ? WHERE id = ? AND config_version = ?", textArg(string(configJSON)), textArg(id), intArg(expectedVersion))
+	sql := fmt.Sprintf(
+		"UPDATE %s SET %s = %s + 1, %s = strftime('%%Y-%%m-%%dT%%H:%%M:%%fZ','now'), %s = ? WHERE %s = ? AND %s = ?",
+		s.schema.Table, s.schema.VersionColumn, s.schema.VersionColumn, s.schema.UpdatedColumn, s.schema.PayloadColumn, s.schema.IDColumn, s.schema.VersionColumn,
+	)
+	res, err := s.execute(ctx, sql, textArg(string(configJSON)), textArg(id), intArg(expectedVersion))
 	if err != nil {
 		return nil, err
 	}
 	if res.AffectedRowCount == 0 {
 		return nil, VersionConflictError{ID: id, Expected: expectedVersion}
 	}
-	return s.GetConfig(ctx, id)
+	return s.GetRecord(ctx, id)
 }
 
-func (s *TursoHTTPStore) UpsertInitialConfig(ctx context.Context, id string, configJSON json.RawMessage) (*Config, error) {
+func (s *TursoHTTPStore) UpsertInitialRecord(ctx context.Context, id string, configJSON json.RawMessage) (*Record, error) {
 	id = cleanID(id)
 	if len(configJSON) == 0 || !json.Valid(configJSON) {
 		return nil, fmt.Errorf("config_json must be valid JSON")
 	}
-	_, err := s.execute(ctx, "INSERT INTO school_config (id, config_version, updated_at, config_json) VALUES (?, 1, strftime('%Y-%m-%dT%H:%M:%fZ','now'), ?) ON CONFLICT(id) DO NOTHING", textArg(id), textArg(string(configJSON)))
+	sql := fmt.Sprintf(
+		"INSERT INTO %s (%s, %s, %s, %s) VALUES (?, 1, strftime('%%Y-%%m-%%dT%%H:%%M:%%fZ','now'), ?) ON CONFLICT(%s) DO NOTHING",
+		s.schema.Table, s.schema.IDColumn, s.schema.VersionColumn, s.schema.UpdatedColumn, s.schema.PayloadColumn, s.schema.IDColumn,
+	)
+	_, err := s.execute(ctx, sql, textArg(id), textArg(string(configJSON)))
 	if err != nil {
 		return nil, err
 	}
-	return s.GetConfig(ctx, id)
+	return s.GetRecord(ctx, id)
 }
 
 func cleanID(id string) string {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return MainStateID
+		return MainRecordID
 	}
 	return id
 }

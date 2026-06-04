@@ -24,7 +24,7 @@ import (
 var rrCounter atomic.Uint64
 
 // CurrentVersion is the latest config schema version
-const CurrentVersion = 3
+const CurrentVersion = 4
 
 func init() {
 	initChannel()
@@ -33,21 +33,21 @@ func init() {
 // Config is the current config structure with version support.
 type Config struct {
 	// Config schema version for migration.
-	Version       int                 `json:"version"             yaml:"-"`
-	Isolation     IsolationConfig     `json:"isolation,omitempty" yaml:"-"`
-	Agents        AgentsConfig        `json:"agents"              yaml:"-"`
-	Session       SessionConfig       `json:"session,omitempty"   yaml:"-"`
-	Evolution     EvolutionConfig     `json:"evolution,omitempty" yaml:"-"`
-	Channels      ChannelsConfig      `json:"channel_list"        yaml:"channel_list"`
-	ModelList     SecureModelList     `json:"model_list"          yaml:"model_list"` // New model-centric provider configuration
-	Gateway       GatewayConfig       `json:"gateway"             yaml:"-"`
-	Events        EventsConfig        `json:"events,omitempty"    yaml:"-"`
-	Hooks         HooksConfig         `json:"hooks,omitempty"         yaml:"-"`
-	RuntimeState  RuntimeStateConfig  `json:"runtime_state,omitempty"  yaml:"runtime_state,omitempty"`
-	Tools         ToolsConfig         `json:"tools"                   yaml:",inline"`
-	Heartbeat     HeartbeatConfig     `json:"heartbeat"               yaml:"-"`
-	Devices       DevicesConfig       `json:"devices"                 yaml:"-"`
-	Voice         VoiceConfig         `json:"voice"                   yaml:"-"`
+	Version    int             `json:"version"             yaml:"-"`
+	Isolation  IsolationConfig `json:"isolation,omitempty" yaml:"-"`
+	Agents     AgentsConfig    `json:"agents"              yaml:"-"`
+	Session    SessionConfig   `json:"session,omitempty"   yaml:"-"`
+	Evolution  EvolutionConfig `json:"evolution,omitempty" yaml:"-"`
+	Channels   ChannelsConfig  `json:"channel_list"        yaml:"channel_list"`
+	ModelList  SecureModelList `json:"model_list"          yaml:"model_list"` // New model-centric provider configuration
+	Gateway    GatewayConfig   `json:"gateway"             yaml:"-"`
+	Events     EventsConfig    `json:"events,omitempty"    yaml:"-"`
+	Hooks      HooksConfig     `json:"hooks,omitempty"         yaml:"-"`
+	LiveConfig LiveConfig      `json:"live_config,omitempty"    yaml:"live_config,omitempty"`
+	Tools      ToolsConfig     `json:"tools"                   yaml:",inline"`
+	Heartbeat  HeartbeatConfig `json:"heartbeat"               yaml:"-"`
+	Devices    DevicesConfig   `json:"devices"                 yaml:"-"`
+	Voice      VoiceConfig     `json:"voice"                   yaml:"-"`
 	// BuildInfo contains build-time version information
 	BuildInfo BuildInfo `json:"build_info,omitempty" yaml:"-"`
 
@@ -1289,6 +1289,10 @@ func LoadConfig(path string) (*Config, error) {
 		if migrateErr != nil {
 			return nil, fmt.Errorf("V2→V3 migration failed: %w", migrateErr)
 		}
+		migrateErr = migrateV3ToV4(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V3→V4 migration failed: %w", migrateErr)
+		}
 
 		var migrated []byte
 		migrated, err = json.Marshal(m)
@@ -1343,6 +1347,10 @@ func LoadConfig(path string) (*Config, error) {
 		if migrateErr != nil {
 			return nil, fmt.Errorf("V2→V3 migration failed: %w", migrateErr)
 		}
+		migrateErr = migrateV3ToV4(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V3→V4 migration failed: %w", migrateErr)
+		}
 
 		var migrated []byte
 		migrated, err = json.Marshal(m)
@@ -1395,6 +1403,10 @@ func LoadConfig(path string) (*Config, error) {
 		if migrateErr != nil {
 			return nil, fmt.Errorf("V2→V3 migration failed: %w", migrateErr)
 		}
+		migrateErr = migrateV3ToV4(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V3→V4 migration failed: %w", migrateErr)
+		}
 
 		var migrated []byte
 		migrated, err = json.Marshal(m)
@@ -1412,6 +1424,45 @@ func LoadConfig(path string) (*Config, error) {
 			return nil, err
 		}
 
+		defer func(cfg *Config) {
+			_ = SaveConfig(path, cfg)
+		}(cfg)
+		logger.InfoF(
+			"config migrate success",
+			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
+		)
+	case 3:
+		logger.InfoF(
+			"config migrate start",
+			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
+		)
+		var m map[string]any
+		m, err = loadConfigMap(path)
+		if err != nil {
+			logger.ErrorCF(
+				"config",
+				formatDiagnosticLogMessage("Failed to load config", err),
+				map[string]any{"path": path},
+			)
+			return nil, err
+		}
+		migrateErr := migrateV3ToV4(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V3→V4 migration failed: %w", migrateErr)
+		}
+		var migrated []byte
+		migrated, err = json.Marshal(m)
+		if err != nil {
+			return nil, err
+		}
+		cfg, err = loadConfig(migrated)
+		if err != nil {
+			return nil, err
+		}
+		err = MakeBackup(path)
+		if err != nil {
+			return nil, err
+		}
 		defer func(cfg *Config) {
 			_ = SaveConfig(path, cfg)
 		}(cfg)
