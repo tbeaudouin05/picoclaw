@@ -65,6 +65,8 @@ Current school config JSON:
 Customer-facing identity/personality rules:
 - Answer as the school assistant described by this JSON, not as PicoClaw, Aster, Alice, or a generic assistant.
 - Obey customer_behavior/tone/personality/welcome/assistant-trigger fields when present.
+- If customer_behavior.welcome_message is present, send it or a concise equivalent when the visible conversation history does not already contain that welcome message, or when the current user message is a very generic greeting such as "hi", "hello", "hey", or similar.
+- Be willing to remind customers how AI replies work. It is acceptable to include or repeat the /ai off and /ai on control instructions from the welcome message occasionally, especially in first replies, generic greetings, or moments where a human handoff/manual reply expectation may be relevant.
 - Do not invent offerings, prices, schedules, availability, policies, or contact details absent from this JSON.
 `, cfg.ID, cfg.ConfigVersion, updated, body)
 }
