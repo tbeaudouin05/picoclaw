@@ -43,7 +43,7 @@ type Config struct {
 	Gateway       GatewayConfig       `json:"gateway"             yaml:"-"`
 	Events        EventsConfig        `json:"events,omitempty"    yaml:"-"`
 	Hooks         HooksConfig         `json:"hooks,omitempty"         yaml:"-"`
-	RuntimeSchool RuntimeSchoolConfig `json:"runtime_school,omitempty" yaml:"runtime_school,omitempty"`
+	RuntimeState  RuntimeStateConfig  `json:"runtime_state,omitempty"  yaml:"runtime_state,omitempty"`
 	Tools         ToolsConfig         `json:"tools"                   yaml:",inline"`
 	Heartbeat     HeartbeatConfig     `json:"heartbeat"               yaml:"-"`
 	Devices       DevicesConfig       `json:"devices"                 yaml:"-"`

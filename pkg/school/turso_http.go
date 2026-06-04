@@ -121,7 +121,7 @@ func (s *TursoHTTPStore) UpsertInitialConfig(ctx context.Context, id string, con
 func cleanID(id string) string {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return MainConfigID
+		return MainStateID
 	}
 	return id
 }

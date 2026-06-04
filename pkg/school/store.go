@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-const MainConfigID = "main"
+const MainStateID = "main"
 
 type Config struct {
 	ID            string          `json:"id"`

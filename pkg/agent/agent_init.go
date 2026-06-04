@@ -57,7 +57,7 @@ func NewAgentLoop(
 		})
 	}
 
-	schoolRuntime, err := school.NewRuntime(cfg.RuntimeSchool)
+	schoolRuntime, err := school.NewRuntime(cfg.RuntimeState)
 	if err != nil {
 		logger.ErrorCF("agent", "Failed to initialize runtime school config", map[string]any{"error": err.Error()})
 	}
@@ -181,7 +181,7 @@ func registerSharedTools(
 		}
 
 		if schoolRuntime != nil && schoolRuntime.AdminUpdatesEnabled() {
-			agent.Tools.Register(tools.NewSchoolConfigUpdateTool(schoolRuntime.Store(), schoolRuntime.SchoolConfigID(), schoolRuntime.AdminUpdateChannels()))
+			agent.Tools.Register(tools.NewSchoolConfigUpdateTool(schoolRuntime.Store(), schoolRuntime.SchoolStateID(), schoolRuntime.AdminUpdateChannels()))
 		}
 
 		if cfg.Tools.IsToolEnabled("message") {
