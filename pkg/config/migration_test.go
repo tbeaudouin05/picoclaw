@@ -174,8 +174,8 @@ func TestMigrateV0ToV3(t *testing.T) {
 	err = migrateV2ToV3(m)
 	require.NoError(t, err)
 
-	// Version should be set to CurrentVersion
-	require.Equal(t, CurrentVersion, m["version"])
+	// Version should be set to V3 by the V2→V3 step; LoadConfig applies V3→V4.
+	require.Equal(t, 3, m["version"])
 
 	// Providers should be converted to model_list
 	modelList, ok := m["model_list"].([]any)
@@ -274,8 +274,8 @@ func TestMigrateV1ToV3(t *testing.T) {
 	err = migrateV2ToV3(m)
 	require.NoError(t, err)
 
-	// Version should be set to CurrentVersion
-	require.Equal(t, CurrentVersion, m["version"])
+	// Version should be set to V3 by the V2→V3 step; LoadConfig applies V3→V4.
+	require.Equal(t, 3, m["version"])
 
 	// Channels should be converted to nested format
 	channelList, ok := m["channel_list"].(map[string]any)

@@ -22,11 +22,11 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/constants"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
+	"github.com/sipeed/picoclaw/pkg/liveconfig"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
-	"github.com/sipeed/picoclaw/pkg/school"
 	"github.com/sipeed/picoclaw/pkg/session"
 	"github.com/sipeed/picoclaw/pkg/state"
 	"github.com/sipeed/picoclaw/pkg/utils"
@@ -63,8 +63,8 @@ type AgentLoop struct {
 	pendingStops   sync.Map
 	mu             sync.RWMutex
 
-	// Runtime school config provider injects current school config into prompt context.
-	schoolRuntime *school.Runtime
+	// Runtime live config provider injects current live config into prompt context.
+	liveConfigRuntime *liveconfig.Runtime
 
 	// workerSem limits concurrent turn processing workers.
 	workerSem chan struct{}
@@ -349,9 +349,9 @@ func (al *AgentLoop) Close() {
 	}
 
 	al.GetRegistry().Close()
-	if schoolRuntime := al.getSchoolRuntime(); schoolRuntime != nil {
-		if err := schoolRuntime.Close(); err != nil {
-			logger.ErrorCF("agent", "Failed to close runtime school config", map[string]any{
+	if liveConfigRuntime := al.getLiveConfigRuntime(); liveConfigRuntime != nil {
+		if err := liveConfigRuntime.Close(); err != nil {
+			logger.ErrorCF("agent", "Failed to close runtime live config", map[string]any{
 				"error": err.Error(),
 			})
 		}
@@ -440,13 +440,16 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 		logger.WarnCF("agent", "Failed to reinitialize evolution bridge during reload",
 			map[string]any{"error": evolutionErr.Error()})
 	}
-	newSchoolRuntime, schoolRuntimeErr := school.NewRuntime(cfg.RuntimeState)
-	if schoolRuntimeErr != nil {
-		logger.ErrorCF("agent", "Failed to reinitialize runtime school config during reload", map[string]any{"error": schoolRuntimeErr.Error()})
+	newLiveConfigRuntime, liveConfigRuntimeErr := liveconfig.NewRuntime(cfg.LiveConfig)
+	if liveConfigRuntimeErr != nil {
+		logger.ErrorCF("agent", "Failed to reinitialize runtime live config during reload", map[string]any{"error": liveConfigRuntimeErr.Error()})
+		if cfg.LiveConfig.Enabled {
+			newLiveConfigRuntime = liveconfig.NewUnavailableRuntime(cfg.LiveConfig, liveConfigRuntimeErr)
+		}
 	}
 
 	// Ensure shared tools are re-registered on the new registry using the new runtime.
-	registerSharedTools(al, cfg, al.bus, registry, provider, newSchoolRuntime)
+	registerSharedTools(al, cfg, al.bus, registry, provider, newLiveConfigRuntime)
 	if newEvolution != nil {
 		newEvolution.setCurrentCheck(al.isCurrentEvolutionBridge)
 		if err := newEvolution.subscribeRuntimeEvents(al.runtimeEvents.Channel()); err != nil {
@@ -460,13 +463,13 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 	al.mu.Lock()
 	oldRegistry := al.registry
 	oldEvolution := al.evolution
-	oldSchoolRuntime := al.schoolRuntime
+	oldLiveConfigRuntime := al.liveConfigRuntime
 
 	// Store new values
 	al.cfg = cfg
 	al.registry = registry
 	al.evolution = newEvolution
-	al.schoolRuntime = newSchoolRuntime
+	al.liveConfigRuntime = newLiveConfigRuntime
 
 	// Also update fallback chain with new config; rebuild rate limiter registry.
 	newRL := providers.NewRateLimiterRegistry()
@@ -500,9 +503,9 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 				map[string]any{"error": err.Error()})
 		}
 	}
-	if oldSchoolRuntime != nil {
-		if err := oldSchoolRuntime.Close(); err != nil {
-			logger.WarnCF("agent", "Failed to close previous runtime school config during reload",
+	if oldLiveConfigRuntime != nil {
+		if err := oldLiveConfigRuntime.Close(); err != nil {
+			logger.WarnCF("agent", "Failed to close previous runtime live config during reload",
 				map[string]any{"error": err.Error()})
 		}
 	}

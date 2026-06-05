@@ -396,8 +396,23 @@ func migrateV2ToV3(m map[string]any) error {
 		m["channel_list"] = channels
 	}
 
-	m["version"] = CurrentVersion
+	m["version"] = 3
 
+	return nil
+}
+
+// migrateV3ToV4 intentionally replaces the old runtime_state config surface with
+// the generic live_config driver block. Existing runtime_state deployments must
+// choose the new generic live_config shape explicitly rather than being silently
+// translated from the former school-specific storage contract.
+func migrateV3ToV4(m map[string]any) error {
+	if !compareInt(m["version"], 3) {
+		return fmt.Errorf("migrateV3ToV4: expected version 3, got %v", m["version"])
+	}
+	if _, hasOldRuntimeState := m["runtime_state"]; hasOldRuntimeState {
+		return fmt.Errorf("runtime_state was removed in config version 4; configure live_config.driver.turso with record_id and schema instead")
+	}
+	m["version"] = 4
 	return nil
 }
 
