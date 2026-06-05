@@ -340,7 +340,7 @@ func (al *AgentLoop) continueWithSteeringMessages(
 	if err != nil {
 		return "", err
 	}
-	if err := al.injectRuntimeSchoolConfig(ctx, &opts); err != nil {
+	if err := al.injectRuntimeLiveConfig(ctx, &opts); err != nil {
 		return "", err
 	}
 	return al.runAgentLoop(ctx, agent, opts)
