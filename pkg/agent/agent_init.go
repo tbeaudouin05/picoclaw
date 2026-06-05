@@ -181,7 +181,7 @@ func registerSharedTools(
 		}
 
 		if schoolRuntime != nil && schoolRuntime.AdminUpdatesEnabled() {
-			agent.Tools.Register(tools.NewSchoolConfigUpdateTool(schoolRuntime.Store(), schoolRuntime.SchoolStateID(), schoolRuntime.AdminUpdateChannels(), cfg.RuntimeState.ProtectedUpdatePaths))
+			agent.Tools.Register(tools.NewRuntimeConfigUpdateTool(schoolRuntime.Store(), schoolRuntime.SchoolStateID(), schoolRuntime.AdminUpdateChannels(), cfg.RuntimeState.ProtectedUpdatePaths))
 		}
 
 		if cfg.Tools.IsToolEnabled("message") {

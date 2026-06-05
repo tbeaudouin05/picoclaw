@@ -11,20 +11,20 @@ import (
 	"github.com/sipeed/picoclaw/pkg/school"
 )
 
-type SchoolConfigStore interface {
+type RuntimeConfigStore interface {
 	InitSchema(ctx context.Context) error
 	GetConfig(ctx context.Context, id string) (*school.Config, error)
 	UpdateConfig(ctx context.Context, id string, expectedVersion int64, configJSON json.RawMessage) (*school.Config, error)
 }
 
-type SchoolConfigUpdateTool struct {
-	store                SchoolConfigStore
+type RuntimeConfigUpdateTool struct {
+	store                RuntimeConfigStore
 	configID             string
 	adminChannels        map[string]struct{}
 	protectedUpdatePaths []string
 }
 
-func NewSchoolConfigUpdateTool(store SchoolConfigStore, configID string, adminChannels []string, protectedUpdatePaths []string) *SchoolConfigUpdateTool {
+func NewRuntimeConfigUpdateTool(store RuntimeConfigStore, configID string, adminChannels []string, protectedUpdatePaths []string) *RuntimeConfigUpdateTool {
 	allowed := make(map[string]struct{}, len(adminChannels))
 	for _, channel := range adminChannels {
 		channel = strings.ToLower(strings.TrimSpace(channel))
@@ -32,14 +32,14 @@ func NewSchoolConfigUpdateTool(store SchoolConfigStore, configID string, adminCh
 			allowed[channel] = struct{}{}
 		}
 	}
-	return &SchoolConfigUpdateTool{store: store, configID: configID, adminChannels: allowed, protectedUpdatePaths: normalizeDotPaths(protectedUpdatePaths)}
+	return &RuntimeConfigUpdateTool{store: store, configID: configID, adminChannels: allowed, protectedUpdatePaths: normalizeDotPaths(protectedUpdatePaths)}
 }
 
-func (t *SchoolConfigUpdateTool) Name() string { return "morgana_update_school_config" }
-func (t *SchoolConfigUpdateTool) Description() string {
-	return "Update Morgana school configuration in the authoritative Turso database using dot-path updates. Use this for post-setup customer-visible changes such as tone, personality, offerings, prices, policies, or welcome message. Do not edit setup.json or school-info.json."
+func (t *RuntimeConfigUpdateTool) Name() string { return "update_runtime_config" }
+func (t *RuntimeConfigUpdateTool) Description() string {
+	return "Update the authoritative runtime configuration in Turso using dot-path updates. Use this for admin-approved customer-visible changes such as tone, personality, offerings, prices, policies, or welcome message. Do not edit local snapshot files such as setup.json or school-info.json."
 }
-func (t *SchoolConfigUpdateTool) Parameters() map[string]any {
+func (t *RuntimeConfigUpdateTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -49,9 +49,9 @@ func (t *SchoolConfigUpdateTool) Parameters() map[string]any {
 		"required": []string{"updates"},
 	}
 }
-func (t *SchoolConfigUpdateTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
+func (t *RuntimeConfigUpdateTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
 	if !t.channelAllowed(ToolChannel(ctx)) {
-		return ErrorResult("morgana_update_school_config is restricted to configured admin channels")
+		return ErrorResult("update_runtime_config is restricted to configured admin channels")
 	}
 	if t.store == nil {
 		return ErrorResult("authoritative school config store is not configured")
@@ -105,7 +105,7 @@ func (t *SchoolConfigUpdateTool) Execute(ctx context.Context, args map[string]an
 	return SilentResult(string(data))
 }
 
-func (t *SchoolConfigUpdateTool) channelAllowed(channel string) bool {
+func (t *RuntimeConfigUpdateTool) channelAllowed(channel string) bool {
 	channel = strings.ToLower(strings.TrimSpace(channel))
 	if channel == "" || len(t.adminChannels) == 0 {
 		return false
