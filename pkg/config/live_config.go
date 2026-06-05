@@ -5,12 +5,13 @@ import "encoding/json"
 // LiveConfig configures an authoritative runtime JSON record loaded from an
 // external live-config store and injected into selected agent prompts.
 type LiveConfig struct {
-	Enabled             bool             `json:"enabled,omitempty" yaml:"-"`
-	RecordID            string           `json:"record_id,omitempty" yaml:"-"`
-	Driver              LiveConfigDriver `json:"driver,omitempty" yaml:"driver,omitempty"`
-	InjectChannels      []string         `json:"inject_channels,omitempty" yaml:"-"`
-	AdminUpdateChannels []string         `json:"admin_update_channels,omitempty" yaml:"-"`
-	AdminUpdatesEnabled bool             `json:"admin_updates_enabled,omitempty" yaml:"-"`
+	Enabled              bool             `json:"enabled,omitempty" yaml:"-"`
+	RecordID             string           `json:"record_id,omitempty" yaml:"-"`
+	Driver               LiveConfigDriver `json:"driver,omitempty" yaml:"driver,omitempty"`
+	InjectChannels       []string         `json:"inject_channels,omitempty" yaml:"-"`
+	AdminUpdateChannels  []string         `json:"admin_update_channels,omitempty" yaml:"-"`
+	AdminUpdatesEnabled  bool             `json:"admin_updates_enabled,omitempty" yaml:"-"`
+	ProtectedUpdatePaths []string         `json:"protected_update_paths,omitempty" yaml:"-"`
 }
 
 // LiveConfigDriver selects the concrete live-config storage backend. Only Turso
@@ -46,19 +47,21 @@ func (c LiveConfig) MarshalJSON() ([]byte, error) {
 		Turso *publicTurso `json:"turso,omitempty"`
 	}
 	type publicLiveConfig struct {
-		Enabled             bool          `json:"enabled,omitempty"`
-		RecordID            string        `json:"record_id,omitempty"`
-		Driver              *publicDriver `json:"driver,omitempty"`
-		InjectChannels      []string      `json:"inject_channels,omitempty"`
-		AdminUpdateChannels []string      `json:"admin_update_channels,omitempty"`
-		AdminUpdatesEnabled bool          `json:"admin_updates_enabled,omitempty"`
+		Enabled              bool          `json:"enabled,omitempty"`
+		RecordID             string        `json:"record_id,omitempty"`
+		Driver               *publicDriver `json:"driver,omitempty"`
+		InjectChannels       []string      `json:"inject_channels,omitempty"`
+		AdminUpdateChannels  []string      `json:"admin_update_channels,omitempty"`
+		AdminUpdatesEnabled  bool          `json:"admin_updates_enabled,omitempty"`
+		ProtectedUpdatePaths []string      `json:"protected_update_paths,omitempty"`
 	}
 	out := publicLiveConfig{
-		Enabled:             c.Enabled,
-		RecordID:            c.RecordID,
-		InjectChannels:      c.InjectChannels,
-		AdminUpdateChannels: c.AdminUpdateChannels,
-		AdminUpdatesEnabled: c.AdminUpdatesEnabled,
+		Enabled:              c.Enabled,
+		RecordID:             c.RecordID,
+		InjectChannels:       c.InjectChannels,
+		AdminUpdateChannels:  c.AdminUpdateChannels,
+		AdminUpdatesEnabled:  c.AdminUpdatesEnabled,
+		ProtectedUpdatePaths: c.ProtectedUpdatePaths,
 	}
 	if c.Driver.Turso != nil {
 		out.Driver = &publicDriver{Turso: &publicTurso{URL: c.Driver.Turso.URL, Schema: c.Driver.Turso.Schema}}

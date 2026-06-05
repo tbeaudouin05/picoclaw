@@ -22,12 +22,13 @@ type LiveConfigInitialRecordStore interface {
 }
 
 type LiveConfigUpdateTool struct {
-	store         LiveConfigStore
-	recordID      string
-	adminChannels map[string]struct{}
+	store                LiveConfigStore
+	recordID             string
+	adminChannels        map[string]struct{}
+	protectedUpdatePaths []string
 }
 
-func NewLiveConfigUpdateTool(store LiveConfigStore, recordID string, adminChannels []string) *LiveConfigUpdateTool {
+func NewLiveConfigUpdateTool(store LiveConfigStore, recordID string, adminChannels []string, protectedUpdatePaths []string) *LiveConfigUpdateTool {
 	allowed := make(map[string]struct{}, len(adminChannels))
 	for _, channel := range adminChannels {
 		channel = strings.ToLower(strings.TrimSpace(channel))
@@ -35,7 +36,7 @@ func NewLiveConfigUpdateTool(store LiveConfigStore, recordID string, adminChanne
 			allowed[channel] = struct{}{}
 		}
 	}
-	return &LiveConfigUpdateTool{store: store, recordID: recordID, adminChannels: allowed}
+	return &LiveConfigUpdateTool{store: store, recordID: recordID, adminChannels: allowed, protectedUpdatePaths: normalizeDotPaths(protectedUpdatePaths)}
 }
 
 func (t *LiveConfigUpdateTool) Name() string { return "update_live_config" }
@@ -67,6 +68,9 @@ func (t *LiveConfigUpdateTool) Execute(ctx context.Context, args map[string]any)
 		if _, nested := value.(map[string]any); nested {
 			return ErrorResult(fmt.Sprintf("update %q uses nested object form; use flat dot-path keys such as behavior.tone", path))
 		}
+	}
+	if err := rejectProtectedDotPathUpdates(updatesRaw, t.protectedUpdatePaths); err != nil {
+		return ErrorResult(err.Error()).WithError(err)
 	}
 	if err := t.store.InitSchema(ctx); err != nil {
 		return ErrorResult(fmt.Sprintf("failed to initialize live config schema: %v", err)).WithError(err)
@@ -124,4 +128,60 @@ func (t *LiveConfigUpdateTool) channelAllowed(channel string) bool {
 	}
 	_, ok := t.adminChannels[channel]
 	return ok
+}
+
+func rejectProtectedDotPathUpdates(updates map[string]any, protectedPaths []string) error {
+	if len(updates) == 0 || len(protectedPaths) == 0 {
+		return nil
+	}
+	protected := normalizeDotPaths(protectedPaths)
+	for rawUpdatePath := range updates {
+		updatePath := normalizeDotPath(rawUpdatePath)
+		if updatePath == "" {
+			continue
+		}
+		for _, protectedPath := range protected {
+			if dotPathIntersects(updatePath, protectedPath) {
+				return fmt.Errorf("update %q is not allowed because it intersects protected config path %q", rawUpdatePath, protectedPath)
+			}
+		}
+	}
+	return nil
+}
+
+func normalizeDotPaths(paths []string) []string {
+	out := make([]string, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		path = normalizeDotPath(path)
+		if path == "" {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		out = append(out, path)
+	}
+	return out
+}
+
+func normalizeDotPath(path string) string {
+	parts := strings.Split(strings.TrimSpace(path), ".")
+	normalized := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return ""
+		}
+		normalized = append(normalized, part)
+	}
+	return strings.Join(normalized, ".")
+}
+
+func dotPathIntersects(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	return a == b || strings.HasPrefix(a, b+".") || strings.HasPrefix(b, a+".")
 }
