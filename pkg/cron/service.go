@@ -66,18 +66,39 @@ type CronService struct {
 	stopChan  chan struct{}
 	wakeChan  chan struct{}
 	gronx     *gronx.Gronx
+
+	// jobSem is a counting semaphore that caps concurrent job executions.
+	// The semaphore capacity controls the maximum concurrent jobs.
+	jobSem chan struct{}
+	// runMu protects runningJobs.
+	runMu sync.Mutex
+	// runningJobs tracks job IDs that are currently executing (or waiting for a
+	// semaphore slot). Used to prevent the same job from overlapping itself.
+	runningJobs map[string]struct{}
 }
 
 func NewCronService(storePath string, onJob JobHandler) *CronService {
 	cs := &CronService{
-		storePath: storePath,
-		onJob:     onJob,
-		gronx:     gronx.New(),
-		wakeChan:  make(chan struct{}, 1),
+		storePath:   storePath,
+		onJob:       onJob,
+		gronx:       gronx.New(),
+		wakeChan:    make(chan struct{}, 1),
+		runningJobs: make(map[string]struct{}),
 	}
 	// Initialize and load store on creation
 	cs.loadStore()
 	return cs
+}
+
+// SetMaxConcurrentJobs configures the global cap on simultaneously executing
+// cron jobs. n <= 0 clamps to 1 (one job at a time). Safe to call before Start.
+func (cs *CronService) SetMaxConcurrentJobs(n int) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+	if n <= 0 {
+		n = 1
+	}
+	cs.jobSem = make(chan struct{}, n)
 }
 
 func (cs *CronService) Start() error {
@@ -205,9 +226,56 @@ func (cs *CronService) checkJobs() {
 
 	cs.mu.Unlock()
 
-	// Execute jobs outside lock.
+	// Launch each due job as an independent goroutine so multiple jobs can run
+	// concurrently. Per-job no-overlap is enforced via runningJobs; the global
+	// concurrency cap is enforced by jobSem.
+	var skippedIDs []string
 	for _, jobID := range dueJobIDs {
-		cs.executeJobByID(jobID)
+		cs.runMu.Lock()
+		if _, alreadyRunning := cs.runningJobs[jobID]; alreadyRunning {
+			log.Printf("[cron] job %s: previous run still in progress, skipping", jobID)
+			skippedIDs = append(skippedIDs, jobID)
+			cs.runMu.Unlock()
+			continue
+		}
+		cs.runningJobs[jobID] = struct{}{}
+		cs.runMu.Unlock()
+
+		go func(jid string) {
+			defer func() {
+				cs.runMu.Lock()
+				delete(cs.runningJobs, jid)
+				cs.runMu.Unlock()
+			}()
+			if cs.jobSem != nil {
+				cs.jobSem <- struct{}{}
+				defer func() { <-cs.jobSem }()
+			}
+			cs.executeJobByID(jid)
+		}(jobID)
+	}
+
+	// Overlap-skipped jobs had their NextRunAtMS cleared above but were never
+	// handed to executeJobByID (which normally resets the schedule). Recompute
+	// their next run so the scheduler does not permanently lose the job.
+	if len(skippedIDs) > 0 {
+		skippedSet := make(map[string]bool, len(skippedIDs))
+		for _, sid := range skippedIDs {
+			skippedSet[sid] = true
+		}
+		nowRestore := time.Now().UnixMilli()
+		cs.mu.Lock()
+		for i := range cs.store.Jobs {
+			job := &cs.store.Jobs[i]
+			if skippedSet[job.ID] {
+				job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, nowRestore)
+			}
+		}
+		if err := cs.saveStoreUnsafe(); err != nil {
+			log.Printf("[cron] failed to save store: %v", err)
+		}
+		cs.mu.Unlock()
+		cs.notify()
 	}
 }
 
@@ -298,6 +366,10 @@ func (cs *CronService) executeJobByID(jobID string) {
 	if err := cs.saveStoreUnsafe(); err != nil {
 		log.Printf("[cron] failed to save store: %v", err)
 	}
+	// Wake the scheduler loop so it recalculates nextWake with the newly
+	// assigned NextRunAtMS. Without this, the loop might sleep for up to an
+	// hour after a goroutine-based execution completes.
+	cs.notify()
 }
 
 func (cs *CronService) computeNextRun(schedule *CronSchedule, nowMS int64) *int64 {

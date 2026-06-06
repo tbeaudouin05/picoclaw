@@ -986,8 +986,21 @@ type WebToolsConfig struct {
 
 type CronToolsConfig struct {
 	ToolConfig         `     envPrefix:"PICOCLAW_TOOLS_CRON_"`
-	ExecTimeoutMinutes int  `                                 json:"exec_timeout_minutes" env:"PICOCLAW_TOOLS_CRON_EXEC_TIMEOUT_MINUTES"` // 0 means no timeout
-	AllowCommand       bool `                                 json:"allow_command"        env:"PICOCLAW_TOOLS_CRON_ALLOW_COMMAND"`
+	ExecTimeoutMinutes int  `                                 json:"exec_timeout_minutes"  env:"PICOCLAW_TOOLS_CRON_EXEC_TIMEOUT_MINUTES"`  // 0 means no timeout
+	AllowCommand       bool `                                 json:"allow_command"         env:"PICOCLAW_TOOLS_CRON_ALLOW_COMMAND"`
+	// MaxConcurrent caps how many cron jobs may execute simultaneously across
+	// the whole scheduler. 0 or negative clamps to 1 (one at a time). Individual
+	// jobs still never overlap with themselves regardless of this setting.
+	MaxConcurrent int `                                    json:"max_concurrent"        env:"PICOCLAW_TOOLS_CRON_MAX_CONCURRENT"`
+}
+
+// EffectiveMaxConcurrent returns the effective cap on simultaneously running
+// cron jobs. Values ≤ 0 clamp to 1 (one job at a time by default).
+func (c *CronToolsConfig) EffectiveMaxConcurrent() int {
+	if c.MaxConcurrent <= 0 {
+		return 1
+	}
+	return c.MaxConcurrent
 }
 
 type ExecConfig struct {

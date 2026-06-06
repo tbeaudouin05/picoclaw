@@ -217,6 +217,284 @@ func TestNotify_BuffersPendingWake(t *testing.T) {
 	}
 }
 
+// TestCronService_SetMaxConcurrentJobs_DefaultNil verifies that a freshly
+// constructed service has no semaphore (the config layer, not the constructor,
+// sets the effective default of 1 via SetMaxConcurrentJobs).
+func TestCronService_SetMaxConcurrentJobs_DefaultNil(t *testing.T) {
+	cs, path := setupService(nil)
+	defer os.Remove(path)
+
+	if cs.jobSem != nil {
+		t.Error("expected jobSem to be nil before SetMaxConcurrentJobs is called")
+	}
+}
+
+// TestCronService_SetMaxConcurrentJobs_Semaphore verifies that SetMaxConcurrentJobs
+// creates a semaphore of the requested capacity and that <= 0 clamps to 1.
+func TestCronService_SetMaxConcurrentJobs_Semaphore(t *testing.T) {
+	cs, path := setupService(nil)
+	defer os.Remove(path)
+
+	cs.SetMaxConcurrentJobs(3)
+	if cap(cs.jobSem) != 3 {
+		t.Errorf("jobSem cap = %d, want 3", cap(cs.jobSem))
+	}
+
+	cs.SetMaxConcurrentJobs(0)
+	if cap(cs.jobSem) != 1 {
+		t.Errorf("jobSem cap = %d, want 1 after SetMaxConcurrentJobs(0)", cap(cs.jobSem))
+	}
+
+	cs.SetMaxConcurrentJobs(-1)
+	if cap(cs.jobSem) != 1 {
+		t.Errorf("jobSem cap = %d, want 1 after SetMaxConcurrentJobs(-1)", cap(cs.jobSem))
+	}
+}
+
+// TestCronService_BoundedConcurrency confirms that when N jobs are due at the
+// same time, no more than the configured cap run simultaneously.
+func TestCronService_BoundedConcurrency(t *testing.T) {
+	const numJobs = 6
+	const maxConcurrent = 2
+
+	var mu sync.Mutex
+	var currentRunning, peakRunning int
+	completed := make(chan struct{}, numJobs)
+
+	handler := func(job *CronJob) (string, error) {
+		mu.Lock()
+		currentRunning++
+		if currentRunning > peakRunning {
+			peakRunning = currentRunning
+		}
+		mu.Unlock()
+
+		time.Sleep(150 * time.Millisecond) // slow enough to expose overlap
+
+		mu.Lock()
+		currentRunning--
+		mu.Unlock()
+
+		completed <- struct{}{}
+		return "ok", nil
+	}
+
+	cs, path := setupService(handler)
+	defer os.Remove(path)
+	cs.SetMaxConcurrentJobs(maxConcurrent)
+
+	if err := cs.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer cs.Stop()
+
+	// Add all jobs with a common due time 100ms away so they all land in the
+	// same checkJobs pass. Using Now() directly would return nil from
+	// computeNextRun (which requires AtMS > now).
+	atMS := time.Now().Add(100 * time.Millisecond).UnixMilli()
+	for i := range numJobs {
+		_, err := cs.AddJob(fmt.Sprintf("bounded-%d", i), CronSchedule{Kind: "at", AtMS: &atMS}, "", "cli", "direct")
+		if err != nil {
+			t.Fatalf("AddJob: %v", err)
+		}
+	}
+
+	// Wait for every job to complete.
+	timeout := time.After(10 * time.Second)
+	for range numJobs {
+		select {
+		case <-completed:
+		case <-timeout:
+			t.Fatal("timed out waiting for all jobs to complete")
+		}
+	}
+
+	if peakRunning > maxConcurrent {
+		t.Errorf("peak concurrent executions = %d, exceeds cap %d", peakRunning, maxConcurrent)
+	}
+	if peakRunning == 0 {
+		t.Error("no jobs ran at all")
+	}
+}
+
+// TestCronService_SameJobNoOverlap verifies that a single job instance is
+// skipped when it is still in-flight (runningJobs protection).
+func TestCronService_SameJobNoOverlap(t *testing.T) {
+	handlerCalled := 0
+	handler := func(job *CronJob) (string, error) {
+		handlerCalled++
+		return "ok", nil
+	}
+
+	cs, path := setupService(handler)
+	defer os.Remove(path)
+
+	// Add an every-100ms job.
+	everyMS := int64(100)
+	job, err := cs.AddJob("overlap-job", CronSchedule{Kind: "every", EveryMS: &everyMS}, "", "cli", "direct")
+	if err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+
+	// Make it appear due right now.
+	cs.mu.Lock()
+	pastMS := time.Now().UnixMilli() - 1
+	for i := range cs.store.Jobs {
+		if cs.store.Jobs[i].ID == job.ID {
+			cs.store.Jobs[i].State.NextRunAtMS = &pastMS
+		}
+	}
+	// Mark service as running so checkJobs does not return early.
+	cs.running = true
+	cs.mu.Unlock()
+	defer func() {
+		cs.mu.Lock()
+		cs.running = false
+		cs.mu.Unlock()
+	}()
+
+	// Simulate the job already running by putting it in runningJobs.
+	cs.runMu.Lock()
+	cs.runningJobs[job.ID] = struct{}{}
+	cs.runMu.Unlock()
+
+	// checkJobs should see the job as due but skip it.
+	cs.checkJobs()
+	time.Sleep(50 * time.Millisecond)
+
+	cs.runMu.Lock()
+	delete(cs.runningJobs, job.ID)
+	cs.runMu.Unlock()
+
+	if handlerCalled != 0 {
+		t.Errorf("handler called %d time(s) while job was in runningJobs; want 0", handlerCalled)
+	}
+}
+
+// TestCronService_OverlapSkip_NextRunPreserved is a regression test: a job that
+// is overlap-skipped (same job still in-flight) must retain a valid NextRunAtMS
+// so the scheduler does not permanently lose its schedule.
+func TestCronService_OverlapSkip_NextRunPreserved(t *testing.T) {
+	cs, path := setupService(nil)
+	defer os.Remove(path)
+
+	everyMS := int64(1000)
+	job, err := cs.AddJob("skip-me", CronSchedule{Kind: "every", EveryMS: &everyMS}, "", "cli", "direct")
+	if err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+
+	// Make the job appear due and mark service as running so checkJobs proceeds.
+	cs.mu.Lock()
+	pastMS := time.Now().UnixMilli() - 1
+	for i := range cs.store.Jobs {
+		if cs.store.Jobs[i].ID == job.ID {
+			cs.store.Jobs[i].State.NextRunAtMS = &pastMS
+		}
+	}
+	cs.running = true
+	cs.mu.Unlock()
+	defer func() {
+		cs.mu.Lock()
+		cs.running = false
+		cs.mu.Unlock()
+	}()
+
+	// Simulate the job already executing.
+	cs.runMu.Lock()
+	cs.runningJobs[job.ID] = struct{}{}
+	cs.runMu.Unlock()
+
+	before := time.Now().UnixMilli()
+	cs.checkJobs()
+	after := time.Now().UnixMilli()
+
+	cs.runMu.Lock()
+	delete(cs.runningJobs, job.ID)
+	cs.runMu.Unlock()
+
+	cs.mu.RLock()
+	var nextRunAtMS *int64
+	for _, j := range cs.store.Jobs {
+		if j.ID == job.ID {
+			nextRunAtMS = j.State.NextRunAtMS
+			break
+		}
+	}
+	cs.mu.RUnlock()
+
+	if nextRunAtMS == nil {
+		t.Fatal("NextRunAtMS is nil after overlap skip — scheduling state was lost")
+	}
+	// Next run must be in the future, computed from roughly the time checkJobs ran.
+	expectedMin := before + everyMS
+	expectedMax := after + everyMS + 200 // fuzz for clock jitter
+	if *nextRunAtMS < expectedMin || *nextRunAtMS > expectedMax {
+		t.Errorf("NextRunAtMS = %d, want in [%d, %d]", *nextRunAtMS, expectedMin, expectedMax)
+	}
+}
+
+// TestCronService_DefaultCap1_Serialization confirms that SetMaxConcurrentJobs(1)
+// forces all jobs to run serially: peak concurrency must never exceed 1.
+func TestCronService_DefaultCap1_Serialization(t *testing.T) {
+	const numJobs = 4
+
+	var mu sync.Mutex
+	var currentRunning, peakRunning int
+	completed := make(chan struct{}, numJobs)
+
+	handler := func(job *CronJob) (string, error) {
+		mu.Lock()
+		currentRunning++
+		if currentRunning > peakRunning {
+			peakRunning = currentRunning
+		}
+		mu.Unlock()
+
+		time.Sleep(100 * time.Millisecond)
+
+		mu.Lock()
+		currentRunning--
+		mu.Unlock()
+
+		completed <- struct{}{}
+		return "ok", nil
+	}
+
+	cs, path := setupService(handler)
+	defer os.Remove(path)
+	cs.SetMaxConcurrentJobs(1)
+
+	if err := cs.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer cs.Stop()
+
+	atMS := time.Now().Add(100 * time.Millisecond).UnixMilli()
+	for i := range numJobs {
+		_, err := cs.AddJob(fmt.Sprintf("serial-%d", i), CronSchedule{Kind: "at", AtMS: &atMS}, "", "cli", "direct")
+		if err != nil {
+			t.Fatalf("AddJob: %v", err)
+		}
+	}
+
+	timeout := time.After(10 * time.Second)
+	for range numJobs {
+		select {
+		case <-completed:
+		case <-timeout:
+			t.Fatal("timed out waiting for jobs to complete")
+		}
+	}
+
+	if peakRunning > 1 {
+		t.Errorf("peak concurrent executions = %d with cap=1, want ≤1", peakRunning)
+	}
+	if peakRunning == 0 {
+		t.Error("no jobs ran at all")
+	}
+}
+
 func TestCronService_ConcurrentAccess(t *testing.T) {
 	cs, path := setupService(nil)
 	defer os.Remove(path)
