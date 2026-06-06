@@ -194,6 +194,29 @@ func TestCronService_PersistenceIntegrity(t *testing.T) {
 	}
 }
 
+// TestNotify_BuffersPendingWake proves the lost-wakeup race is fixed: notify()
+// must buffer a pending wake signal even when no runLoop goroutine is parked on
+// wakeChan. With an unbuffered channel the default branch drops the send and
+// the loop sleeps through the next due job.
+func TestNotify_BuffersPendingWake(t *testing.T) {
+	// Use the real constructor so that a regression to make(chan struct{}) is caught.
+	cs, path := setupService(nil)
+	defer os.Remove(path)
+
+	// No runLoop goroutine is started — simulate it being busy / not yet parked.
+	cs.notify()
+
+	if len(cs.wakeChan) != 1 {
+		t.Fatal("notify() dropped the wake signal: channel is empty (lost-wakeup bug)")
+	}
+
+	// A second call must not block and must leave channel length at 1 (already pending).
+	cs.notify()
+	if len(cs.wakeChan) != 1 {
+		t.Fatalf("expected channel length 1 after second notify(), got %d", len(cs.wakeChan))
+	}
+}
+
 func TestCronService_ConcurrentAccess(t *testing.T) {
 	cs, path := setupService(nil)
 	defer os.Remove(path)

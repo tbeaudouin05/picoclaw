@@ -73,7 +73,7 @@ func NewCronService(storePath string, onJob JobHandler) *CronService {
 		storePath: storePath,
 		onJob:     onJob,
 		gronx:     gronx.New(),
-		wakeChan:  make(chan struct{}),
+		wakeChan:  make(chan struct{}, 1),
 	}
 	// Initialize and load store on creation
 	cs.loadStore()
@@ -99,7 +99,7 @@ func (cs *CronService) Start() error {
 
 	cs.stopChan = make(chan struct{})
 	if cs.wakeChan == nil {
-		cs.wakeChan = make(chan struct{})
+		cs.wakeChan = make(chan struct{}, 1)
 	}
 	cs.running = true
 	go cs.runLoop(cs.stopChan)
