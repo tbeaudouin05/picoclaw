@@ -199,9 +199,9 @@ func TestCronService_PersistenceIntegrity(t *testing.T) {
 // wakeChan. With an unbuffered channel the default branch drops the send and
 // the loop sleeps through the next due job.
 func TestNotify_BuffersPendingWake(t *testing.T) {
-	cs := &CronService{
-		wakeChan: make(chan struct{}, 1),
-	}
+	// Use the real constructor so that a regression to make(chan struct{}) is caught.
+	cs, path := setupService(nil)
+	defer os.Remove(path)
 
 	// No runLoop goroutine is started — simulate it being busy / not yet parked.
 	cs.notify()
