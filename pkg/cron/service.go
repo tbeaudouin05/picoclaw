@@ -229,10 +229,12 @@ func (cs *CronService) checkJobs() {
 	// Launch each due job as an independent goroutine so multiple jobs can run
 	// concurrently. Per-job no-overlap is enforced via runningJobs; the global
 	// concurrency cap is enforced by jobSem.
+	var skippedIDs []string
 	for _, jobID := range dueJobIDs {
 		cs.runMu.Lock()
 		if _, alreadyRunning := cs.runningJobs[jobID]; alreadyRunning {
 			log.Printf("[cron] job %s: previous run still in progress, skipping", jobID)
+			skippedIDs = append(skippedIDs, jobID)
 			cs.runMu.Unlock()
 			continue
 		}
@@ -251,6 +253,29 @@ func (cs *CronService) checkJobs() {
 			}
 			cs.executeJobByID(jid)
 		}(jobID)
+	}
+
+	// Overlap-skipped jobs had their NextRunAtMS cleared above but were never
+	// handed to executeJobByID (which normally resets the schedule). Recompute
+	// their next run so the scheduler does not permanently lose the job.
+	if len(skippedIDs) > 0 {
+		skippedSet := make(map[string]bool, len(skippedIDs))
+		for _, sid := range skippedIDs {
+			skippedSet[sid] = true
+		}
+		nowRestore := time.Now().UnixMilli()
+		cs.mu.Lock()
+		for i := range cs.store.Jobs {
+			job := &cs.store.Jobs[i]
+			if skippedSet[job.ID] {
+				job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, nowRestore)
+			}
+		}
+		if err := cs.saveStoreUnsafe(); err != nil {
+			log.Printf("[cron] failed to save store: %v", err)
+		}
+		cs.mu.Unlock()
+		cs.notify()
 	}
 }
 
