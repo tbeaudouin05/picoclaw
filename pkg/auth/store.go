@@ -46,6 +46,9 @@ func (c *AuthCredential) NeedsRefresh() bool {
 }
 
 func authFilePath() string {
+	if path := strings.TrimSpace(os.Getenv(config.EnvOpenAIAuthFile)); path != "" {
+		return path
+	}
 	return filepath.Join(config.GetHome(), "auth.json")
 }
 

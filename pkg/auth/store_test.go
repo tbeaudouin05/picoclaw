@@ -96,6 +96,28 @@ func TestStoreRoundtrip(t *testing.T) {
 	}
 }
 
+func TestAuthFilePathUsesOpenAIEnvOverride(t *testing.T) {
+	tmpDir := t.TempDir()
+	override := filepath.Join(tmpDir, "custom-auth.json")
+	t.Setenv(config.EnvOpenAIAuthFile, override)
+	t.Setenv(config.EnvHome, filepath.Join(tmpDir, ".picoclaw"))
+
+	if got := authFilePath(); got != override {
+		t.Fatalf("authFilePath() = %q, want %q", got, override)
+	}
+
+	cred := &AuthCredential{AccessToken: "override-token", Provider: "openai", AuthMethod: "oauth"}
+	if err := SetCredential("openai", cred); err != nil {
+		t.Fatalf("SetCredential() error: %v", err)
+	}
+	if _, err := os.Stat(override); err != nil {
+		t.Fatalf("Stat(override) error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, ".picoclaw", "auth.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected default auth path to remain absent, got err=%v", err)
+	}
+}
+
 func TestStoreFilePermissions(t *testing.T) {
 	tmpDir := setTestAuthHome(t)
 
