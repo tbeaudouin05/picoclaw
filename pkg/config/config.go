@@ -24,7 +24,7 @@ import (
 var rrCounter atomic.Uint64
 
 // CurrentVersion is the latest config schema version
-const CurrentVersion = 3
+const CurrentVersion = 4
 
 func init() {
 	initChannel()
@@ -47,6 +47,7 @@ type Config struct {
 	Heartbeat HeartbeatConfig `json:"heartbeat"           yaml:"-"`
 	Devices   DevicesConfig   `json:"devices"             yaml:"-"`
 	Voice     VoiceConfig     `json:"voice"               yaml:"-"`
+	LiveConfig LiveConfig `json:"live_config,omitempty"    yaml:"live_config,omitempty"`
 	// BuildInfo contains build-time version information
 	BuildInfo BuildInfo `json:"build_info,omitempty" yaml:"-"`
 
@@ -1264,6 +1265,10 @@ func LoadConfig(path string) (*Config, error) {
 		if migrateErr != nil {
 			return nil, fmt.Errorf("V2→V3 migration failed: %w", migrateErr)
 		}
+		migrateErr = migrateV3ToV4(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V3→V4 migration failed: %w", migrateErr)
+		}
 
 		var migrated []byte
 		migrated, err = json.Marshal(m)
@@ -1285,7 +1290,7 @@ func LoadConfig(path string) (*Config, error) {
 			_ = SaveConfig(path, cfg)
 		}(cfg)
 	case 1:
-		// V1→V3 migration: rename channels→channel_list, infer Enabled, migrate channel configs
+		// V1→V4 migration
 		logger.InfoF(
 			"config migrate start",
 			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
@@ -1318,6 +1323,10 @@ func LoadConfig(path string) (*Config, error) {
 		if migrateErr != nil {
 			return nil, fmt.Errorf("V2→V3 migration failed: %w", migrateErr)
 		}
+		migrateErr = migrateV3ToV4(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V3→V4 migration failed: %w", migrateErr)
+		}
 
 		var migrated []byte
 		migrated, err = json.Marshal(m)
@@ -1343,7 +1352,7 @@ func LoadConfig(path string) (*Config, error) {
 			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
 		)
 	case 2:
-		// V2→V3 migration: rename channels→channel_list, convert flat→nested
+		// V2→V4 migration
 		logger.InfoF(
 			"config migrate start",
 			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
@@ -1370,6 +1379,54 @@ func LoadConfig(path string) (*Config, error) {
 		if migrateErr != nil {
 			return nil, fmt.Errorf("V2→V3 migration failed: %w", migrateErr)
 		}
+		migrateErr = migrateV3ToV4(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V3→V4 migration failed: %w", migrateErr)
+		}
+
+		var migrated []byte
+		migrated, err = json.Marshal(m)
+		if err != nil {
+			return nil, err
+		}
+
+		cfg, err = loadConfig(migrated)
+		if err != nil {
+			return nil, err
+		}
+
+		err = MakeBackup(path)
+		if err != nil {
+			return nil, err
+		}
+
+		defer func(cfg *Config) {
+			_ = SaveConfig(path, cfg)
+		}(cfg)
+		logger.InfoF(
+			"config migrate success",
+			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
+		)
+	case 3:
+		// V3→V4 migration: add live_config support
+		logger.InfoF(
+			"config migrate start",
+			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
+		)
+		var m map[string]any
+		m, err = loadConfigMap(path)
+		if err != nil {
+			logger.ErrorCF(
+				"config",
+				formatDiagnosticLogMessage("Failed to load config", err),
+				map[string]any{"path": path},
+			)
+			return nil, err
+		}
+		migrateErr := migrateV3ToV4(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V3→V4 migration failed: %w", migrateErr)
+		}
 
 		var migrated []byte
 		migrated, err = json.Marshal(m)
@@ -1395,7 +1452,7 @@ func LoadConfig(path string) (*Config, error) {
 			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
 		)
 	case CurrentVersion:
-		// Current version
+		// Current version (4)
 		cfg, err = loadConfig(data)
 		if err != nil {
 			logger.ErrorCF(

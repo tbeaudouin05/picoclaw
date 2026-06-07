@@ -979,7 +979,7 @@ func TestLoadConfig_V1ToV2Migration(t *testing.T) {
 		t.Error("expected backup file with date suffix to be created")
 	}
 
-	// Verify the saved config on disk now has version 2
+	// Verify the saved config on disk now has CurrentVersion
 	saved, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatalf("ReadFile saved config: %v", err)
@@ -990,8 +990,8 @@ func TestLoadConfig_V1ToV2Migration(t *testing.T) {
 	if err := json.Unmarshal(saved, &versionCheck); err != nil {
 		t.Fatalf("Unmarshal saved config: %v", err)
 	}
-	if versionCheck.Version != 3 {
-		t.Errorf("saved config version = %d, want 3", versionCheck.Version)
+	if versionCheck.Version != CurrentVersion {
+		t.Errorf("saved config version = %d, want %d", versionCheck.Version, CurrentVersion)
 	}
 }
 
@@ -1071,8 +1071,8 @@ func TestLoadConfig_V2DirectLoad(t *testing.T) {
 		t.Fatalf("LoadConfig: %v", err)
 	}
 
-	if cfg.Version != 3 {
-		t.Errorf("Version = %d, want 3", cfg.Version)
+	if cfg.Version != CurrentVersion {
+		t.Errorf("Version = %d, want %d", cfg.Version, CurrentVersion)
 	}
 
 	gpt4, _ := cfg.GetModelConfig("gpt-4")
@@ -1085,7 +1085,7 @@ func TestLoadConfig_V2DirectLoad(t *testing.T) {
 		t.Error("claude without enabled field should be false")
 	}
 
-	// V2→V3 migration creates a backup
+	// V2→V4 migration creates a backup
 	entries, _ := os.ReadDir(tmpDir)
 	foundBackup := false
 	for _, e := range entries {
