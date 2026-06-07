@@ -16,6 +16,12 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
+const (
+	defaultLLMCallTimeout      = 120 * time.Second
+	llmWatchdogInitialInterval = 30 * time.Second
+	llmWatchdogMaxInterval     = 60 * time.Second
+)
+
 // CallLLM performs an LLM call with fallback support, hook invocation, and retry logic.
 // It handles PreLLM setup, the actual LLM invocation with retry, and AfterLLM processing.
 // Returns Control indicating what the coordinator should do next.
@@ -148,9 +154,22 @@ func (p *Pipeline) CallLLM(
 			"tools_json":    formatToolsForLog(exec.providerToolDefs),
 		})
 
-	// LLM call closure with fallback support
+	// LLM call closure with fallback support. Always put a deadline around the
+	// provider call, including configured streaming, so Pico/web and chat turns
+	// cannot remain stuck forever if the provider stream never returns.
 	callLLM := func(messagesForCall []providers.Message, toolDefsForCall []providers.ToolDefinition) (*providers.LLMResponse, error) {
-		providerCtx, providerCancel := context.WithCancel(turnCtx)
+		// Acquire a global LLM concurrency slot immediately around the provider
+		// call (covers the streaming, fallback, and single-provider paths below
+		// with a single acquire — no double-counting in fallback). The slot is
+		// released as soon as this call returns, so retries/backoff and tool
+		// execution never hold a slot.
+		releaseSlot, slotErr := al.acquireLLMSlot(turnCtx)
+		if slotErr != nil {
+			return nil, slotErr
+		}
+		defer releaseSlot()
+
+		providerCtx, providerCancel := context.WithTimeout(turnCtx, llmCallTimeout(exec))
 		ts.setProviderCancel(providerCancel)
 		defer func() {
 			providerCancel()
@@ -159,6 +178,15 @@ func (p *Pipeline) CallLLM(
 
 		al.activeRequests.Add(1)
 		defer al.activeRequests.Done()
+		watchdogDone := startLLMCallWatchdog(
+			providerCtx,
+			ts,
+			exec,
+			iteration,
+			len(messagesForCall),
+			len(toolDefsForCall),
+		)
+		defer close(watchdogDone)
 
 		if response, handled, streamErr := p.tryConfiguredStreamingLLM(
 			providerCtx,
@@ -226,6 +254,22 @@ func (p *Pipeline) CallLLM(
 		return exec.activeProvider.Chat(providerCtx, messagesForCall, toolDefsForCall, exec.llmModel, exec.llmOpts)
 	}
 
+	callLLMWithTiming := func(messagesForCall []providers.Message, toolDefsForCall []providers.ToolDefinition) (*providers.LLMResponse, error) {
+		start := time.Now()
+		resp, callErr := callLLM(messagesForCall, toolDefsForCall)
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			logger.WarnCF("agent", "LLM call completed slowly", map[string]any{
+				"agent_id":    ts.agent.ID,
+				"session_key": ts.sessionKey,
+				"iteration":   iteration,
+				"model":       exec.llmModel,
+				"duration_ms": elapsed.Milliseconds(),
+				"error":       callErr != nil,
+			})
+		}
+		return resp, callErr
+	}
+
 	// Retry loop
 	var err error
 	maxRetries := p.Cfg.Agents.Defaults.MaxLLMRetries
@@ -237,7 +281,7 @@ func (p *Pipeline) CallLLM(
 		backoffSecs = 2
 	}
 	for retry := 0; retry <= maxRetries; retry++ {
-		exec.response, err = callLLM(exec.callMessages, exec.providerToolDefs)
+		exec.response, err = callLLMWithTiming(exec.callMessages, exec.providerToolDefs)
 		if err == nil {
 			break
 		}
@@ -734,4 +778,71 @@ func transientLLMRetryReason(err error) (string, bool) {
 	}
 
 	return "", false
+}
+
+func llmCallTimeout(exec *turnExecution) time.Duration {
+	if exec != nil && exec.activeModelConfig != nil && exec.activeModelConfig.RequestTimeout > 0 {
+		return time.Duration(exec.activeModelConfig.RequestTimeout) * time.Second
+	}
+	return defaultLLMCallTimeout
+}
+
+func startLLMCallWatchdog(
+	ctx context.Context,
+	ts *turnState,
+	exec *turnExecution,
+	iteration int,
+	messagesCount int,
+	toolsCount int,
+) chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		interval := llmWatchdogInitialInterval
+		timer := time.NewTimer(interval)
+		defer timer.Stop()
+		start := time.Now()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+				fields := map[string]any{
+					"iteration":      iteration,
+					"duration_ms":    time.Since(start).Milliseconds(),
+					"messages_count": messagesCount,
+					"tools_count":    toolsCount,
+				}
+				if deadline, ok := ctx.Deadline(); ok {
+					fields["deadline_unix_ms"] = deadline.UnixMilli()
+					fields["remaining_ms"] = time.Until(deadline).Milliseconds()
+				}
+				if ts != nil {
+					fields["agent_id"] = ts.agent.ID
+					fields["channel"] = ts.channel
+					fields["chat_id"] = ts.chatID
+					fields["session_key"] = ts.sessionKey
+				}
+				if exec != nil {
+					fields["model"] = exec.llmModel
+					fields["model_name"] = exec.llmModelName
+					fields["configured_streaming"] = configuredStreamingEnabled(exec)
+				}
+				logger.WarnCF("agent", "LLM call still pending", fields)
+				if interval < llmWatchdogMaxInterval {
+					interval *= 2
+					if interval > llmWatchdogMaxInterval {
+						interval = llmWatchdogMaxInterval
+					}
+				}
+				timer.Reset(interval)
+			}
+		}
+	}()
+	return done
+}
+
+func configuredStreamingEnabled(exec *turnExecution) bool {
+	return exec != nil && exec.activeModelConfig != nil && exec.activeModelConfig.Streaming.Enabled
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/commands"
 	"github.com/sipeed/picoclaw/pkg/config"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
+	"github.com/sipeed/picoclaw/pkg/liveconfig"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/skills"
@@ -56,23 +57,46 @@ func NewAgentLoop(
 		})
 	}
 
+	liveConfigRuntime, err := liveconfig.NewRuntime(cfg.LiveConfig)
+	if err != nil {
+		logger.ErrorCF("agent", "Failed to initialize runtime live config", map[string]any{"error": err.Error()})
+		if cfg.LiveConfig.Enabled {
+			liveConfigRuntime = liveconfig.NewUnavailableRuntime(cfg.LiveConfig, err)
+		}
+	}
+
 	// Determine worker pool size from config (default: 1 = sequential)
 	workerPoolSize := cfg.Agents.Defaults.MaxParallelTurns
 	if workerPoolSize <= 0 {
 		workerPoolSize = 1
 	}
+	logger.InfoCF("agent", "Agent worker pool configured", map[string]any{
+		"max_parallel_turns": cfg.Agents.Defaults.MaxParallelTurns,
+		"worker_pool_size":   workerPoolSize,
+	})
+
+	// Build the global LLM concurrency limiter. A limit <= 0 leaves llmSem nil,
+	// meaning unlimited provider concurrency.
+	llmSem, llmSlotWaitTimeout := newLLMConcurrencyLimiter(cfg)
+	logger.InfoCF("agent", "LLM concurrency limiter configured", map[string]any{
+		"max_concurrent_llm_calls": cfg.Agents.Defaults.MaxConcurrentLLMCallsLimit(),
+		"llm_slot_wait_timeout":    llmSlotWaitTimeout.String(),
+	})
 
 	al := &AgentLoop{
-		bus:               msgBus,
-		cfg:               cfg,
-		registry:          registry,
-		state:             stateManager,
-		fallback:          fallbackChain,
-		cmdRegistry:       commands.NewRegistry(commands.BuiltinDefinitions()),
-		evolution:         bridge,
-		steering:          newSteeringQueue(parseSteeringMode(cfg.Agents.Defaults.SteeringMode)),
-		workerSem:         make(chan struct{}, workerPoolSize),
-		ownsRuntimeEvents: true,
+		bus:                msgBus,
+		cfg:                cfg,
+		registry:           registry,
+		state:              stateManager,
+		fallback:           fallbackChain,
+		cmdRegistry:        commands.NewRegistry(commands.BuiltinDefinitions()),
+		evolution:          bridge,
+		liveConfigRuntime:  liveConfigRuntime,
+		steering:           newSteeringQueue(parseSteeringMode(cfg.Agents.Defaults.SteeringMode)),
+		workerSem:          make(chan struct{}, workerPoolSize),
+		llmSem:             llmSem,
+		llmSlotWaitTimeout: llmSlotWaitTimeout,
+		ownsRuntimeEvents:  true,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -98,7 +122,7 @@ func NewAgentLoop(
 	al.contextManager = al.resolveContextManager()
 
 	// Register shared tools to all agents (now that al is created)
-	registerSharedTools(al, cfg, msgBus, registry, provider)
+	registerSharedTools(al, cfg, msgBus, registry, provider, liveConfigRuntime)
 
 	return al
 }
@@ -109,6 +133,7 @@ func registerSharedTools(
 	msgBus interfaces.MessageBus,
 	registry *AgentRegistry,
 	provider providers.LLMProvider,
+	liveConfigRuntime *liveconfig.Runtime,
 ) {
 	allowReadPaths := buildAllowReadPatterns(cfg)
 	var ttsProvider tts.TTSProvider
@@ -158,7 +183,10 @@ func registerSharedTools(
 			agent.Tools.Register(tools.NewSerialTool())
 		}
 
-		// Message tool
+		if liveConfigRuntime != nil && liveConfigRuntime.AdminUpdatesEnabled() {
+			agent.Tools.Register(tools.NewLiveConfigUpdateTool(liveConfigRuntime.Store(), liveConfigRuntime.RecordID(), liveConfigRuntime.AdminUpdateChannels(), cfg.LiveConfig.ProtectedUpdatePaths))
+		}
+
 		if cfg.Tools.IsToolEnabled("message") {
 			messageTool := tools.NewMessageTool()
 			if cfg.Tools.Message.MediaEnabled {
@@ -347,9 +375,10 @@ func registerSharedTools(
 
 				// 5. Build SubTurnConfig
 				cfg := SubTurnConfig{
-					Model:        modelToUse,
-					Tools:        tlSlice,
-					SystemPrompt: systemPrompt,
+					Model:         modelToUse,
+					Tools:         tlSlice,
+					SystemPrompt:  systemPrompt,
+					TargetAgentID: targetAgentID,
 				}
 				if hasMaxTokens {
 					cfg.MaxTokens = maxTokens
@@ -371,12 +400,33 @@ func registerSharedTools(
 				spawnTool.SetAllowlistChecker(func(targetAgentID string) bool {
 					return registry.CanSpawnSubagent(currentAgentID, targetAgentID)
 				})
+				spawnTool.SetTargetModelResolver(func(targetAgentID string) string {
+					if targetAgentID == "" {
+						return agent.Model
+					}
+					if targetAgent, ok := al.GetRegistry().GetAgent(targetAgentID); ok {
+						return targetAgent.Model
+					}
+					return agent.Model
+				})
 
 				agent.Tools.Register(spawnTool)
 
 				// Also register the synchronous subagent tool
 				subagentTool := tools.NewSubagentTool(subagentManager)
 				subagentTool.SetSpawner(NewSubTurnSpawner(al))
+				subagentTool.SetAllowlistChecker(func(targetAgentID string) bool {
+					return registry.CanSpawnSubagent(currentAgentID, targetAgentID)
+				})
+				subagentTool.SetTargetModelResolver(func(targetAgentID string) string {
+					if targetAgentID == "" {
+						return agent.Model
+					}
+					if targetAgent, ok := al.GetRegistry().GetAgent(targetAgentID); ok {
+						return targetAgent.Model
+					}
+					return agent.Model
+				})
 				agent.Tools.Register(subagentTool)
 			}
 			if spawnStatusEnabled {

@@ -225,6 +225,29 @@ func (p *failOnceLLMProvider) GetDefaultModel() string {
 	return "fail-once-model"
 }
 
+type blockingProvider struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func (p *blockingProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	if p.started != nil {
+		p.once.Do(func() { close(p.started) })
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (p *blockingProvider) GetDefaultModel() string {
+	return "blocking-model"
+}
+
 // =============================================================================
 // Test Helper Functions
 // =============================================================================
@@ -1122,5 +1145,57 @@ func TestTurnState_SkillContextSnapshotsTrackLatestSuccessfulPath(t *testing.T) 
 	}
 	if snapshots[1].Sequence != 2 || snapshots[1].Trigger != skillContextTriggerContextRetryRebuild {
 		t.Fatalf("snapshots[1] = %+v, want sequence=2 trigger=%q", snapshots[1], skillContextTriggerContextRetryRebuild)
+	}
+}
+
+func TestPipeline_CallLLM_ProviderCallUsesModelRequestTimeout(t *testing.T) {
+	provider := &blockingProvider{started: make(chan struct{})}
+	al, agent, cleanup := newTurnCoordTestLoop(t, provider)
+	defer cleanup()
+
+	agent.Model = "blocking-alias"
+	agent.Candidates = []providers.FallbackCandidate{{
+		Provider:    "openai",
+		Model:       "blocking-model",
+		DisplayName: "blocking-alias",
+		IdentityKey: "model_name:blocking-alias",
+	}}
+	al.cfg.Agents.Defaults.ModelName = "blocking-alias"
+	al.cfg.Agents.Defaults.MaxLLMRetries = 0
+	al.cfg.ModelList = config.SecureModelList{&config.ModelConfig{
+		ModelName:      "blocking-alias",
+		Provider:       "openai",
+		Model:          "blocking-model",
+		RequestTimeout: 1,
+		Enabled:        true,
+	}}
+
+	pipeline := NewPipeline(al)
+	ts := newTurnState(agent, makeTestProcessOpts("test-session"), turnEventScope{
+		turnID:  "turn-timeout",
+		context: newTurnContext(nil, nil, nil),
+	})
+	exec, err := pipeline.SetupTurn(context.Background(), ts)
+	if err != nil {
+		t.Fatalf("SetupTurn failed: %v", err)
+	}
+
+	if exec.activeModelConfig == nil || exec.activeModelConfig.RequestTimeout != 1 {
+		t.Fatalf("activeModelConfig.RequestTimeout = %#v, want 1", exec.activeModelConfig)
+	}
+
+	start := time.Now()
+	_, err = pipeline.CallLLM(context.Background(), context.Background(), ts, exec, 1)
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected DeadlineExceeded wrapped error, got %v", err)
+	}
+	// The existing timeout retry policy performs three 1s provider attempts with
+	// 2s and 4s backoffs, so the full call should complete in roughly 9s rather
+	// than hanging for the 120s default provider timeout.
+	if elapsed := time.Since(start); elapsed > 12*time.Second {
+		t.Fatalf("provider call did not respect request timeout; elapsed=%v", elapsed)
 	}
 }

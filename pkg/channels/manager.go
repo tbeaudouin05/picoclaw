@@ -1483,7 +1483,7 @@ func splitOutboundMessageContent(msg bus.OutboundMessage, maxLen int) []string {
 // sendWithRetry sends a message through the channel with rate limiting and
 // retry logic. It classifies errors to determine the retry strategy:
 //   - ErrNotRunning / ErrSendFailed: permanent, no retry
-//   - ErrRateLimit: fixed delay retry
+//   - ErrRateLimit: platform retry-after delay when available, otherwise fixed delay
 //   - ErrTemporary / unknown: exponential backoff retry
 func (m *Manager) sendWithRetry(
 	ctx context.Context,
@@ -1491,7 +1491,9 @@ func (m *Manager) sendWithRetry(
 	w *channelWorker,
 	msg bus.OutboundMessage,
 ) ([]string, bool) {
+	sendStart := time.Now()
 	// Rate limit: wait for token
+	rateWaitStart := time.Now()
 	if err := w.limiter.Wait(ctx); err != nil {
 		// ctx canceled, shutting down
 		m.publishChannelEvent(
@@ -1507,19 +1509,44 @@ func (m *Manager) sendWithRetry(
 		)
 		return nil, false
 	}
+	if rateWait := time.Since(rateWaitStart); rateWait > 500*time.Millisecond {
+		logger.WarnCF("channels", "Channel send rate limiter wait was slow", map[string]any{
+			"channel": name,
+			"chat_id": outboundMessageChatID(msg),
+			"wait_ms": rateWait.Milliseconds(),
+		})
+	}
 
 	// Pre-send: stop typing and try to edit placeholder
 	if msgIDs, handled := m.preSend(ctx, name, msg, w.ch); handled {
 		m.publishOutboundSent(name, msg, msgIDs)
+		if elapsed := time.Since(sendStart); elapsed > 500*time.Millisecond {
+			logger.WarnCF("channels", "Channel send completed slowly", map[string]any{
+				"channel":     name,
+				"chat_id":     outboundMessageChatID(msg),
+				"duration_ms": elapsed.Milliseconds(),
+				"retries":     0,
+				"edited":      true,
+			})
+		}
 		return msgIDs, true
 	}
 
 	var lastErr error
 	var msgIDs []string
+	retries := 0
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		msgIDs, lastErr = w.ch.Send(ctx, msg)
 		if lastErr == nil {
 			m.publishOutboundSent(name, msg, msgIDs)
+			if elapsed := time.Since(sendStart); elapsed > 500*time.Millisecond || retries > 0 {
+				logger.WarnCF("channels", "Channel send completed slowly", map[string]any{
+					"channel":     name,
+					"chat_id":     outboundMessageChatID(msg),
+					"duration_ms": elapsed.Milliseconds(),
+					"retries":     retries,
+				})
+			}
 			return msgIDs, true
 		}
 
@@ -1533,10 +1560,23 @@ func (m *Manager) sendWithRetry(
 			break
 		}
 
-		// Rate limit error — fixed delay
+		retries++
+
+		// Rate limit error — prefer the platform-provided retry-after delay.
 		if errors.Is(lastErr, ErrRateLimit) {
+			delay := rateLimitDelay
+			if after, ok := retryAfter(lastErr); ok {
+				delay = after
+			}
+			logger.WarnCF("channels", "Channel send rate limited", map[string]any{
+				"channel":        name,
+				"chat_id":        outboundMessageChatID(msg),
+				"retry_after_ms": delay.Milliseconds(),
+				"attempt":        attempt + 1,
+				"error":          lastErr.Error(),
+			})
 			select {
-			case <-time.After(rateLimitDelay):
+			case <-time.After(delay):
 				continue
 			case <-ctx.Done():
 				return nil, false
@@ -1553,11 +1593,17 @@ func (m *Manager) sendWithRetry(
 	}
 
 	// All retries exhausted or permanent failure
-	logger.ErrorCF("channels", "Send failed", map[string]any{
-		"channel": name,
-		"chat_id": outboundMessageChatID(msg),
-		"error":   lastErr.Error(),
-		"retries": maxRetries,
+	failureMsg := "Send failed"
+	if errors.Is(lastErr, ErrRateLimit) {
+		failureMsg = "Channel send failed after platform rate limit"
+	}
+	logger.ErrorCF("channels", failureMsg, map[string]any{
+		"channel":            name,
+		"chat_id":            outboundMessageChatID(msg),
+		"error":              lastErr.Error(),
+		"retries":            retries,
+		"duration_ms":        time.Since(sendStart).Milliseconds(),
+		"channel_rate_limit": errors.Is(lastErr, ErrRateLimit),
 	})
 	m.publishOutboundFailed(name, msg, lastErr, false)
 
@@ -1620,8 +1666,18 @@ func (m *Manager) dispatchOutbound(ctx context.Context) {
 		m.bus.OutboundChan(),
 		func(msg bus.OutboundMessage) string { return outboundMessageChannel(msg) },
 		func(ctx context.Context, w *channelWorker, msg bus.OutboundMessage) bool {
+			start := time.Now()
 			select {
 			case w.queue <- msg:
+				if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+					logger.WarnCF("channels", "Outbound dispatcher enqueue was slow", map[string]any{
+						"channel":        outboundMessageChannel(msg),
+						"chat_id":        outboundMessageChatID(msg),
+						"wait_ms":        elapsed.Milliseconds(),
+						"queue_len":      len(w.queue),
+						"queue_capacity": cap(w.queue),
+					})
+				}
 				m.publishOutboundQueued(outboundMessageChannel(msg), msg)
 				return true
 			case <-ctx.Done():
@@ -1971,6 +2027,7 @@ func (m *Manager) UnregisterChannel(name string) {
 // a subsequent operation depends on the message having been sent.
 func (m *Manager) SendMessage(ctx context.Context, msg bus.OutboundMessage) error {
 	msg = bus.NormalizeOutboundMessage(msg)
+	start := time.Now()
 	channelName := outboundMessageChannel(msg)
 
 	m.mu.RLock()
@@ -1989,7 +2046,8 @@ func (m *Manager) SendMessage(ctx context.Context, msg bus.OutboundMessage) erro
 	if mlp, ok := w.ch.(MessageLengthProvider); ok {
 		maxLen = mlp.MaxMessageLength()
 	}
-	if chunks := splitOutboundMessageContent(msg, maxLen); len(chunks) > 1 {
+	chunks := splitOutboundMessageContent(msg, maxLen)
+	if len(chunks) > 1 {
 		for _, chunk := range chunks {
 			chunkMsg := msg
 			chunkMsg.Content = chunk
@@ -2000,6 +2058,14 @@ func (m *Manager) SendMessage(ctx context.Context, msg bus.OutboundMessage) erro
 			msg.Content = chunks[0]
 		}
 		m.sendWithRetry(ctx, channelName, w, msg)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		logger.WarnCF("channels", "Synchronous channel SendMessage was slow", map[string]any{
+			"channel":     channelName,
+			"chat_id":     outboundMessageChatID(msg),
+			"duration_ms": elapsed.Milliseconds(),
+			"chunks":      len(chunks),
+		})
 	}
 	return nil
 }

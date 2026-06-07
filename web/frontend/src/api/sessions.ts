@@ -15,6 +15,7 @@ export interface SessionDetail {
     role: "user" | "assistant"
     content: string
     created_at?: string
+    timestamp?: number
     kind?: "normal" | "thought" | "tool_calls"
     model_name?: string
     media?: string[]

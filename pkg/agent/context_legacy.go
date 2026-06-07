@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -294,8 +295,17 @@ func (m *legacyContextManager) retryLLMCall(
 	var err error
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
-		m.al.activeRequests.Add(1)
 		resp, err = func() (*providers.LLMResponse, error) {
+			// Summarization bypasses the main pipeline; bound it by the same
+			// agent-loop LLM concurrency limit. The slot is released as soon as this
+			// attempt returns, so backoff sleeps never hold a slot.
+			releaseSlot, slotErr := m.al.acquireLLMSlot(ctx)
+			if slotErr != nil {
+				return nil, slotErr
+			}
+			defer releaseSlot()
+
+			m.al.activeRequests.Add(1)
 			defer m.al.activeRequests.Done()
 			return agent.Provider.Chat(
 				ctx,
@@ -312,6 +322,11 @@ func (m *legacyContextManager) retryLLMCall(
 
 		if err == nil && resp != nil && resp.Content != "" {
 			return resp, nil
+		}
+		// Slot wait timeouts represent local capacity pressure, not a transient
+		// provider failure. Do not multiply the configured wait by retrying.
+		if errors.Is(err, ErrLLMSlotUnavailable) {
+			break
 		}
 		if attempt < maxRetries-1 {
 			time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)

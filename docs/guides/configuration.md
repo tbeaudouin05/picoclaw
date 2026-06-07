@@ -1069,6 +1069,10 @@ This keeps the runtime lightweight while making new OpenAI-compatible backends m
 > **Note**: The `providers` format is deprecated. Use the new `model_list` format with `.security.yml` for better security.
 >
 > **`max_parallel_turns`**: Controls concurrent processing of messages from different sessions. `1` (default) = sequential; `>1` = parallel. Messages from the same session are always serialized. See [Steering docs](../architecture/steering.md) for details.
+>
+> **`max_concurrent_llm_calls`**: Caps how many LLM provider calls the agent loop may have in flight at once across all turns, subagents, side questions (`/btw`), and summarization. `0` (default) = unlimited. A slot is held only for the duration of each provider call, never while tools run.
+>
+> **`llm_slot_wait_timeout`**: Seconds an LLM step waits for a free slot when `max_concurrent_llm_calls` is reached before failing that step with an error. Unset or `<= 0` defaults to `30`. See [Rate limiting docs](../reference/rate-limiting.md#global-concurrency-limit).
 
 </details>
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 	"github.com/sipeed/picoclaw/pkg/logger"
@@ -130,6 +131,7 @@ func (mb *MessageBus) InboundChan() <-chan InboundMessage {
 
 func (mb *MessageBus) PublishOutbound(ctx context.Context, msg OutboundMessage) error {
 	msg = NormalizeOutboundMessage(msg)
+	start := time.Now()
 	if msg.Context.isZero() {
 		mb.publishFailure("outbound", runtimeScopeFromInboundContext(msg.Context), ErrMissingOutboundContext)
 		return ErrMissingOutboundContext
@@ -137,6 +139,17 @@ func (mb *MessageBus) PublishOutbound(ctx context.Context, msg OutboundMessage) 
 	if err := publish(ctx, mb, mb.outbound, msg); err != nil {
 		mb.publishFailure("outbound", runtimeScopeFromInboundContext(msg.Context), err)
 		return err
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		logger.WarnCF("bus", "Outbound publish was slow", map[string]any{
+			"channel":           msg.Context.Channel,
+			"chat_id":           msg.ChatID,
+			"session_key":       msg.SessionKey,
+			"content_len":       len([]rune(msg.Content)),
+			"wait_ms":           elapsed.Milliseconds(),
+			"outbound_len":      len(mb.outbound),
+			"outbound_capacity": cap(mb.outbound),
+		})
 	}
 	return nil
 }

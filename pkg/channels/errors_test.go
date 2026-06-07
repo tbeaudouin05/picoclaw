@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 )
 
 func TestErrorsIs(t *testing.T) {
@@ -52,5 +53,19 @@ func TestErrorMessages(t *testing.T) {
 		if got := tt.err.Error(); got != tt.want {
 			t.Errorf("error message = %q, want %q", got, tt.want)
 		}
+	}
+}
+
+func TestRetryAfterErrorWrapsRateLimit(t *testing.T) {
+	err := WithRetryAfter(ErrRateLimit, 25*time.Millisecond)
+	if !errors.Is(err, ErrRateLimit) {
+		t.Fatal("expected RetryAfterError to match ErrRateLimit")
+	}
+	delay, ok := retryAfter(err)
+	if !ok {
+		t.Fatal("expected retryAfter to detect RetryAfterError")
+	}
+	if delay != 25*time.Millisecond {
+		t.Fatalf("delay = %v, want 25ms", delay)
 	}
 }

@@ -24,7 +24,7 @@ import (
 var rrCounter atomic.Uint64
 
 // CurrentVersion is the latest config schema version
-const CurrentVersion = 3
+const CurrentVersion = 4
 
 func init() {
 	initChannel()
@@ -33,20 +33,21 @@ func init() {
 // Config is the current config structure with version support.
 type Config struct {
 	// Config schema version for migration.
-	Version   int             `json:"version"             yaml:"-"`
-	Isolation IsolationConfig `json:"isolation,omitempty" yaml:"-"`
-	Agents    AgentsConfig    `json:"agents"              yaml:"-"`
-	Session   SessionConfig   `json:"session,omitempty"   yaml:"-"`
-	Evolution EvolutionConfig `json:"evolution,omitempty" yaml:"-"`
-	Channels  ChannelsConfig  `json:"channel_list"        yaml:"channel_list"`
-	ModelList SecureModelList `json:"model_list"          yaml:"model_list"` // New model-centric provider configuration
-	Gateway   GatewayConfig   `json:"gateway"             yaml:"-"`
-	Events    EventsConfig    `json:"events,omitempty"    yaml:"-"`
-	Hooks     HooksConfig     `json:"hooks,omitempty"     yaml:"-"`
-	Tools     ToolsConfig     `json:"tools"               yaml:",inline"`
-	Heartbeat HeartbeatConfig `json:"heartbeat"           yaml:"-"`
-	Devices   DevicesConfig   `json:"devices"             yaml:"-"`
-	Voice     VoiceConfig     `json:"voice"               yaml:"-"`
+	Version    int             `json:"version"             yaml:"-"`
+	Isolation  IsolationConfig `json:"isolation,omitempty" yaml:"-"`
+	Agents     AgentsConfig    `json:"agents"              yaml:"-"`
+	Session    SessionConfig   `json:"session,omitempty"   yaml:"-"`
+	Evolution  EvolutionConfig `json:"evolution,omitempty" yaml:"-"`
+	Channels   ChannelsConfig  `json:"channel_list"        yaml:"channel_list"`
+	ModelList  SecureModelList `json:"model_list"          yaml:"model_list"` // New model-centric provider configuration
+	Gateway    GatewayConfig   `json:"gateway"             yaml:"-"`
+	Events     EventsConfig    `json:"events,omitempty"    yaml:"-"`
+	Hooks      HooksConfig     `json:"hooks,omitempty"         yaml:"-"`
+	LiveConfig LiveConfig      `json:"live_config,omitempty"    yaml:"live_config,omitempty"`
+	Tools      ToolsConfig     `json:"tools"                   yaml:",inline"`
+	Heartbeat  HeartbeatConfig `json:"heartbeat"               yaml:"-"`
+	Devices    DevicesConfig   `json:"devices"                 yaml:"-"`
+	Voice      VoiceConfig     `json:"voice"                   yaml:"-"`
 	// BuildInfo contains build-time version information
 	BuildInfo BuildInfo `json:"build_info,omitempty" yaml:"-"`
 
@@ -405,6 +406,36 @@ type AgentDefaults struct {
 	TurnProfile               TurnProfileConfig  `json:"turn_profile,omitempty"`
 	MaxLLMRetries             int                `json:"max_llm_retries,omitempty"        env:"PICOCLAW_AGENTS_DEFAULTS_MAX_LLM_RETRIES"`
 	LLMRetryBackoffSecs       int                `json:"llm_retry_backoff_secs,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_LLM_RETRY_BACKOFF_SECS"`
+	// MaxConcurrentLLMCalls bounds the number of LLM provider calls the agent
+	// loop may have in flight at once across all turns, subagents, side
+	// questions, and summarization. A value <= 0 means unlimited.
+	MaxConcurrentLLMCalls int `json:"max_concurrent_llm_calls,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_MAX_CONCURRENT_LLM_CALLS"`
+	// LLMSlotWaitTimeout is how long, in seconds, an LLM step waits for a free
+	// concurrency slot before failing. Unset or nonpositive defaults to 30s.
+	LLMSlotWaitTimeout int `json:"llm_slot_wait_timeout,omitempty" env:"PICOCLAW_AGENTS_DEFAULTS_LLM_SLOT_WAIT_TIMEOUT"`
+}
+
+// DefaultLLMSlotWaitTimeout is the fallback wait time for a free LLM
+// concurrency slot when llm_slot_wait_timeout is unset or nonpositive.
+const DefaultLLMSlotWaitTimeout = 30 * time.Second
+
+// MaxConcurrentLLMCallsLimit returns the configured ceiling on concurrent LLM
+// provider calls. A return value of 0 means unlimited (no semaphore).
+func (d *AgentDefaults) MaxConcurrentLLMCallsLimit() int {
+	if d.MaxConcurrentLLMCalls <= 0 {
+		return 0
+	}
+	return d.MaxConcurrentLLMCalls
+}
+
+// GetLLMSlotWaitTimeout returns how long an LLM step should wait for a free
+// concurrency slot. It defaults to DefaultLLMSlotWaitTimeout when the
+// configured value is unset or nonpositive.
+func (d *AgentDefaults) GetLLMSlotWaitTimeout() time.Duration {
+	if d.LLMSlotWaitTimeout > 0 {
+		return time.Duration(d.LLMSlotWaitTimeout) * time.Second
+	}
+	return DefaultLLMSlotWaitTimeout
 }
 
 const DefaultMaxMediaSize = 20 * 1024 * 1024 // 20 MB
@@ -494,9 +525,12 @@ func (c StreamingConfig) WithDefaults(throttleSeconds, minGrowthChars int) Strea
 }
 
 type WhatsAppSettings struct {
-	BridgeURL        string `json:"bridge_url"         yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_BRIDGE_URL"`
-	UseNative        bool   `json:"use_native"         yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_USE_NATIVE"`
-	SessionStorePath string `json:"session_store_path" yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_SESSION_STORE_PATH"`
+	BridgeURL                  string `json:"bridge_url"                     yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_BRIDGE_URL"`
+	UseNative                  bool   `json:"use_native"                     yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_USE_NATIVE"`
+	SessionStorePath           string `json:"session_store_path"             yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_SESSION_STORE_PATH"`
+	GroupTriggerName           string `json:"group_trigger_name"            yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_GROUP_TRIGGER_NAME"`
+	RequireTriggerNameInDirect bool   `json:"require_trigger_name_in_direct" yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_REQUIRE_TRIGGER_NAME_IN_DIRECT"`
+	AllowInitialDirectReply    bool   `json:"allow_initial_direct_reply"     yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_ALLOW_INITIAL_DIRECT_REPLY"`
 }
 
 type TelegramSettings struct {
@@ -961,8 +995,21 @@ type WebToolsConfig struct {
 
 type CronToolsConfig struct {
 	ToolConfig         `     envPrefix:"PICOCLAW_TOOLS_CRON_"`
-	ExecTimeoutMinutes int  `                                 json:"exec_timeout_minutes" env:"PICOCLAW_TOOLS_CRON_EXEC_TIMEOUT_MINUTES"` // 0 means no timeout
-	AllowCommand       bool `                                 json:"allow_command"        env:"PICOCLAW_TOOLS_CRON_ALLOW_COMMAND"`
+	ExecTimeoutMinutes int  `                                 json:"exec_timeout_minutes"  env:"PICOCLAW_TOOLS_CRON_EXEC_TIMEOUT_MINUTES"`  // 0 means no timeout
+	AllowCommand       bool `                                 json:"allow_command"         env:"PICOCLAW_TOOLS_CRON_ALLOW_COMMAND"`
+	// MaxConcurrent caps how many cron jobs may execute simultaneously across
+	// the whole scheduler. 0 or negative clamps to 1 (one at a time). Individual
+	// jobs still never overlap with themselves regardless of this setting.
+	MaxConcurrent int `                                    json:"max_concurrent"        env:"PICOCLAW_TOOLS_CRON_MAX_CONCURRENT"`
+}
+
+// EffectiveMaxConcurrent returns the effective cap on simultaneously running
+// cron jobs. Values ≤ 0 clamp to 1 (one job at a time by default).
+func (c *CronToolsConfig) EffectiveMaxConcurrent() int {
+	if c.MaxConcurrent <= 0 {
+		return 1
+	}
+	return c.MaxConcurrent
 }
 
 type ExecConfig struct {
@@ -1264,6 +1311,10 @@ func LoadConfig(path string) (*Config, error) {
 		if migrateErr != nil {
 			return nil, fmt.Errorf("V2→V3 migration failed: %w", migrateErr)
 		}
+		migrateErr = migrateV3ToV4(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V3→V4 migration failed: %w", migrateErr)
+		}
 
 		var migrated []byte
 		migrated, err = json.Marshal(m)
@@ -1318,6 +1369,10 @@ func LoadConfig(path string) (*Config, error) {
 		if migrateErr != nil {
 			return nil, fmt.Errorf("V2→V3 migration failed: %w", migrateErr)
 		}
+		migrateErr = migrateV3ToV4(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V3→V4 migration failed: %w", migrateErr)
+		}
 
 		var migrated []byte
 		migrated, err = json.Marshal(m)
@@ -1370,6 +1425,10 @@ func LoadConfig(path string) (*Config, error) {
 		if migrateErr != nil {
 			return nil, fmt.Errorf("V2→V3 migration failed: %w", migrateErr)
 		}
+		migrateErr = migrateV3ToV4(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V3→V4 migration failed: %w", migrateErr)
+		}
 
 		var migrated []byte
 		migrated, err = json.Marshal(m)
@@ -1387,6 +1446,45 @@ func LoadConfig(path string) (*Config, error) {
 			return nil, err
 		}
 
+		defer func(cfg *Config) {
+			_ = SaveConfig(path, cfg)
+		}(cfg)
+		logger.InfoF(
+			"config migrate success",
+			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
+		)
+	case 3:
+		logger.InfoF(
+			"config migrate start",
+			map[string]any{"from": versionInfo.Version, "to": CurrentVersion},
+		)
+		var m map[string]any
+		m, err = loadConfigMap(path)
+		if err != nil {
+			logger.ErrorCF(
+				"config",
+				formatDiagnosticLogMessage("Failed to load config", err),
+				map[string]any{"path": path},
+			)
+			return nil, err
+		}
+		migrateErr := migrateV3ToV4(m)
+		if migrateErr != nil {
+			return nil, fmt.Errorf("V3→V4 migration failed: %w", migrateErr)
+		}
+		var migrated []byte
+		migrated, err = json.Marshal(m)
+		if err != nil {
+			return nil, err
+		}
+		cfg, err = loadConfig(migrated)
+		if err != nil {
+			return nil, err
+		}
+		err = MakeBackup(path)
+		if err != nil {
+			return nil, err
+		}
 		defer func(cfg *Config) {
 			_ = SaveConfig(path, cfg)
 		}(cfg)

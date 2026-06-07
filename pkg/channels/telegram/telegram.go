@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/mymmrac/telego"
+	ta "github.com/mymmrac/telego/telegoapi"
 	th "github.com/mymmrac/telego/telegohandler"
 	tu "github.com/mymmrac/telego/telegoutil"
 
@@ -389,7 +390,7 @@ func (c *TelegramChannel) sendChunk(
 		tgMsg.ParseMode = ""
 		pMsg, err = c.bot.SendMessage(ctx, tgMsg)
 		if err != nil {
-			return "", fmt.Errorf("telegram send: %w", channels.ErrTemporary)
+			return "", wrapTelegramSendError("telegram send", err)
 		}
 	}
 
@@ -495,7 +496,48 @@ func (c *TelegramChannel) EditMessage(ctx context.Context, chatID string, messag
 		}
 	}
 
-	return err
+	return wrapTelegramSendError("telegram edit", err)
+}
+
+func wrapTelegramSendError(prefix string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var apiErr *ta.Error
+	if errors.As(err, &apiErr) {
+		if apiErr.ErrorCode == http.StatusTooManyRequests {
+			retryAfter := telegramRetryAfter(apiErr)
+			return fmt.Errorf("%s: %w", prefix, channels.WithRetryAfter(channels.ErrRateLimit, retryAfter))
+		}
+		return channels.ClassifySendError(apiErr.ErrorCode, fmt.Errorf("%s: %w", prefix, err))
+	}
+	errText := strings.ToLower(err.Error())
+	if strings.Contains(errText, "429") || strings.Contains(errText, "too many requests") {
+		return fmt.Errorf(
+			"%s: %w",
+			prefix,
+			channels.WithRetryAfter(channels.ErrRateLimit, telegramRetryAfterFromText(errText)),
+		)
+	}
+	return fmt.Errorf("%s: %w", prefix, channels.ErrTemporary)
+}
+
+func telegramRetryAfter(apiErr *ta.Error) time.Duration {
+	if apiErr != nil && apiErr.Parameters != nil && apiErr.Parameters.RetryAfter > 0 {
+		return time.Duration(apiErr.Parameters.RetryAfter) * time.Second
+	}
+	return time.Second
+}
+
+func telegramRetryAfterFromText(errText string) time.Duration {
+	re := regexp.MustCompile(`retry after:?\s+(\d+)`)
+	match := re.FindStringSubmatch(errText)
+	if len(match) == 2 {
+		if seconds, convErr := strconv.Atoi(match[1]); convErr == nil && seconds > 0 {
+			return time.Duration(seconds) * time.Second
+		}
+	}
+	return time.Second
 }
 
 // DeleteMessage implements channels.MessageDeleter.

@@ -531,6 +531,15 @@ func (al *AgentLoop) askSideQuestion(
 	}
 
 	callSideLLM := func(callMessages []providers.Message) (*providers.LLMResponse, error) {
+		// Side questions (/btw) bypass the main pipeline but still count against
+		// the global LLM concurrency limit. Acquire once around the whole call so
+		// the fallback and single-candidate branches below share one slot.
+		releaseSlot, slotErr := al.acquireLLMSlot(ctx)
+		if slotErr != nil {
+			return nil, slotErr
+		}
+		defer releaseSlot()
+
 		if len(activeCandidates) > 1 && al.fallback != nil {
 			fbResult, err := al.fallback.ExecuteCandidate(
 				ctx,

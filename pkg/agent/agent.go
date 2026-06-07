@@ -22,6 +22,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/constants"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
+	"github.com/sipeed/picoclaw/pkg/liveconfig"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -62,8 +63,20 @@ type AgentLoop struct {
 	pendingStops   sync.Map
 	mu             sync.RWMutex
 
+	// Runtime live config provider injects current live config into prompt context.
+	liveConfigRuntime *liveconfig.Runtime
+
 	// workerSem limits concurrent turn processing workers.
 	workerSem chan struct{}
+
+	// llmSem bounds the number of concurrent LLM provider calls across the
+	// agent loop (main pipeline, subturns, side questions, summarization). A
+	// nil semaphore means unlimited. It is sized once at construction, mirroring
+	// workerSem, and is acquired only immediately around provider calls — never
+	// while tools run. llmSlotWaitTimeout is how long an LLM step waits for a
+	// free slot before failing.
+	llmSem             chan struct{}
+	llmSlotWaitTimeout time.Duration
 
 	// activeTurnStates tracks active turns per session to prevent duplicates.
 	activeTurnStates sync.Map
@@ -210,9 +223,20 @@ func (al *AgentLoop) Run(ctx context.Context) error {
 			// draining the inbound channel. The goroutine blocks on the semaphore.
 			go func(m bus.InboundMessage) {
 				// Acquire semaphore slot (blocks if at capacity)
+				workerWaitStart := time.Now()
 				select {
 				case al.workerSem <- struct{}{}:
 					// Got slot, start worker
+					if wait := time.Since(workerWaitStart); wait > 500*time.Millisecond {
+						logger.WarnCF("agent", "Worker semaphore acquisition was slow", map[string]any{
+							"session_key":     sessionKey,
+							"channel":         m.Channel,
+							"chat_id":         m.ChatID,
+							"wait_ms":         wait.Milliseconds(),
+							"worker_capacity": cap(al.workerSem),
+							"worker_in_use":   len(al.workerSem),
+						})
+					}
 				case <-ctx.Done():
 					// Context canceled while waiting for a slot — clean up the
 					// placeholder to prevent session-level deadlock.
@@ -325,6 +349,13 @@ func (al *AgentLoop) Close() {
 	}
 
 	al.GetRegistry().Close()
+	if liveConfigRuntime := al.getLiveConfigRuntime(); liveConfigRuntime != nil {
+		if err := liveConfigRuntime.Close(); err != nil {
+			logger.ErrorCF("agent", "Failed to close runtime live config", map[string]any{
+				"error": err.Error(),
+			})
+		}
+	}
 	if al.hooks != nil {
 		al.hooks.Close()
 	}
@@ -404,14 +435,21 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 		return fmt.Errorf("context canceled after registry creation: %w", err)
 	}
 
-	// Ensure shared tools are re-registered on the new registry
-	registerSharedTools(al, cfg, al.bus, registry, provider)
-
 	newEvolution, evolutionErr := newEvolutionBridge(registry, cfg, provider)
 	if evolutionErr != nil {
 		logger.WarnCF("agent", "Failed to reinitialize evolution bridge during reload",
 			map[string]any{"error": evolutionErr.Error()})
 	}
+	newLiveConfigRuntime, liveConfigRuntimeErr := liveconfig.NewRuntime(cfg.LiveConfig)
+	if liveConfigRuntimeErr != nil {
+		logger.ErrorCF("agent", "Failed to reinitialize runtime live config during reload", map[string]any{"error": liveConfigRuntimeErr.Error()})
+		if cfg.LiveConfig.Enabled {
+			newLiveConfigRuntime = liveconfig.NewUnavailableRuntime(cfg.LiveConfig, liveConfigRuntimeErr)
+		}
+	}
+
+	// Ensure shared tools are re-registered on the new registry using the new runtime.
+	registerSharedTools(al, cfg, al.bus, registry, provider, newLiveConfigRuntime)
 	if newEvolution != nil {
 		newEvolution.setCurrentCheck(al.isCurrentEvolutionBridge)
 		if err := newEvolution.subscribeRuntimeEvents(al.runtimeEvents.Channel()); err != nil {
@@ -425,11 +463,13 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 	al.mu.Lock()
 	oldRegistry := al.registry
 	oldEvolution := al.evolution
+	oldLiveConfigRuntime := al.liveConfigRuntime
 
 	// Store new values
 	al.cfg = cfg
 	al.registry = registry
 	al.evolution = newEvolution
+	al.liveConfigRuntime = newLiveConfigRuntime
 
 	// Also update fallback chain with new config; rebuild rate limiter registry.
 	newRL := providers.NewRateLimiterRegistry()
@@ -460,6 +500,12 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 	if oldEvolution != nil {
 		if err := oldEvolution.Close(); err != nil {
 			logger.WarnCF("agent", "Failed to close previous evolution bridge during reload",
+				map[string]any{"error": err.Error()})
+		}
+	}
+	if oldLiveConfigRuntime != nil {
+		if err := oldLiveConfigRuntime.Close(); err != nil {
+			logger.WarnCF("agent", "Failed to close previous runtime live config during reload",
 				map[string]any{"error": err.Error()})
 		}
 	}

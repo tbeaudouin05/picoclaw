@@ -2,6 +2,7 @@ package oauthprovider
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -13,11 +14,14 @@ import (
 	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	orc "github.com/sipeed/picoclaw/pkg/providers/openai_responses_common"
+	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 )
 
 const (
 	codexDefaultModel        = "gpt-5.3-codex"
 	codexDefaultInstructions = "You are Codex, a coding assistant."
+
+	codexAPIURL = "https://chatgpt.com/backend-api/codex"
 )
 
 type CodexProvider struct {
@@ -30,11 +34,15 @@ type CodexProvider struct {
 const defaultCodexInstructions = "You are Codex, a coding assistant."
 
 func NewCodexProvider(token, accountID string) *CodexProvider {
+	return NewCodexProviderWithOptions(token, accountID)
+}
+
+func NewCodexProviderWithOptions(token, accountID string) *CodexProvider {
 	opts := []option.RequestOption{
-		option.WithBaseURL("https://chatgpt.com/backend-api/codex"),
+		option.WithBaseURL(codexAPIURL),
 		option.WithAPIKey(token),
-		option.WithHeader("originator", "codex_cli_rs"),
 		option.WithHeader("OpenAI-Beta", "responses=experimental"),
+		option.WithHeader("originator", "codex_cli_rs"),
 	}
 	if accountID != "" {
 		opts = append(opts, option.WithHeader("Chatgpt-Account-Id", accountID))
@@ -51,6 +59,14 @@ func NewCodexProviderWithTokenSource(
 	token, accountID string, tokenSource func() (string, string, error),
 ) *CodexProvider {
 	p := NewCodexProvider(token, accountID)
+	p.tokenSource = tokenSource
+	return p
+}
+
+func NewCodexProviderWithTokenSourceAndOptions(
+	token, accountID string, tokenSource func() (string, string, error),
+) *CodexProvider {
+	p := NewCodexProviderWithOptions(token, accountID)
 	p.tokenSource = tokenSource
 	return p
 }
@@ -106,18 +122,59 @@ func (p *CodexProvider) Chat(
 	var resp *responses.Response
 	var streamedText strings.Builder
 	streamedOutputItems := make([]responses.ResponseOutputItemUnion, 0)
+	streamedToolCalls := map[string]*streamedToolCall{}
+	streamedToolCallOrder := make([]string, 0, 4)
+	rememberToolCall := func(key string) *streamedToolCall {
+		if key == "" {
+			key = fmt.Sprintf("streamed_tool_call_%d", len(streamedToolCallOrder))
+		}
+		if tc, ok := streamedToolCalls[key]; ok {
+			return tc
+		}
+		tc := &streamedToolCall{key: key}
+		streamedToolCalls[key] = tc
+		streamedToolCallOrder = append(streamedToolCallOrder, key)
+		return tc
+	}
 	for stream.Next() {
 		evt := stream.Current()
-		if evt.Type == "response.output_text.delta" {
+		switch evt.Type {
+		case "response.output_text.delta":
 			streamedText.WriteString(evt.Delta)
-		}
-		if evt.Type == "response.output_item.done" {
+		case "response.output_item.added":
+			item := evt.AsResponseOutputItemAdded().Item
+			if item.Type == "function_call" {
+				fc := item.AsFunctionCall()
+				st := rememberToolCall(fc.ID)
+				if fc.CallID != "" {
+					st.callID = fc.CallID
+				}
+				if fc.Name != "" {
+					st.name = fc.Name
+				}
+				if fc.Arguments != "" {
+					st.arguments = fc.Arguments
+				}
+			}
+		case "response.output_item.done":
 			itemEvt := evt.AsResponseOutputItemDone()
 			if itemEvt.Item.Type != "" {
 				streamedOutputItems = append(streamedOutputItems, itemEvt.Item)
 			}
-		}
-		if evt.Type == "response.completed" || evt.Type == "response.failed" || evt.Type == "response.incomplete" {
+		case "response.function_call_arguments.delta":
+			delta := evt.AsResponseFunctionCallArgumentsDelta()
+			st := rememberToolCall(delta.ItemID)
+			st.arguments += delta.Delta
+		case "response.function_call_arguments.done":
+			done := evt.AsResponseFunctionCallArgumentsDone()
+			st := rememberToolCall(done.ItemID)
+			if done.Name != "" {
+				st.name = done.Name
+			}
+			if done.Arguments != "" {
+				st.arguments = done.Arguments
+			}
+		case "response.completed", "response.failed", "response.incomplete":
 			evtResp := evt.Response
 			if evtResp.ID != "" {
 				evtRespCopy := evtResp
@@ -168,8 +225,37 @@ func (p *CodexProvider) Chat(
 	}
 
 	parsed := orc.ParseResponseFromStruct(resp)
+	if len(parsed.ToolCalls) == 0 && len(streamedToolCalls) > 0 {
+		for _, key := range streamedToolCallOrder {
+			if tc := streamedToolCalls[key]; tc != nil && tc.name != "" {
+				arguments := strings.TrimSpace(tc.arguments)
+				if arguments == "" {
+					arguments = "{}"
+				}
+				var args map[string]any
+				if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+					args = map[string]any{"raw": arguments}
+				}
+				callID := tc.callID
+				if callID == "" {
+					callID = tc.key
+				}
+				parsed.ToolCalls = append(parsed.ToolCalls, protocoltypes.ToolCall{
+					ID:        callID,
+					Name:      tc.name,
+					Arguments: args,
+				})
+			}
+		}
+		if len(parsed.ToolCalls) > 0 && parsed.FinishReason == "" {
+			parsed.FinishReason = "tool_calls"
+		}
+	}
 	if parsed.Content == "" && streamedText.Len() > 0 {
 		parsed.Content = streamedText.String()
+		if parsed.FinishReason == "" {
+			parsed.FinishReason = "stop"
+		}
 	}
 	return parsed, nil
 }
@@ -256,6 +342,13 @@ func buildCodexParams(
 	}
 
 	return params
+}
+
+type streamedToolCall struct {
+	key       string
+	callID    string
+	name      string
+	arguments string
 }
 
 func CreateCodexTokenSource() func() (string, string, error) {

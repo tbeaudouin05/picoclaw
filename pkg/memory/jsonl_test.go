@@ -156,6 +156,53 @@ func TestAddFullMessage_PreservesModelName(t *testing.T) {
 	}
 }
 
+func TestAddMessage_StampsTimestamp(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	before := time.Now().Add(-time.Second).UnixMilli()
+	if err := store.AddMessage(ctx, "timestamps", "user", "hello"); err != nil {
+		t.Fatalf("AddMessage: %v", err)
+	}
+	after := time.Now().Add(time.Second).UnixMilli()
+
+	history, err := store.GetHistory(ctx, "timestamps")
+	if err != nil {
+		t.Fatalf("GetHistory: %v", err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(history))
+	}
+	if history[0].Timestamp < before || history[0].Timestamp > after {
+		t.Fatalf("timestamp = %d, want between %d and %d", history[0].Timestamp, before, after)
+	}
+}
+
+func TestAddFullMessage_PreservesTimestamp(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	const timestamp int64 = 1779459600000
+
+	if err := store.AddFullMessage(ctx, "timestamps", providers.Message{
+		Role:      "assistant",
+		Content:   "hello",
+		Timestamp: timestamp,
+	}); err != nil {
+		t.Fatalf("AddFullMessage: %v", err)
+	}
+
+	history, err := store.GetHistory(ctx, "timestamps")
+	if err != nil {
+		t.Fatalf("GetHistory: %v", err)
+	}
+	if len(history) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(history))
+	}
+	if history[0].Timestamp != timestamp {
+		t.Fatalf("timestamp = %d, want %d", history[0].Timestamp, timestamp)
+	}
+}
+
 func TestAddFullMessage_ToolCallID(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()

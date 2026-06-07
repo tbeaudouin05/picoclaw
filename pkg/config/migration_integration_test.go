@@ -580,6 +580,7 @@ func TestMigration_Integration_ModelNameField(t *testing.T) {
 // existing .security.yml values (e.g., loaded from environment variables) are preserved
 // and not overwritten by empty values from the legacy config.
 func TestMigration_PreservesExistingSecurityConfig(t *testing.T) {
+	isolateCredentialEnvForTest(t)
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.json")
 	securityPath := filepath.Join(tmpDir, ".security.yml")
@@ -990,8 +991,8 @@ func TestLoadConfig_V1ToV2Migration(t *testing.T) {
 	if err := json.Unmarshal(saved, &versionCheck); err != nil {
 		t.Fatalf("Unmarshal saved config: %v", err)
 	}
-	if versionCheck.Version != 3 {
-		t.Errorf("saved config version = %d, want 3", versionCheck.Version)
+	if versionCheck.Version != CurrentVersion {
+		t.Errorf("saved config version = %d, want %d", versionCheck.Version, CurrentVersion)
 	}
 }
 
@@ -1071,8 +1072,8 @@ func TestLoadConfig_V2DirectLoad(t *testing.T) {
 		t.Fatalf("LoadConfig: %v", err)
 	}
 
-	if cfg.Version != 3 {
-		t.Errorf("Version = %d, want 3", cfg.Version)
+	if cfg.Version != CurrentVersion {
+		t.Errorf("Version = %d, want %d", cfg.Version, CurrentVersion)
 	}
 
 	gpt4, _ := cfg.GetModelConfig("gpt-4")

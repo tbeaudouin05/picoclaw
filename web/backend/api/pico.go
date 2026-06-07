@@ -35,6 +35,9 @@ func (h *Handler) createWsProxy(origProtocol string, upstreamProtocol string) *h
 		Rewrite: func(r *httputil.ProxyRequest) {
 			target := h.gatewayProxyURL()
 			r.SetURL(target)
+			r.Out.URL.Path = r.In.URL.Path
+			r.Out.URL.RawPath = r.In.URL.RawPath
+			r.Out.URL.RawQuery = r.In.URL.RawQuery
 			r.Out.Header.Del(protocolKey)
 			if upstreamProtocol != "" {
 				r.Out.Header.Set(protocolKey, upstreamProtocol)

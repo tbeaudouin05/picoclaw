@@ -49,6 +49,7 @@ type sessionListItem struct {
 type sessionChatMessage struct {
 	Role        string                  `json:"role"`
 	Content     string                  `json:"content"`
+	Timestamp   int64                   `json:"timestamp,omitempty"`
 	Kind        string                  `json:"kind,omitempty"`
 	ModelName   string                  `json:"model_name,omitempty"`
 	CreatedAt   *time.Time              `json:"created_at,omitempty"`
@@ -512,6 +513,7 @@ func sessionTranscriptMessages(
 			chatMsg := sessionChatMessage{
 				Role:        "user",
 				Content:     msg.Content,
+				Timestamp:   msg.Timestamp,
 				ModelName:   msg.ModelName,
 				CreatedAt:   msg.CreatedAt,
 				Media:       append([]string(nil), msg.Media...),
@@ -534,10 +536,16 @@ func sessionTranscriptMessages(
 			toolCallsMsg, hasToolCallsMsg := assistantToolCallsMessage(
 				msg.ToolCalls,
 				msg.ModelName,
+				msg.Timestamp,
 				toolFeedbackMaxArgsLength,
 				msg.CreatedAt,
 			)
-			visibleToolMessages := visibleAssistantToolMessages(msg.ToolCalls, msg.ModelName, msg.CreatedAt)
+			visibleToolMessages := visibleAssistantToolMessages(
+				msg.ToolCalls,
+				msg.ModelName,
+				msg.Timestamp,
+				msg.CreatedAt,
+			)
 
 			// Pico web chat can persist both visible `message` tool output and a
 			// later plain assistant reply in the same turn. Hide only the fixed
@@ -562,6 +570,7 @@ func sessionTranscriptMessages(
 			chatMsg := sessionChatMessage{
 				Role:        "assistant",
 				Content:     content,
+				Timestamp:   msg.Timestamp,
 				ModelName:   msg.ModelName,
 				CreatedAt:   msg.CreatedAt,
 				Media:       append([]string(nil), msg.Media...),
@@ -692,6 +701,7 @@ func assistantThoughtMessage(msg providers.Message) (sessionChatMessage, bool) {
 	return sessionChatMessage{
 		Role:      "assistant",
 		Content:   reasoning,
+		Timestamp: msg.Timestamp,
 		Kind:      "thought",
 		ModelName: msg.ModelName,
 		CreatedAt: msg.CreatedAt,
@@ -701,6 +711,7 @@ func assistantThoughtMessage(msg providers.Message) (sessionChatMessage, bool) {
 func assistantToolCallsMessage(
 	toolCalls []providers.ToolCall,
 	modelName string,
+	timestamp int64,
 	toolFeedbackMaxArgsLength int,
 	createdAt *time.Time,
 ) (sessionChatMessage, bool) {
@@ -718,6 +729,7 @@ func assistantToolCallsMessage(
 
 	return sessionChatMessage{
 		Role:      "assistant",
+		Timestamp: timestamp,
 		Kind:      "tool_calls",
 		ModelName: modelName,
 		CreatedAt: createdAt,
@@ -735,6 +747,7 @@ func visibleAssistantToolArgsPreview(
 func visibleAssistantToolMessages(
 	toolCalls []providers.ToolCall,
 	modelName string,
+	timestamp int64,
 	createdAt *time.Time,
 ) []sessionChatMessage {
 	if len(toolCalls) == 0 {
@@ -754,6 +767,7 @@ func visibleAssistantToolMessages(
 		messages = append(messages, sessionChatMessage{
 			Role:      "assistant",
 			Content:   content,
+			Timestamp: timestamp,
 			ModelName: modelName,
 			CreatedAt: createdAt,
 		})

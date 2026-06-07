@@ -124,11 +124,11 @@ func promptOverlaysForOptions(opts processOptions) []PromptPart {
 
 	return []PromptPart{
 		{
-			ID:      "instruction.subturn_profile",
+			ID:      "instruction.runtime_overlay",
 			Layer:   PromptLayerInstruction,
 			Slot:    PromptSlotWorkspace,
-			Source:  PromptSource{ID: PromptSourceSubTurnProfile, Name: "subturn.profile"},
-			Title:   "SubTurn System Instructions",
+			Source:  PromptSource{ID: PromptSourceSubTurnProfile, Name: "runtime.overlay"},
+			Title:   "Runtime Instructions",
 			Content: systemPrompt,
 			Stable:  false,
 			Cache:   PromptCacheNone,

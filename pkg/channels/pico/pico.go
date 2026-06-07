@@ -938,22 +938,100 @@ func (c *PicoChannel) broadcastToSession(chatID string, msg PicoMessage) error {
 	sessionID := strings.TrimPrefix(chatID, "pico:")
 	msg.SessionID = sessionID
 
-	var sent bool
-	for _, pc := range c.sessionConnectionsSnapshot(sessionID) {
+	connections := c.sessionConnectionsSnapshot(sessionID)
+	if len(connections) == 0 {
+		logger.WarnCF(
+			"pico",
+			"Pico outbound delivery has no active connections",
+			picoDeliveryLogFields(chatID, sessionID, msg, nil, 0, 0, nil),
+		)
+		return fmt.Errorf(
+			"pico websocket delivery: no active connections for session %s: %w",
+			sessionID,
+			channels.ErrSendFailed,
+		)
+	}
+
+	sent := 0
+	failed := 0
+	var lastErr error
+	for _, pc := range connections {
 		if err := pc.writeJSON(msg); err != nil {
-			logger.DebugCF("pico", "Write to connection failed", map[string]any{
-				"conn_id": pc.id,
-				"error":   err.Error(),
-			})
+			failed++
+			lastErr = err
+			logger.WarnCF(
+				"pico",
+				"Pico outbound WebSocket write failed",
+				picoDeliveryLogFields(chatID, sessionID, msg, pc, sent, failed, err),
+			)
 		} else {
-			sent = true
+			sent++
 		}
 	}
 
-	if !sent {
-		return fmt.Errorf("no active connections for session %s: %w", sessionID, channels.ErrSendFailed)
+	if sent == 0 {
+		logger.WarnCF(
+			"pico",
+			"Pico outbound delivery failed for all connections",
+			picoDeliveryLogFields(chatID, sessionID, msg, nil, sent, failed, lastErr),
+		)
+		return fmt.Errorf(
+			"pico websocket delivery: all %d connection writes failed for session %s: %w",
+			failed,
+			sessionID,
+			channels.ErrSendFailed,
+		)
+	}
+	if failed > 0 {
+		logger.WarnCF(
+			"pico",
+			"Pico outbound delivery partially failed",
+			picoDeliveryLogFields(chatID, sessionID, msg, nil, sent, failed, lastErr),
+		)
 	}
 	return nil
+}
+
+func picoDeliveryLogFields(
+	chatID string,
+	sessionID string,
+	msg PicoMessage,
+	pc *picoConn,
+	sent int,
+	failed int,
+	err error,
+) map[string]any {
+	fields := map[string]any{
+		"chat_id":      chatID,
+		"session_id":   sessionID,
+		"message_type": msg.Type,
+		"message_id":   picoPayloadString(msg.Payload, "message_id"),
+		"message_kind": picoPayloadString(msg.Payload, PayloadKeyKind),
+		"content_len":  len([]rune(picoPayloadString(msg.Payload, PayloadKeyContent))),
+		"sent":         sent,
+		"failed":       failed,
+	}
+	if pc != nil {
+		fields["conn_id"] = pc.id
+	}
+	if err != nil {
+		fields["error"] = err.Error()
+	}
+	return fields
+}
+
+func picoPayloadString(payload map[string]any, key string) string {
+	if len(payload) == 0 {
+		return ""
+	}
+	value, ok := payload[key]
+	if !ok || value == nil {
+		return ""
+	}
+	if text, ok := value.(string); ok {
+		return text
+	}
+	return fmt.Sprint(value)
 }
 
 // handleWebSocket upgrades the HTTP connection and manages the WebSocket lifecycle.

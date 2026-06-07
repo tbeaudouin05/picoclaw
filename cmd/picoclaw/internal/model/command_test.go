@@ -245,8 +245,9 @@ func TestSetDefaultModel_ModelWithoutAPIKey(t *testing.T) {
 }
 
 func TestSetDefaultModel_SaveConfigError(t *testing.T) {
-	// Use an invalid path to trigger save error
-	invalidPath := "/nonexistent/directory/config.json"
+	// Use a directory path as the config path so save reliably fails,
+	// even when tests run with elevated permissions.
+	invalidPath := t.TempDir()
 
 	cfg := &config.Config{
 		Agents: config.AgentsConfig{
