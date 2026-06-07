@@ -121,6 +121,7 @@ func (p *CodexProvider) Chat(
 
 	var resp *responses.Response
 	var streamedText strings.Builder
+	streamedOutputItems := make([]responses.ResponseOutputItemUnion, 0)
 	streamedToolCalls := map[string]*streamedToolCall{}
 	streamedToolCallOrder := make([]string, 0, 4)
 	rememberToolCall := func(key string) *streamedToolCall {
@@ -154,6 +155,11 @@ func (p *CodexProvider) Chat(
 				if fc.Arguments != "" {
 					st.arguments = fc.Arguments
 				}
+			}
+		case "response.output_item.done":
+			itemEvt := evt.AsResponseOutputItemDone()
+			if itemEvt.Item.Type != "" {
+				streamedOutputItems = append(streamedOutputItems, itemEvt.Item)
 			}
 		case "response.function_call_arguments.delta":
 			delta := evt.AsResponseFunctionCallArgumentsDelta()
@@ -213,6 +219,9 @@ func (p *CodexProvider) Chat(
 		}
 		logger.ErrorCF("provider.codex", "Codex stream ended without completed response event", fields)
 		return nil, fmt.Errorf("codex API call: stream ended without completed response")
+	}
+	if len(resp.Output) == 0 && len(streamedOutputItems) > 0 {
+		resp.Output = streamedOutputItems
 	}
 
 	parsed := orc.ParseResponseFromStruct(resp)

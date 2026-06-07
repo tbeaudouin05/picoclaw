@@ -907,6 +907,7 @@ func TestShellTool_List_Empty(t *testing.T) {
 	require.NoError(t, err)
 
 	sm := NewSessionManager()
+	t.Cleanup(sm.Stop)
 	tool.sessionManager = sm
 
 	ctx := context.Background()
@@ -922,6 +923,7 @@ func TestShellTool_RunBackground_List(t *testing.T) {
 	require.NoError(t, err)
 
 	sm := NewSessionManager()
+	t.Cleanup(sm.Stop)
 	tool.sessionManager = sm
 
 	ctx := WithToolContext(context.Background(), "cli", "test")
@@ -961,6 +963,7 @@ func TestShellTool_Read_Output(t *testing.T) {
 	require.NoError(t, err)
 
 	sm := NewSessionManager()
+	t.Cleanup(sm.Stop)
 	tool.sessionManager = sm
 
 	ctx := WithToolContext(context.Background(), "cli", "test")
@@ -995,6 +998,7 @@ func TestShellTool_Kill(t *testing.T) {
 	require.NoError(t, err)
 
 	sm := NewSessionManager()
+	t.Cleanup(sm.Stop)
 	tool.sessionManager = sm
 
 	ctx := WithToolContext(context.Background(), "cli", "test")
@@ -1034,6 +1038,7 @@ func TestShellTool_PTY_AllowedCommands(t *testing.T) {
 	require.NoError(t, err)
 
 	sm := NewSessionManager()
+	t.Cleanup(sm.Stop)
 	tool.sessionManager = sm
 
 	ctx := WithToolContext(context.Background(), "cli", "test")
@@ -1069,6 +1074,7 @@ func TestShellTool_PTY_WriteRead(t *testing.T) {
 	require.NoError(t, err)
 
 	sm := NewSessionManager()
+	t.Cleanup(sm.Stop)
 	tool.sessionManager = sm
 
 	ctx := WithToolContext(context.Background(), "cli", "test")
@@ -1128,6 +1134,7 @@ func TestShellTool_PTY_Poll(t *testing.T) {
 	require.NoError(t, err)
 
 	sm := NewSessionManager()
+	t.Cleanup(sm.Stop)
 	tool.sessionManager = sm
 
 	ctx := WithToolContext(context.Background(), "cli", "test")
@@ -1181,6 +1188,7 @@ func TestShellTool_PTY_Kill(t *testing.T) {
 	require.NoError(t, err)
 
 	sm := NewSessionManager()
+	t.Cleanup(sm.Stop)
 	tool.sessionManager = sm
 
 	ctx := WithToolContext(context.Background(), "cli", "test")
@@ -1226,6 +1234,7 @@ func TestShellTool_Write_Read_NonPTY(t *testing.T) {
 	require.NoError(t, err)
 
 	sm := NewSessionManager()
+	t.Cleanup(sm.Stop)
 	tool.sessionManager = sm
 
 	ctx := WithToolContext(context.Background(), "cli", "test")
@@ -1279,6 +1288,7 @@ func TestShellTool_Read_NonPTY_Running(t *testing.T) {
 	require.NoError(t, err)
 
 	sm := NewSessionManager()
+	t.Cleanup(sm.Stop)
 	tool.sessionManager = sm
 
 	ctx := WithToolContext(context.Background(), "cli", "test")
@@ -1347,6 +1357,7 @@ func TestShellTool_ProcessGroupKill(t *testing.T) {
 	require.NoError(t, err)
 
 	sm := NewSessionManager()
+	t.Cleanup(sm.Stop)
 	tool.sessionManager = sm
 
 	ctx := WithToolContext(context.Background(), "cli", "test")
@@ -1407,6 +1418,7 @@ func TestShellTool_PTY_ProcessGroupKill(t *testing.T) {
 	require.NoError(t, err)
 
 	sm := NewSessionManager()
+	t.Cleanup(sm.Stop)
 	tool.sessionManager = sm
 
 	ctx := WithToolContext(context.Background(), "cli", "test")
@@ -1459,6 +1471,7 @@ func TestShellTool_PTY_Background_Read(t *testing.T) {
 	require.NoError(t, err)
 
 	sm := NewSessionManager()
+	t.Cleanup(sm.Stop)
 	tool.sessionManager = sm
 
 	ctx := WithToolContext(context.Background(), "cli", "test")
@@ -1499,6 +1512,7 @@ func TestShellTool_PTY_Background_ReadNoBlock(t *testing.T) {
 	require.NoError(t, err)
 
 	sm := NewSessionManager()
+	t.Cleanup(sm.Stop)
 	tool.sessionManager = sm
 
 	ctx := WithToolContext(context.Background(), "cli", "test")
@@ -1543,6 +1557,7 @@ func TestShellTool_Poll_Status(t *testing.T) {
 	require.NoError(t, err)
 
 	sm := NewSessionManager()
+	t.Cleanup(sm.Stop)
 	tool.sessionManager = sm
 
 	ctx := WithToolContext(context.Background(), "cli", "test")
@@ -1790,5 +1805,50 @@ func TestEncodeKeyTokenWithPtyKeyMode(t *testing.T) {
 				require.Equal(t, tt.expected, result, "wrong encoding for %s", tt.name)
 			}
 		})
+	}
+}
+
+// TestShellTool_SchemelessURLDetection verifies that the scheme-less URL
+// detection logic in guardCommand correctly identifies web URL path components
+// (e.g., "//github.com" captured by the regex after "https:") and exempts them
+// from workspace sandbox checks. It also confirms that paths NOT preceded by a
+// recognized web scheme are still blocked.
+func TestShellTool_SchemelessURLDetection(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool, err := NewExecTool(tmpDir, true)
+	if err != nil {
+		t.Fatalf("unable to configure exec tool: %s", err)
+	}
+
+	// Each of the 7 recognized web schemes should have its path component
+	// exempted from workspace boundary checks.
+	allowedCommands := []string{
+		"echo https://github.com",
+		"echo http://example.com",
+		"echo ftp://ftp.example.com",
+		"echo ftps://secure.example.com",
+		"echo sftp://sftp.example.com",
+		"echo ssh://git@github.com",
+		"echo git://github.com",
+	}
+
+	for _, cmd := range allowedCommands {
+		result := tool.Execute(context.Background(), map[string]any{"action": "run", "command": cmd})
+		if result.IsError && strings.Contains(result.ForLLM, "path outside working dir") {
+			t.Errorf("command with recognized web scheme should not be blocked: %s\n  error: %s", cmd, result.ForLLM)
+		}
+	}
+
+	// Multiple URLs with different schemes in a single command should all be exempt.
+	multiURLCommands := []string{
+		"echo https://github.com && curl http://example.com",
+		"wget ftp://a.com; curl https://b.com",
+	}
+
+	for _, cmd := range multiURLCommands {
+		result := tool.Execute(context.Background(), map[string]any{"action": "run", "command": cmd})
+		if result.IsError && strings.Contains(result.ForLLM, "path outside working dir") {
+			t.Errorf("command with multiple web URLs should not be blocked: %s\n  error: %s", cmd, result.ForLLM)
+		}
 	}
 }
