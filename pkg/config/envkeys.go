@@ -24,6 +24,10 @@ const (
 	// Default: ~/.picoclaw
 	EnvHome = "PICOCLAW_HOME"
 
+	// EnvOpenAIAuthFile overrides the full path to the OpenAI auth store JSON file used by PicoClaw.
+	// Default: $PICOCLAW_HOME/auth.json
+	EnvOpenAIAuthFile = "OPENAI_AUTH_FILE"
+
 	// EnvConfig overrides the full path to the JSON config file.
 	// Default: $PICOCLAW_HOME/config.json
 	EnvConfig = "PICOCLAW_CONFIG"

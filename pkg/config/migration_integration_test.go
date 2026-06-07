@@ -980,7 +980,7 @@ func TestLoadConfig_V1ToV2Migration(t *testing.T) {
 		t.Error("expected backup file with date suffix to be created")
 	}
 
-	// Verify the saved config on disk now has version 2
+	// Verify the saved config on disk now has CurrentVersion
 	saved, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatalf("ReadFile saved config: %v", err)
@@ -1086,7 +1086,7 @@ func TestLoadConfig_V2DirectLoad(t *testing.T) {
 		t.Error("claude without enabled field should be false")
 	}
 
-	// V2→V3 migration creates a backup
+	// V2→V4 migration creates a backup
 	entries, _ := os.ReadDir(tmpDir)
 	foundBackup := false
 	for _, e := range entries {

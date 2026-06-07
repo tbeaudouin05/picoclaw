@@ -173,6 +173,8 @@ func TestMigrateV0ToV3(t *testing.T) {
 	require.NoError(t, err)
 	err = migrateV2ToV3(m)
 	require.NoError(t, err)
+	err = migrateV3ToV4(m)
+	require.NoError(t, err)
 
 	// Version should be set to V3 by the V2→V3 step; LoadConfig applies V3→V4.
 	require.Equal(t, 3, m["version"])
@@ -231,6 +233,8 @@ func TestMigrateV0ToV3_WithExistingModelList(t *testing.T) {
 	require.NoError(t, err)
 	err = migrateV2ToV3(m)
 	require.NoError(t, err)
+	err = migrateV3ToV4(m)
+	require.NoError(t, err)
 
 	// Existing model_list should be preserved (not overridden by providers)
 	modelList := m["model_list"].([]any)
@@ -272,6 +276,8 @@ func TestMigrateV1ToV3(t *testing.T) {
 	err = migrateV1ToV2(m)
 	require.NoError(t, err)
 	err = migrateV2ToV3(m)
+	require.NoError(t, err)
+	err = migrateV3ToV4(m)
 	require.NoError(t, err)
 
 	// Version should be set to V3 by the V2→V3 step; LoadConfig applies V3→V4.
@@ -335,6 +341,8 @@ func TestMigrateV1ToV3_ApiKeyConversion(t *testing.T) {
 	require.NoError(t, err)
 	err = migrateV2ToV3(m)
 	require.NoError(t, err)
+	err = migrateV3ToV4(m)
+	require.NoError(t, err)
 
 	// api_key should be converted to api_keys array
 	modelList := m["model_list"].([]any)
@@ -385,6 +393,8 @@ func TestMigrateV1ToV3_AlreadyNestedFormat(t *testing.T) {
 	require.NoError(t, err)
 	err = migrateV2ToV3(m)
 	require.NoError(t, err)
+	err = migrateV3ToV4(m)
+	require.NoError(t, err)
 
 	channelList := m["channel_list"].(map[string]any)
 	telegram := channelList["telegram"].(map[string]any)
@@ -394,4 +404,106 @@ func TestMigrateV1ToV3_AlreadyNestedFormat(t *testing.T) {
 	require.Equal(t, "bot-token", settings["token"])
 	// Should NOT have nested settings inside settings
 	require.NotContains(t, settings, "settings")
+}
+
+// TestMigrateV3ToV4 verifies V3 → V4 migration bumps version without touching live_config.
+func TestMigrateV3ToV4(t *testing.T) {
+	m := map[string]any{
+		"version": 3,
+		"gateway": map[string]any{"host": "localhost", "port": float64(18790)},
+	}
+
+	err := migrateV3ToV4(m)
+	require.NoError(t, err)
+
+	require.Equal(t, 4, m["version"])
+	// No live_config block should be injected by the migration
+	_, hasLC := m["live_config"]
+	require.False(t, hasLC, "migrateV3ToV4 must not inject a default live_config block")
+}
+
+// TestMigrateV3ToV4_RejectsRuntimeState verifies that configs with the legacy
+// runtime_state key are rejected instead of silently migrated.
+func TestMigrateV3ToV4_RejectsRuntimeState(t *testing.T) {
+	m := map[string]any{
+		"version": 3,
+		"runtime_state": map[string]any{
+			"driver": "turso",
+		},
+	}
+
+	err := migrateV3ToV4(m)
+	require.Error(t, err, "runtime_state should cause migrateV3ToV4 to return an error")
+	require.Contains(t, err.Error(), "runtime_state")
+	require.Contains(t, err.Error(), "live_config")
+}
+
+// TestMigrateV3ToV4_PreservesExistingLiveConfig leaves an existing live_config unchanged.
+func TestMigrateV3ToV4_PreservesExistingLiveConfig(t *testing.T) {
+	m := map[string]any{
+		"version": 3,
+		"live_config": map[string]any{
+			"enabled":   true,
+			"record_id": "rec-123",
+		},
+	}
+
+	err := migrateV3ToV4(m)
+	require.NoError(t, err)
+
+	require.Equal(t, 4, m["version"])
+
+	lc, ok := m["live_config"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, true, lc["enabled"])
+	require.Equal(t, "rec-123", lc["record_id"])
+}
+
+// TestMigrateV3ToV4_WrongVersion returns an error for non-V3 input.
+func TestMigrateV3ToV4_WrongVersion(t *testing.T) {
+	m := map[string]any{"version": 2}
+	err := migrateV3ToV4(m)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "expected version 3")
+}
+
+// TestLoadConfig_V3MigratestoV4 verifies that a V3 config file is automatically
+// upgraded to V4 on load.
+func TestLoadConfig_V3MigratestoV4(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+
+	v3Config := `{
+		"version": 3,
+		"gateway": {"host": "127.0.0.1", "port": 18790},
+		"model_list": [
+			{"model_name": "gpt-5.4", "provider": "openai", "model": "gpt-5.4", "api_base": "https://api.openai.com/v1", "enabled": true}
+		]
+	}`
+
+	require.NoError(t, os.WriteFile(configPath, []byte(v3Config), 0o600))
+
+	cfg, err := LoadConfig(configPath)
+	require.NoError(t, err)
+	require.Equal(t, CurrentVersion, cfg.Version, "V3 config should be migrated to CurrentVersion")
+	require.False(t, cfg.LiveConfig.Enabled, "live_config.enabled should be false when not configured")
+}
+
+// TestLoadConfig_V3WithRuntimeState_Fails verifies that a V3 config with the
+// legacy runtime_state key fails to load rather than silently migrating.
+func TestLoadConfig_V3WithRuntimeState_Fails(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+
+	v3Config := `{
+		"version": 3,
+		"gateway": {"host": "127.0.0.1", "port": 18790},
+		"runtime_state": {"driver": "turso", "record_id": "old-rec"}
+	}`
+
+	require.NoError(t, os.WriteFile(configPath, []byte(v3Config), 0o600))
+
+	_, err := LoadConfig(configPath)
+	require.Error(t, err, "LoadConfig should fail when V3 config has runtime_state")
+	require.Contains(t, err.Error(), "runtime_state")
 }
