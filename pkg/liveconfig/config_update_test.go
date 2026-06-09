@@ -55,3 +55,25 @@ func TestApplyDotPathUpdatesRejectsOverlappingPaths(t *testing.T) {
 		t.Fatal("expected overlapping path error")
 	}
 }
+
+func TestApplyDotPathChangesDeletesExistingLeaf(t *testing.T) {
+	base := json.RawMessage(`{"customer_behavior":{"tone":"pirate","smoke":"sentinel"}}`)
+	out, changed, err := ApplyDotPathChanges(base, nil, []string{"customer_behavior.smoke"})
+	if err != nil {
+		t.Fatalf("ApplyDotPathChanges() error = %v", err)
+	}
+	if len(changed) != 1 || changed[0] != "customer_behavior.smoke" {
+		t.Fatalf("changed = %v", changed)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(out, &decoded); err != nil {
+		t.Fatalf("output JSON invalid: %v", err)
+	}
+	behavior := decoded["customer_behavior"].(map[string]any)
+	if _, ok := behavior["smoke"]; ok {
+		t.Fatalf("smoke key still present: %#v", behavior)
+	}
+	if behavior["tone"] != "pirate" {
+		t.Fatalf("tone changed: %#v", behavior)
+	}
+}

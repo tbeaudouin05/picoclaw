@@ -3,6 +3,8 @@ package liveconfig
 import (
 	"fmt"
 	"regexp"
+
+	"github.com/sipeed/picoclaw/pkg/config"
 )
 
 // Schema defines the storage shape for a live-config driver. Only the default
@@ -58,4 +60,14 @@ func (s Schema) normalized() (Schema, error) {
 		}
 	}
 	return s, nil
+}
+
+func SchemaFromConfig(cfg config.LiveConfigSchema) Schema {
+	return Schema{
+		Table:         cfg.Table,
+		IDColumn:      cfg.IDColumn,
+		VersionColumn: cfg.VersionColumn,
+		UpdatedColumn: cfg.UpdatedColumn,
+		PayloadColumn: cfg.PayloadColumn,
+	}
 }

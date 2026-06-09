@@ -26,6 +26,7 @@ import (
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/migrate"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/model"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/onboard"
+	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/runtimecmd"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/skills"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/status"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/version"
@@ -137,6 +138,7 @@ picoclaw --no-color status`,
 		cron.NewCronCommand(),
 		mcp.NewMCPCommand(),
 		migrate.NewMigrateCommand(),
+		runtimecmd.NewRuntimeCommand(),
 		skills.NewSkillsCommand(),
 		model.NewModelCommand(),
 		updater.NewUpdateCommand("picoclaw"),
@@ -171,24 +173,35 @@ func main() {
 	// Initialize Termux SSL certificate detection before anything else
 	initTermuxSSL()
 
-	cliui.Init(earlyColorDisabled())
+	machineRuntime := len(os.Args) > 1 && os.Args[1] == "runtime"
+	cliui.Init(earlyColorDisabled() || machineRuntime)
 
-	if earlyColorDisabled() {
-		fmt.Print(plainBanner)
-	} else {
-		fmt.Printf("%s", banner)
+	if !machineRuntime {
+		if earlyColorDisabled() {
+			fmt.Print(plainBanner)
+		} else {
+			fmt.Printf("%s", banner)
+		}
 	}
 
 	tzEnv := os.Getenv("TZ")
 	if tzEnv != "" {
-		fmt.Println("TZ environment:", tzEnv)
+		if !machineRuntime {
+			fmt.Println("TZ environment:", tzEnv)
+		}
 		zoneinfoEnv := os.Getenv("ZONEINFO")
-		fmt.Println("ZONEINFO environment:", zoneinfoEnv)
+		if !machineRuntime {
+			fmt.Println("ZONEINFO environment:", zoneinfoEnv)
+		}
 		loc, err := time.LoadLocation(tzEnv)
 		if err != nil {
-			fmt.Println("Error loading time zone:", err)
+			if !machineRuntime {
+				fmt.Println("Error loading time zone:", err)
+			}
 		} else {
-			fmt.Println("Time zone loaded successfully:", loc)
+			if !machineRuntime {
+				fmt.Println("Time zone loaded successfully:", loc)
+			}
 			time.Local = loc //nolint:gosmopolitan // We intentionally set local timezone from TZ env
 		}
 	}

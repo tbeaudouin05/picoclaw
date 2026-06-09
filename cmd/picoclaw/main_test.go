@@ -46,6 +46,7 @@ func TestNewPicoclawCommand(t *testing.T) {
 		"migrate",
 		"model",
 		"onboard",
+		"runtime",
 		"skills",
 		"status",
 		"update",
@@ -59,6 +60,10 @@ func TestNewPicoclawCommand(t *testing.T) {
 		found := slices.Contains(allowedCommands, subcmd.Name())
 		assert.True(t, found, "unexpected subcommand %q", subcmd.Name())
 
-		assert.False(t, subcmd.Hidden)
+		if subcmd.Name() == "runtime" {
+			assert.True(t, subcmd.Hidden)
+		} else {
+			assert.False(t, subcmd.Hidden)
+		}
 	}
 }
