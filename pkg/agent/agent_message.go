@@ -44,13 +44,6 @@ func (al *AgentLoop) ProcessDirectWithChannel(
 	ctx context.Context,
 	content, sessionKey, channel, chatID string,
 ) (string, error) {
-	if err := al.ensureHooksInitialized(ctx); err != nil {
-		return "", err
-	}
-	if err := al.ensureMCPInitialized(ctx); err != nil {
-		return "", err
-	}
-
 	msg := bus.InboundMessage{
 		Context: bus.InboundContext{
 			Channel:  channel,
@@ -61,7 +54,16 @@ func (al *AgentLoop) ProcessDirectWithChannel(
 		Content:    content,
 		SessionKey: sessionKey,
 	}
+	return al.ProcessInjectedMessage(ctx, msg)
+}
 
+func (al *AgentLoop) ProcessInjectedMessage(ctx context.Context, msg bus.InboundMessage) (string, error) {
+	if err := al.ensureHooksInitialized(ctx); err != nil {
+		return "", err
+	}
+	if err := al.ensureMCPInitialized(ctx); err != nil {
+		return "", err
+	}
 	return al.processMessage(ctx, msg)
 }
 

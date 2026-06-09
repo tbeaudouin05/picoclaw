@@ -10,7 +10,11 @@ import (
 	"github.com/spf13/cobra"
 
 	picointernal "github.com/sipeed/picoclaw/cmd/picoclaw/internal"
+	"github.com/sipeed/picoclaw/pkg/agent"
+	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/liveconfig"
+	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
 type updateRequest struct {
@@ -25,8 +29,10 @@ type updateRequest struct {
 func NewRuntimeCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "runtime", Hidden: true, Args: cobra.NoArgs}
 	admin := &cobra.Command{Use: "admin", Hidden: true, Args: cobra.NoArgs}
-	admin.AddCommand(newRuntimeConfigCommand())
-	cmd.AddCommand(admin)
+	customer := &cobra.Command{Use: "customer", Hidden: true, Args: cobra.NoArgs}
+	admin.AddCommand(newRuntimeConfigCommand(), newInjectTurnCommand("admin", "telegram"))
+	customer.AddCommand(newInjectTurnCommand("customer", "whatsapp"))
+	cmd.AddCommand(admin, customer)
 	return cmd
 }
 
@@ -175,4 +181,97 @@ func expectedVersion(raw any, fallback int64) int64 {
 		}
 	}
 	return fallback
+}
+
+type injectTurnRequest struct {
+	Text        string `json:"text"`
+	SessionKey  string `json:"session_key"`
+	ChatID      string `json:"chat_id"`
+	SenderID    string `json:"sender_id"`
+	DisplayName string `json:"display_name"`
+}
+
+func newInjectTurnCommand(role, channel string) *cobra.Command {
+	var adminSlug string
+	var customerSlug string
+	cmd := &cobra.Command{
+		Use:    "inject-turn",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			var req injectTurnRequest
+			if err := json.NewDecoder(cmd.InOrStdin()).Decode(&req); err != nil && err != io.EOF {
+				return writeRuntimeError(cmd.OutOrStdout(), fmt.Errorf("decode inject-turn request: %w", err))
+			}
+			if strings.TrimSpace(req.Text) == "" {
+				return writeRuntimeError(cmd.OutOrStdout(), fmt.Errorf("inject-turn text is required"))
+			}
+			if strings.TrimSpace(req.SessionKey) == "" {
+				req.SessionKey = fmt.Sprintf("runtime:%s:%s", role, channel)
+			}
+			if strings.TrimSpace(req.ChatID) == "" {
+				req.ChatID = fmt.Sprintf("runtime-%s", role)
+			}
+			if strings.TrimSpace(req.SenderID) == "" {
+				req.SenderID = fmt.Sprintf("runtime-%s", role)
+			}
+			response, err := injectTurnRunner(cmd.Context(), channel, req)
+			if err != nil {
+				return writeRuntimeError(cmd.OutOrStdout(), err)
+			}
+			return writeInjectTurnResponse(cmd.OutOrStdout(), channel, response, req)
+		},
+	}
+	cmd.Flags().Bool("direct", false, "run as direct runtime helper")
+	cmd.Flags().StringVar(&adminSlug, "admin-slug", "", "admin role slug")
+	cmd.Flags().StringVar(&customerSlug, "customer-slug", "", "customer role slug")
+	_ = adminSlug
+	_ = customerSlug
+	return cmd
+}
+
+var injectTurnRunner = runInjectedTurn
+
+func runInjectedTurn(ctx context.Context, channel string, req injectTurnRequest) (string, error) {
+	cfg, err := picointernal.LoadConfig()
+	if err != nil {
+		return "", err
+	}
+	logger.ConfigureFromEnv()
+	provider, modelID, err := providers.CreateProvider(cfg)
+	if err != nil {
+		return "", err
+	}
+	if modelID != "" {
+		cfg.Agents.Defaults.ModelName = modelID
+	}
+	msgBus := bus.NewMessageBus()
+	defer msgBus.Close()
+	loop := agent.NewAgentLoop(cfg, msgBus, provider)
+	defer loop.Close()
+	msg := bus.InboundMessage{
+		Context: bus.InboundContext{
+			Channel:  channel,
+			ChatID:   req.ChatID,
+			ChatType: "direct",
+			SenderID: req.SenderID,
+		},
+		Sender:     bus.SenderInfo{DisplayName: req.DisplayName},
+		Content:    req.Text,
+		SessionKey: req.SessionKey,
+	}
+	return loop.ProcessInjectedMessage(ctx, msg)
+}
+
+func writeInjectTurnResponse(w io.Writer, channel, response string, req injectTurnRequest) error {
+	out := map[string]any{
+		"status":       "ok",
+		"channel":      channel,
+		"response":     response,
+		"session_key":  req.SessionKey,
+		"chat_id":      req.ChatID,
+		"sender_id":    req.SenderID,
+		"display_name": req.DisplayName,
+	}
+	return json.NewEncoder(w).Encode(out)
 }
