@@ -28,8 +28,8 @@ type updateRequest struct {
 
 func NewRuntimeCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "runtime", Hidden: true, Args: cobra.NoArgs}
-	admin := &cobra.Command{Use: "admin", Hidden: true, Args: cobra.NoArgs}
-	customer := &cobra.Command{Use: "customer", Hidden: true, Args: cobra.NoArgs}
+	admin := &cobra.Command{Use: "admin", Short: "Hidden admin runtime helper group, including primary smoke-test prompt injection", Hidden: true, Args: cobra.NoArgs}
+	customer := &cobra.Command{Use: "customer", Short: "Hidden customer runtime helper group, including primary smoke-test prompt injection", Hidden: true, Args: cobra.NoArgs}
 	admin.AddCommand(newRuntimeConfigCommand(), newInjectTurnCommand("admin", "telegram"))
 	customer.AddCommand(newInjectTurnCommand("customer", "whatsapp"))
 	cmd.AddCommand(admin, customer)
@@ -196,6 +196,7 @@ func newInjectTurnCommand(role, channel string) *cobra.Command {
 	var customerSlug string
 	cmd := &cobra.Command{
 		Use:    "inject-turn",
+		Short:  fmt.Sprintf("Inject one %s prompt turn as the primary smoke-test path", role),
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {

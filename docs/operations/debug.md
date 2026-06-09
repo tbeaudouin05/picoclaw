@@ -1,6 +1,28 @@
 # Debugging PicoClaw
 
 PicoClaw performs multiple complex interactions under the hood for every single request it receives—from routing messages and evaluating complexity, to executing tools and adapting to model failures. Being able to see exactly what is happening is crucial, not just for troubleshooting potential issues, but also for truly understanding how the agent operates.
+## Primary Smoke Test: Inject a Turn
+
+Before deep log inspection, use prompt injection as the **primary smoke-test path**. It is the fastest maintained end-to-end proof that the runtime can accept a turn, route it, call the model, and emit a response.
+
+Use the hidden runtime commands directly when you are operating on a local/runtime instance:
+
+```bash
+picoclaw runtime admin inject-turn --direct <<'EOF'
+{"text":"ping"}
+EOF
+
+picoclaw runtime customer inject-turn --direct <<'EOF'
+{"text":"hello"}
+EOF
+```
+
+Notes:
+
+- admin inject-turn targets the `telegram` channel surface
+- customer inject-turn targets the `whatsapp` channel surface
+- use `gateway --debug` after this if the injected smoke test fails or if you need deeper trace detail
+
 ## Starting PicoClaw in Debug Mode
 
 To get detailed information about what the agent is doing (LLM requests, tool calls, message routing), you can start the PicoClaw gateway with the debug flag:

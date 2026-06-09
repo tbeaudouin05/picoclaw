@@ -679,11 +679,12 @@ Start with the most PicoClaw-native path:
 1. Check `picoclaw status`.
 2. Confirm which config file is active.
 3. Inspect `agents.defaults.model_name` and `model_list`.
-4. Run `picoclaw gateway --debug` for runtime visibility.
-5. Add `--no-truncate` only when full prompt or tool payload inspection is necessary.
-6. For skill issues, inspect the skill directory and frontmatter.
-7. For MCP issues, use `picoclaw mcp list`, `show`, and `test`.
-8. For routing/session issues, inspect `session.dimensions` and `agents.dispatch.rules`.
+4. Run a prompt-injection smoke test first with `picoclaw runtime admin inject-turn` or `picoclaw runtime customer inject-turn` when you need the fastest end-to-end proof that the runtime path works.
+5. Run `picoclaw gateway --debug` for runtime visibility.
+6. Add `--no-truncate` only when full prompt or tool payload inspection is necessary.
+7. For skill issues, inspect the skill directory and frontmatter.
+8. For MCP issues, use `picoclaw mcp list`, `show`, and `test`.
+9. For routing/session issues, inspect `session.dimensions` and `agents.dispatch.rules`.
 
 Useful runtime facts:
 
