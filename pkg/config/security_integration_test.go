@@ -635,3 +635,74 @@ skills:
 		assert.Equal(t, "legacy-github-token", registry.AuthToken.String())
 	})
 }
+
+func TestLoadConfigLiveConfigRecordIDFromSecurityYAML(t *testing.T) {
+	isolateCredentialEnvForTest(t)
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+	configContent := `{
+  "version": 4,
+  "model_list": [],
+  "channel_list": {},
+  "live_config": {
+    "enabled": true,
+    "record_id": "json-record",
+    "driver": {
+      "turso": {
+        "url": "libsql://example-config.turso.io"
+      }
+    }
+  }
+}`
+	require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0o644))
+
+	securityPath := filepath.Join(tmpDir, SecurityConfigFile)
+	securityContent := `live_config:
+  record_id: instance-mist-test
+  driver:
+    turso:
+      auth_token: test-token
+`
+	require.NoError(t, os.WriteFile(securityPath, []byte(securityContent), 0o600))
+
+	cfg, err := LoadConfig(configPath)
+	require.NoError(t, err)
+	require.Equal(t, "instance-mist-test", cfg.LiveConfig.RecordID)
+	require.NotNil(t, cfg.LiveConfig.Driver.Turso)
+	require.Equal(t, "test-token", cfg.LiveConfig.Driver.Turso.AuthToken.String())
+}
+
+func TestLoadConfigLegacyRuntimeConfigRecordIDDoesNotPopulateLiveConfig(t *testing.T) {
+	isolateCredentialEnvForTest(t)
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.json")
+	configContent := `{
+  "version": 4,
+  "model_list": [],
+  "channel_list": {},
+  "live_config": {
+    "enabled": true,
+    "driver": {
+      "turso": {
+        "url": "libsql://example-config.turso.io"
+      }
+    }
+  }
+}`
+	require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0o644))
+
+	securityPath := filepath.Join(tmpDir, SecurityConfigFile)
+	securityContent := `runtime_config:
+  record_id: legacy-main
+  driver:
+    turso:
+      auth_token: legacy-token
+`
+	require.NoError(t, os.WriteFile(securityPath, []byte(securityContent), 0o600))
+
+	cfg, err := LoadConfig(configPath)
+	require.NoError(t, err)
+	require.Empty(t, cfg.LiveConfig.RecordID)
+	require.NotNil(t, cfg.LiveConfig.Driver.Turso)
+	require.Empty(t, cfg.LiveConfig.Driver.Turso.AuthToken.String())
+}

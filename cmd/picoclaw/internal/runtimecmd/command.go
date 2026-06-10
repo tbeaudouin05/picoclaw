@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -12,6 +14,7 @@ import (
 	picointernal "github.com/sipeed/picoclaw/cmd/picoclaw/internal"
 	"github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/bus"
+	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/liveconfig"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
@@ -49,7 +52,7 @@ func newRuntimeConfigGetCommand() *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			store, recordID, err := loadRuntimeStore()
+			store, recordID, err := loadRuntimeStoreForAdminSlug(adminSlug)
 			if err != nil {
 				return writeRuntimeError(cmd.OutOrStdout(), err)
 			}
@@ -66,7 +69,6 @@ func newRuntimeConfigGetCommand() *cobra.Command {
 	}
 	cmd.Flags().Bool("direct", false, "run as direct runtime helper")
 	cmd.Flags().StringVar(&adminSlug, "admin-slug", "", "admin role slug")
-	_ = adminSlug
 	return cmd
 }
 
@@ -77,7 +79,7 @@ func newRuntimeConfigUpdateCommand() *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			store, recordID, err := loadRuntimeStore()
+			store, recordID, err := loadRuntimeStoreForAdminSlug(adminSlug)
 			if err != nil {
 				return writeRuntimeError(cmd.OutOrStdout(), err)
 			}
@@ -122,8 +124,38 @@ func newRuntimeConfigUpdateCommand() *cobra.Command {
 	}
 	cmd.Flags().Bool("direct", false, "run as direct runtime helper")
 	cmd.Flags().StringVar(&adminSlug, "admin-slug", "", "admin role slug")
-	_ = adminSlug
 	return cmd
+}
+
+func loadRuntimeStoreForAdminSlug(adminSlug string) (*liveconfig.TursoHTTPStore, string, error) {
+	if strings.TrimSpace(os.Getenv("PICOCLAW_CONFIG")) != "" || strings.TrimSpace(adminSlug) == "" {
+		return loadRuntimeStore()
+	}
+	configPath, err := runtimeConfigPathForAdminSlug(adminSlug)
+	if err != nil {
+		return nil, "", err
+	}
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		return nil, "", err
+	}
+	return runtimeStoreFromConfig(cfg)
+}
+
+func runtimeConfigPathForAdminSlug(adminSlug string) (string, error) {
+	slug := strings.TrimSpace(adminSlug)
+	if slug == "" {
+		return "", fmt.Errorf("admin slug is required")
+	}
+	if slug == "admin" {
+		return filepath.Join(os.Getenv("HOME"), ".picoclaw", "config.json"), nil
+	}
+	const prefix = "admin-"
+	if !strings.HasPrefix(slug, prefix) || strings.TrimPrefix(slug, prefix) == "" {
+		return "", fmt.Errorf("unsupported admin slug %q", slug)
+	}
+	instance := strings.TrimPrefix(slug, prefix)
+	return filepath.Join("/var/lib/picoclaw-instances", instance, "admin", "config.json"), nil
 }
 
 func loadRuntimeStore() (*liveconfig.TursoHTTPStore, string, error) {
@@ -131,6 +163,10 @@ func loadRuntimeStore() (*liveconfig.TursoHTTPStore, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
+	return runtimeStoreFromConfig(cfg)
+}
+
+func runtimeStoreFromConfig(cfg *config.Config) (*liveconfig.TursoHTTPStore, string, error) {
 	lc := cfg.LiveConfig
 	if !lc.Enabled || lc.Driver.Turso == nil {
 		return nil, "", fmt.Errorf("live config store is not configured")

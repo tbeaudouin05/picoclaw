@@ -6,7 +6,7 @@ import "encoding/json"
 // external live-config store and injected into selected agent prompts.
 type LiveConfig struct {
 	Enabled              bool             `json:"enabled,omitempty" yaml:"-"`
-	RecordID             string           `json:"record_id,omitempty" yaml:"-"`
+	RecordID             string           `json:"record_id,omitempty" yaml:"record_id,omitempty"`
 	Driver               LiveConfigDriver `json:"driver,omitempty" yaml:"driver,omitempty"`
 	InjectChannels       []string         `json:"inject_channels,omitempty" yaml:"-"`
 	AdminUpdateChannels  []string         `json:"admin_update_channels,omitempty" yaml:"-"`
@@ -67,4 +67,21 @@ func (c LiveConfig) MarshalJSON() ([]byte, error) {
 		out.Driver = &publicDriver{Turso: &publicTurso{URL: c.Driver.Turso.URL, Schema: c.Driver.Turso.Schema}}
 	}
 	return json.Marshal(out)
+}
+
+func (c LiveConfig) MarshalYAML() (any, error) {
+	type secureTurso struct {
+		AuthToken SecureString `yaml:"auth_token,omitempty"`
+	}
+	type secureDriver struct {
+		Turso *secureTurso `yaml:"turso,omitempty"`
+	}
+	type secureLiveConfig struct {
+		Driver *secureDriver `yaml:"driver,omitempty"`
+	}
+	out := secureLiveConfig{}
+	if c.Driver.Turso != nil {
+		out.Driver = &secureDriver{Turso: &secureTurso{AuthToken: c.Driver.Turso.AuthToken}}
+	}
+	return out, nil
 }
