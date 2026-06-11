@@ -1000,12 +1000,45 @@ type CronSeedScheduleConfig struct {
 	TZ      string `json:"tz,omitempty"`
 }
 
+func (c CronSeedScheduleConfig) Validate() error {
+	switch strings.TrimSpace(c.Kind) {
+	case "every":
+		if c.EveryMS == nil || *c.EveryMS <= 0 {
+			return errors.New("schedule.every_ms must be > 0 for kind=every")
+		}
+	case "cron":
+		if strings.TrimSpace(c.Expr) == "" {
+			return errors.New("schedule.expr is required for kind=cron")
+		}
+	case "at":
+		return errors.New("schedule.kind=at is not supported for default_jobs")
+	case "":
+		return errors.New("schedule.kind is required")
+	default:
+		return fmt.Errorf("unsupported schedule.kind %q", c.Kind)
+	}
+	return nil
+}
+
 type CronSeedJobConfig struct {
 	Name     string                 `json:"name,omitempty"`
 	Schedule CronSeedScheduleConfig `json:"schedule,omitempty"`
 	Message  string                 `json:"message,omitempty"`
 	Channel  string                 `json:"channel,omitempty"`
 	To       string                 `json:"to,omitempty"`
+}
+
+func (c CronSeedJobConfig) Validate() error {
+	if strings.TrimSpace(c.Name) == "" {
+		return errors.New("name is required")
+	}
+	if strings.TrimSpace(c.Message) == "" {
+		return errors.New("message is required")
+	}
+	if err := c.Schedule.Validate(); err != nil {
+		return err
+	}
+	return nil
 }
 
 type CronToolsConfig struct {

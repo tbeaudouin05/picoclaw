@@ -275,3 +275,69 @@ func TestSeedDefaultCronJobsIdempotent(t *testing.T) {
 		t.Fatalf("expected 1 seeded job after reseed, got %d", got)
 	}
 }
+
+func TestSeedDefaultCronJobsRejectsInvalidConfigs(t *testing.T) {
+	tmpDir := t.TempDir()
+	cs := cron.NewCronService(filepath.Join(tmpDir, "jobs.json"), nil)
+	everyMS := int64(60_000)
+
+	tests := []struct {
+		name string
+		job  config.CronSeedJobConfig
+		want string
+	}{
+		{
+			name: "rejects at kind",
+			job: config.CronSeedJobConfig{
+				Name:     "job-at",
+				Message:  "m1",
+				Schedule: config.CronSeedScheduleConfig{Kind: "at"},
+			},
+			want: "kind=at",
+		},
+		{
+			name: "rejects missing kind",
+			job: config.CronSeedJobConfig{
+				Name:     "job-missing-kind",
+				Message:  "m1",
+				Schedule: config.CronSeedScheduleConfig{},
+			},
+			want: "schedule.kind is required",
+		},
+		{
+			name: "rejects every without every_ms",
+			job: config.CronSeedJobConfig{
+				Name:     "job-every",
+				Message:  "m1",
+				Schedule: config.CronSeedScheduleConfig{Kind: "every"},
+			},
+			want: "every_ms",
+		},
+		{
+			name: "rejects empty message",
+			job: config.CronSeedJobConfig{
+				Name:     "job-empty-message",
+				Schedule: config.CronSeedScheduleConfig{Kind: "every", EveryMS: &everyMS},
+			},
+			want: "message is required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.Tools.Cron.DefaultJobs = []config.CronSeedJobConfig{tt.job}
+			err := seedDefaultCronJobs(cs, cfg)
+			if err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected error containing %q, got %v", tt.want, err)
+			}
+		})
+	}
+
+	if got := len(cs.ListJobs(true)); got != 0 {
+		t.Fatalf("expected 0 seeded jobs after invalid configs, got %d", got)
+	}
+}

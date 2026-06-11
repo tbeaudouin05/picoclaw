@@ -830,6 +830,9 @@ func seedDefaultCronJobs(cronService *cron.CronService, cfg *config.Config) erro
 	}
 
 	for _, seed := range cfg.Tools.Cron.DefaultJobs {
+		if err := seed.Validate(); err != nil {
+			return fmt.Errorf("seed default cron job %q: %w", seed.Name, err)
+		}
 		schedule := cron.CronSchedule{
 			Kind:    seed.Schedule.Kind,
 			EveryMS: seed.Schedule.EveryMS,
