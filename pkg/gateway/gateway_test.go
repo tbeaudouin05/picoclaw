@@ -14,6 +14,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
+	"github.com/sipeed/picoclaw/pkg/cron"
 	runtimeevents "github.com/sipeed/picoclaw/pkg/events"
 )
 
@@ -207,5 +208,70 @@ func receiveGatewayRuntimeEvent(t *testing.T, ch <-chan runtimeevents.Event) run
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for gateway runtime event")
 		return runtimeevents.Event{}
+	}
+}
+
+func TestSeedDefaultCronJobsCreatesConfiguredJobs(t *testing.T) {
+	tmpDir := t.TempDir()
+	cs := cron.NewCronService(filepath.Join(tmpDir, "jobs.json"), nil)
+	everyMS := int64(60_000)
+	cfg := config.DefaultConfig()
+	cfg.Tools.Cron.DefaultJobs = []config.CronSeedJobConfig{
+		{
+			Name:    "job-1",
+			Message: "m1",
+			Channel: "telegram",
+			To:      "chat-1",
+			Schedule: config.CronSeedScheduleConfig{
+				Kind:    "every",
+				EveryMS: &everyMS,
+			},
+		},
+		{
+			Name:    "job-2",
+			Message: "m2",
+			Channel: "telegram",
+			To:      "chat-2",
+			Schedule: config.CronSeedScheduleConfig{
+				Kind:    "every",
+				EveryMS: &everyMS,
+			},
+		},
+	}
+
+	if err := seedDefaultCronJobs(cs, cfg); err != nil {
+		t.Fatalf("seedDefaultCronJobs failed: %v", err)
+	}
+	if got := len(cs.ListJobs(true)); got != 2 {
+		t.Fatalf("expected 2 seeded jobs, got %d", got)
+	}
+}
+
+func TestSeedDefaultCronJobsIdempotent(t *testing.T) {
+	tmpDir := t.TempDir()
+	cs := cron.NewCronService(filepath.Join(tmpDir, "jobs.json"), nil)
+	everyMS := int64(60_000)
+	cfg := config.DefaultConfig()
+	cfg.Tools.Cron.DefaultJobs = []config.CronSeedJobConfig{
+		{
+			Name:    "job-1",
+			Message: "m1",
+			Channel: "telegram",
+			To:      "chat-1",
+			Schedule: config.CronSeedScheduleConfig{
+				Kind:    "every",
+				EveryMS: &everyMS,
+			},
+		},
+	}
+
+	if err := seedDefaultCronJobs(cs, cfg); err != nil {
+		t.Fatalf("first seedDefaultCronJobs failed: %v", err)
+	}
+	if err := seedDefaultCronJobs(cs, cfg); err != nil {
+		t.Fatalf("second seedDefaultCronJobs failed: %v", err)
+	}
+	if got := len(cs.ListJobs(true)); got != 1 {
+		t.Fatalf("expected 1 seeded job after reseed, got %d", got)
 	}
 }

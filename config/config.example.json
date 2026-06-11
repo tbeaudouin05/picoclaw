@@ -379,7 +379,8 @@
     "cron": {
       "enabled": true,
       "exec_timeout_minutes": 5,
-      "max_concurrent": 1
+      "max_concurrent": 1,
+      "default_jobs": []
     },
     "mcp": {
       "enabled": false,

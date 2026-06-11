@@ -666,3 +666,93 @@ func TestCronService_ConcurrentAccess(t *testing.T) {
 
 	wg.Wait()
 }
+
+func TestCronService_SeedJobCreatesMissing(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "jobs.json")
+	cs := NewCronService(tmpFile, nil)
+	everyMS := int64(60_000)
+
+	job, created, err := cs.SeedJob("daily-summary", CronSchedule{Kind: "every", EveryMS: &everyMS}, "hello", "telegram", "chat-1")
+	if err != nil {
+		t.Fatalf("SeedJob failed: %v", err)
+	}
+	if !created {
+		t.Fatal("expected SeedJob to create missing job")
+	}
+	if job == nil || job.ID == "" {
+		t.Fatal("expected seeded job with ID")
+	}
+
+	jobs := cs.ListJobs(true)
+	if len(jobs) != 1 {
+		t.Fatalf("ListJobs should return 1 job, got %d", len(jobs))
+	}
+	if jobs[0].Name != "daily-summary" {
+		t.Fatalf("seeded job name = %q, want daily-summary", jobs[0].Name)
+	}
+}
+
+func TestCronService_SeedJobIdempotent(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "jobs.json")
+	cs := NewCronService(tmpFile, nil)
+	everyMS := int64(60_000)
+
+	first, created1, err := cs.SeedJob("daily-summary", CronSchedule{Kind: "every", EveryMS: &everyMS}, "hello", "telegram", "chat-1")
+	if err != nil {
+		t.Fatalf("first SeedJob failed: %v", err)
+	}
+	if !created1 {
+		t.Fatal("expected first SeedJob to create job")
+	}
+
+	second, created2, err := cs.SeedJob("daily-summary", CronSchedule{Kind: "every", EveryMS: &everyMS}, "hello changed", "telegram", "chat-2")
+	if err != nil {
+		t.Fatalf("second SeedJob failed: %v", err)
+	}
+	if created2 {
+		t.Fatal("expected second SeedJob to reuse existing job")
+	}
+	if first.ID != second.ID {
+		t.Fatalf("seeded job IDs differ: %q vs %q", first.ID, second.ID)
+	}
+
+	jobs := cs.ListJobs(true)
+	if len(jobs) != 1 {
+		t.Fatalf("expected exactly 1 job after reseed, got %d", len(jobs))
+	}
+	if jobs[0].Payload.Message != "hello" {
+		t.Fatalf("existing payload mutated unexpectedly: %q", jobs[0].Payload.Message)
+	}
+	if jobs[0].Payload.To != "chat-1" {
+		t.Fatalf("existing destination mutated unexpectedly: %q", jobs[0].Payload.To)
+	}
+}
+
+func TestCronService_SeedJobSurvivesRestart(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "jobs.json")
+	everyMS := int64(60_000)
+
+	cs1 := NewCronService(tmpFile, nil)
+	first, created1, err := cs1.SeedJob("daily-summary", CronSchedule{Kind: "every", EveryMS: &everyMS}, "hello", "telegram", "chat-1")
+	if err != nil {
+		t.Fatalf("first SeedJob failed: %v", err)
+	}
+	if !created1 {
+		t.Fatal("expected first SeedJob to create job")
+	}
+
+	cs2 := NewCronService(tmpFile, nil)
+	second, created2, err := cs2.SeedJob("daily-summary", CronSchedule{Kind: "every", EveryMS: &everyMS}, "hello", "telegram", "chat-1")
+	if err != nil {
+		t.Fatalf("second SeedJob failed: %v", err)
+	}
+	if created2 {
+		t.Fatal("expected reseed after restart to reuse existing job")
+	}
+	if first.ID != second.ID {
+		t.Fatalf("seeded job IDs differ across restart: %q vs %q", first.ID, second.ID)
+	}
+	if got := len(cs2.ListJobs(true)); got != 1 {
+		t.Fatalf("expected exactly 1 job after restart reseed, got %d", got)
+	}
+}

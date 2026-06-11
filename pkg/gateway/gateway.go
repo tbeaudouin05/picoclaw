@@ -817,7 +817,31 @@ func setupCronTool(
 		})
 	}
 
+	if err := seedDefaultCronJobs(cronService, cfg); err != nil {
+		return nil, err
+	}
+
 	return cronService, nil
+}
+
+func seedDefaultCronJobs(cronService *cron.CronService, cfg *config.Config) error {
+	if cronService == nil || cfg == nil || len(cfg.Tools.Cron.DefaultJobs) == 0 {
+		return nil
+	}
+
+	for _, seed := range cfg.Tools.Cron.DefaultJobs {
+		schedule := cron.CronSchedule{
+			Kind:    seed.Schedule.Kind,
+			EveryMS: seed.Schedule.EveryMS,
+			Expr:    seed.Schedule.Expr,
+			TZ:      seed.Schedule.TZ,
+		}
+		if _, _, err := cronService.SeedJob(seed.Name, schedule, seed.Message, seed.Channel, seed.To); err != nil {
+			return fmt.Errorf("seed default cron job %q: %w", seed.Name, err)
+		}
+	}
+
+	return nil
 }
 
 func createHeartbeatHandler(agentLoop *agent.AgentLoop) func(prompt, channel, chatID string) *tools.ToolResult {

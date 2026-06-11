@@ -993,14 +993,30 @@ type WebToolsConfig struct {
 	PrivateHostWhitelist FlexibleStringSlice `yaml:"-" json:"private_host_whitelist,omitempty" env:"PICOCLAW_TOOLS_WEB_PRIVATE_HOST_WHITELIST"`
 }
 
+type CronSeedScheduleConfig struct {
+	Kind    string `json:"kind,omitempty"`
+	EveryMS *int64 `json:"every_ms,omitempty"`
+	Expr    string `json:"expr,omitempty"`
+	TZ      string `json:"tz,omitempty"`
+}
+
+type CronSeedJobConfig struct {
+	Name     string                 `json:"name,omitempty"`
+	Schedule CronSeedScheduleConfig `json:"schedule,omitempty"`
+	Message  string                 `json:"message,omitempty"`
+	Channel  string                 `json:"channel,omitempty"`
+	To       string                 `json:"to,omitempty"`
+}
+
 type CronToolsConfig struct {
 	ToolConfig         `     envPrefix:"PICOCLAW_TOOLS_CRON_"`
-	ExecTimeoutMinutes int  `                                 json:"exec_timeout_minutes"  env:"PICOCLAW_TOOLS_CRON_EXEC_TIMEOUT_MINUTES"`  // 0 means no timeout
-	AllowCommand       bool `                                 json:"allow_command"         env:"PICOCLAW_TOOLS_CRON_ALLOW_COMMAND"`
+	ExecTimeoutMinutes int                 `json:"exec_timeout_minutes" env:"PICOCLAW_TOOLS_CRON_EXEC_TIMEOUT_MINUTES"` // 0 means no timeout
+	AllowCommand       bool                `json:"allow_command" env:"PICOCLAW_TOOLS_CRON_ALLOW_COMMAND"`
+	DefaultJobs        []CronSeedJobConfig `json:"default_jobs,omitempty"`
 	// MaxConcurrent caps how many cron jobs may execute simultaneously across
 	// the whole scheduler. 0 or negative clamps to 1 (one at a time). Individual
 	// jobs still never overlap with themselves regardless of this setting.
-	MaxConcurrent int `                                    json:"max_concurrent"        env:"PICOCLAW_TOOLS_CRON_MAX_CONCURRENT"`
+	MaxConcurrent int `json:"max_concurrent" env:"PICOCLAW_TOOLS_CRON_MAX_CONCURRENT"`
 }
 
 // EffectiveMaxConcurrent returns the effective cap on simultaneously running

@@ -519,6 +519,62 @@ func (cs *CronService) AddJob(
 	return &job, nil
 }
 
+func (cs *CronService) findJobByNameUnsafe(name string) *CronJob {
+	for i := range cs.store.Jobs {
+		if cs.store.Jobs[i].Name == name {
+			jobCopy := cloneCronJob(cs.store.Jobs[i])
+			return &jobCopy
+		}
+	}
+	return nil
+}
+
+func (cs *CronService) SeedJob(
+	name string,
+	schedule CronSchedule,
+	message string,
+	channel, to string,
+) (*CronJob, bool, error) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	if existing := cs.findJobByNameUnsafe(name); existing != nil {
+		return existing, false, nil
+	}
+
+	now := time.Now().UnixMilli()
+	deleteAfterRun := (schedule.Kind == "at")
+
+	job := CronJob{
+		ID:       generateID(),
+		Name:     name,
+		Enabled:  true,
+		Schedule: schedule,
+		Payload: CronPayload{
+			Kind:    "agent_turn",
+			Message: message,
+			Channel: channel,
+			To:      to,
+		},
+		State: CronJobState{
+			NextRunAtMS: cs.computeNextRun(&schedule, now),
+		},
+		CreatedAtMS:    now,
+		UpdatedAtMS:    now,
+		DeleteAfterRun: deleteAfterRun,
+	}
+
+	cs.store.Jobs = append(cs.store.Jobs, job)
+	if err := cs.saveStoreUnsafe(); err != nil {
+		return nil, false, err
+	}
+
+	cs.notify()
+
+	jobCopy := cloneCronJob(job)
+	return &jobCopy, true, nil
+}
+
 func (cs *CronService) GetJob(jobID string) (*CronJob, bool) {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
