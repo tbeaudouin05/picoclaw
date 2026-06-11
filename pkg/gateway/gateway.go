@@ -815,10 +815,10 @@ func setupCronTool(
 			result := cronTool.ExecuteJob(context.Background(), job)
 			return result, nil
 		})
-	}
 
-	if err := seedDefaultCronJobs(cronService, cfg); err != nil {
-		return nil, err
+		if err := seedDefaultCronJobs(cronService, cfg); err != nil {
+			return nil, err
+		}
 	}
 
 	return cronService, nil
