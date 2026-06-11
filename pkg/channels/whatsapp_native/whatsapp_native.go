@@ -66,8 +66,19 @@ type WhatsAppNativeChannel struct {
 	wg           sync.WaitGroup // tracks background goroutines (QR handler, reconnect)
 }
 
+// resolveDBPath derives the SQLite file path and the directory that must exist.
+// If storePath ends in ".db" it is used as the database file directly;
+// otherwise storePath is treated as a directory and whatsappDBName is appended.
+func resolveDBPath(storePath string) (dbPath, dir string) {
+	if strings.HasSuffix(storePath, ".db") {
+		return storePath, filepath.Dir(storePath)
+	}
+	return filepath.Join(storePath, whatsappDBName), storePath
+}
+
 // NewWhatsAppNativeChannel creates a WhatsApp channel that uses whatsmeow for connection.
-// storePath is the directory for the SQLite session store (e.g. workspace/whatsapp).
+// storePath is either a directory (SQLite store is placed inside it) or an explicit
+// ".db" file path (used directly as the SQLite session database).
 func NewWhatsAppNativeChannel(
 	bc *config.Channel,
 	name string,
@@ -98,11 +109,10 @@ func (c *WhatsAppNativeChannel) Start(ctx context.Context) error {
 	c.reconnecting = false
 	c.reconnectMu.Unlock()
 
-	if err := os.MkdirAll(c.storePath, 0o700); err != nil {
+	dbPath, storeDir := resolveDBPath(c.storePath)
+	if err := os.MkdirAll(storeDir, 0o700); err != nil {
 		return fmt.Errorf("create session store dir: %w", err)
 	}
-
-	dbPath := filepath.Join(c.storePath, whatsappDBName)
 	connStr := "file:" + dbPath + "?_foreign_keys=on"
 
 	db, err := sql.Open(sqliteDriver, connStr)
