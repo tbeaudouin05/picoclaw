@@ -43,6 +43,9 @@ func cronListCmd(storePath string) {
 		fmt.Printf("    Schedule: %s\n", schedule)
 		fmt.Printf("    Status: %s\n", status)
 		fmt.Printf("    Next run: %s\n", nextRun)
+		if job.MaxRuns > 0 {
+			fmt.Printf("    Runs: %d/%d\n", job.State.RunCount, job.MaxRuns)
+		}
 	}
 }
 

@@ -36,6 +36,7 @@ type CronJobState struct {
 	LastRunAtMS *int64 `json:"lastRunAtMs,omitempty"`
 	LastStatus  string `json:"lastStatus,omitempty"`
 	LastError   string `json:"lastError,omitempty"`
+	RunCount    int    `json:"runCount,omitempty"`
 }
 
 type CronJob struct {
@@ -48,6 +49,7 @@ type CronJob struct {
 	CreatedAtMS    int64        `json:"createdAtMs"`
 	UpdatedAtMS    int64        `json:"updatedAtMs"`
 	DeleteAfterRun bool         `json:"deleteAfterRun"`
+	MaxRuns        int          `json:"maxRuns,omitempty"`
 }
 
 type CronStore struct {
@@ -338,6 +340,8 @@ func (cs *CronService) executeJobByID(jobID string) {
 		job.State.LastError = ""
 	}
 
+	job.State.RunCount++
+
 	// Compute next run time
 	var nextRunStr string
 	if job.Schedule.Kind == "at" {
@@ -349,6 +353,10 @@ func (cs *CronService) executeJobByID(jobID string) {
 			job.State.NextRunAtMS = nil
 			nextRunStr = "(disabled)"
 		}
+	} else if job.MaxRuns > 0 && job.State.RunCount >= job.MaxRuns {
+		job.Enabled = false
+		job.State.NextRunAtMS = nil
+		nextRunStr = fmt.Sprintf("(disabled, max runs %d reached)", job.MaxRuns)
 	} else {
 		nextRun := cs.computeNextRun(&job.Schedule, time.Now().UnixMilli())
 		job.State.NextRunAtMS = nextRun
@@ -481,6 +489,7 @@ func (cs *CronService) AddJob(
 	schedule CronSchedule,
 	message string,
 	channel, to string,
+	maxRuns int,
 ) (*CronJob, error) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
@@ -507,6 +516,7 @@ func (cs *CronService) AddJob(
 		CreatedAtMS:    now,
 		UpdatedAtMS:    now,
 		DeleteAfterRun: deleteAfterRun,
+		MaxRuns:        maxRuns,
 	}
 
 	cs.store.Jobs = append(cs.store.Jobs, job)
