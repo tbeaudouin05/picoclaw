@@ -244,6 +244,38 @@ func registerSharedTools(
 			})
 			agent.Tools.Register(messageTool)
 		}
+		if cfg.Tools.IsToolEnabled("whatsapp_send") {
+			whatsAppSendTool := tools.NewWhatsAppSendTool()
+			whatsAppSendTool.SetSendCallback(func(
+				ctx context.Context,
+				channel, chatID, content, replyToMessageID string,
+				mediaParts []bus.MediaPart,
+			) error {
+				outboundCtx := bus.NewOutboundContext(channel, chatID, replyToMessageID)
+				outboundAgentID, outboundSessionKey, outboundScope := outboundTurnMetadata(
+					tools.ToolAgentID(ctx),
+					tools.ToolSessionKey(ctx),
+					tools.ToolSessionScope(ctx),
+				)
+				outboundMessage := bus.OutboundMessage{
+					Channel:    channel,
+					ChatID:     chatID,
+					Context:    outboundCtx,
+					AgentID:    outboundAgentID,
+					SessionKey: outboundSessionKey,
+					Scope:      outboundScope,
+					Content:    content,
+				}
+				if al.channelManager != nil && channel != "" {
+					return al.channelManager.SendMessage(ctx, outboundMessage)
+				}
+				pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer pubCancel()
+				return msgBus.PublishOutbound(pubCtx, outboundMessage)
+			})
+			agent.Tools.Register(whatsAppSendTool)
+		}
+
 		if cfg.Tools.IsToolEnabled("reaction") {
 			reactionTool := tools.NewReactionTool()
 			reactionTool.SetReactionCallback(func(ctx context.Context, channel, chatID, messageID string) error {

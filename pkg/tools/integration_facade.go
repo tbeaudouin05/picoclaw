@@ -36,6 +36,7 @@ type (
 	WebSearchTool            = integrationtools.WebSearchTool
 	WebSearchToolOptions     = integrationtools.WebSearchToolOptions
 	WebFetchTool             = integrationtools.WebFetchTool
+	WhatsAppSendTool         = integrationtools.WhatsAppSendTool
 )
 
 func NewMCPTool(manager MCPManager, serverName string, tool *mcp.Tool) *MCPTool {
@@ -94,6 +95,10 @@ func NewWebFetchToolWithProxy(
 	privateHostWhitelist []string,
 ) (*WebFetchTool, error) {
 	return integrationtools.NewWebFetchToolWithProxy(maxChars, proxy, format, fetchLimitBytes, privateHostWhitelist)
+}
+
+func NewWhatsAppSendTool() *WhatsAppSendTool {
+	return integrationtools.NewWhatsAppSendTool()
 }
 
 func NewWebFetchToolWithConfig(
