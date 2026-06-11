@@ -124,6 +124,10 @@ func (t *CronTool) Parameters() map[string]any {
 				"type":        "string",
 				"description": "Cron expression for complex recurring schedules (e.g., '0 9 * * *' for daily at 9am). Use this for complex recurring schedules.",
 			},
+			"max_runs": map[string]any{
+				"type":        "integer",
+				"description": "Maximum number of times to run before auto-disabling. Omit or 0 for unlimited.",
+			},
 			"job_id": map[string]any{
 				"type":        "string",
 				"description": "Job ID (for get/update/remove/enable/disable)",
@@ -225,6 +229,11 @@ func (t *CronTool) addJob(ctx context.Context, args map[string]any) *ToolResult 
 		}
 	}
 
+	maxRuns, _, errResult := optionalNonNegativeInteger(args, "max_runs")
+	if errResult != nil {
+		return errResult
+	}
+
 	// Truncate message for job name (max 30 chars)
 	messagePreview := utils.Truncate(message, 30)
 
@@ -234,6 +243,7 @@ func (t *CronTool) addJob(ctx context.Context, args map[string]any) *ToolResult 
 		message,
 		channel,
 		chatID,
+		maxRuns,
 	)
 	if err != nil {
 		return ErrorResult(fmt.Sprintf("Error adding job: %v", err))
@@ -344,6 +354,15 @@ func (t *CronTool) updateJob(ctx context.Context, args map[string]any) *ToolResu
 	if hasSchedule {
 		job.Schedule = schedule
 		job.DeleteAfterRun = schedule.Kind == "at"
+		patches++
+	}
+
+	maxRuns, maxRunsPresent, errResult := optionalNonNegativeInteger(args, "max_runs")
+	if errResult != nil {
+		return errResult
+	}
+	if maxRunsPresent {
+		job.MaxRuns = maxRuns
 		patches++
 	}
 
@@ -458,6 +477,31 @@ func schedulePatch(args map[string]any) (cron.CronSchedule, bool, *ToolResult) {
 		return cron.CronSchedule{}, false, ErrorResult("only one of at_seconds, every_seconds, or cron_expr can be set")
 	}
 	return schedule, patches == 1, nil
+}
+
+func optionalNonNegativeInteger(args map[string]any, key string) (int, bool, *ToolResult) {
+	value, present := args[key]
+	if !present {
+		return 0, false, nil
+	}
+	var n int64
+	switch v := value.(type) {
+	case float64:
+		if v != float64(int64(v)) {
+			return 0, false, ErrorResult(fmt.Sprintf("%s must be a non-negative integer", key))
+		}
+		n = int64(v)
+	case int:
+		n = int64(v)
+	case int64:
+		n = v
+	default:
+		return 0, false, ErrorResult(fmt.Sprintf("%s must be a non-negative integer", key))
+	}
+	if n < 0 {
+		return 0, false, ErrorResult(fmt.Sprintf("%s must be a non-negative integer", key))
+	}
+	return int(n), true, nil
 }
 
 func positiveSeconds(args map[string]any, key string) (int64, *ToolResult) {
