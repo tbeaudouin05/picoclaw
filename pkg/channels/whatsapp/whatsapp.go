@@ -1,3 +1,34 @@
+// Package whatsapp implements the WhatsApp channel via a sidecar bridge process.
+//
+// # Bridge wire protocol (WebSocket, JSON text frames)
+//
+// Picoclaw connects to the bridge as a WebSocket client (BridgeURL).
+// All frames in both directions are JSON text messages.
+//
+// ## Inbound (bridge → picoclaw)
+//
+//	{"type":"message","id":"<msgID>","from":"<senderJID>","chat":"<chatJID>",
+//	 "content":"<text>","from_name":"<displayName>","media":["<path>","<path>"]}
+//
+//   - type: always "message" for user messages
+//   - chat: equals from for direct messages; different for group chats
+//   - media: optional list of local filesystem paths the bridge has already written
+//
+// ## Outbound text (picoclaw → bridge)
+//
+//	{"type":"message","to":"<chatJID>","content":"<text>"}
+//
+// ## Outbound media (picoclaw → bridge), one frame per MediaPart
+//
+//	{"type":"media","to":"<chatJID>","media_type":"<image|audio|video|file>",
+//	 "path":"<local_path>","caption":"<optional_text>","filename":"<optional_hint>"}
+//
+//   - path: absolute filesystem path readable by the bridge (shared filesystem)
+//   - caption/filename: omitted when empty
+//
+// The bridge acknowledges neither text nor media frames; delivery is fire-and-forget
+// at the protocol level. ErrTemporary is returned on WebSocket write failures so
+// the manager's retry loop can reattempt.
 package whatsapp
 
 import (
@@ -162,6 +193,71 @@ func (c *WhatsAppChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]
 		return nil, fmt.Errorf("whatsapp send: %w", channels.ErrTemporary)
 	}
 	_ = c.conn.SetWriteDeadline(time.Time{})
+
+	return nil, nil
+}
+
+// SendMedia implements the channels.MediaSender interface.
+// Each MediaPart is delivered as a separate "media" frame over the bridge WebSocket.
+// The bridge resolves the path on a shared filesystem and forwards it to WhatsApp.
+func (c *WhatsAppChannel) SendMedia(ctx context.Context, msg bus.OutboundMediaMessage) ([]string, error) {
+	if !c.IsRunning() {
+		return nil, channels.ErrNotRunning
+	}
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	store := c.GetMediaStore()
+	if store == nil {
+		return nil, fmt.Errorf("no media store available: %w", channels.ErrSendFailed)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.conn == nil {
+		return nil, fmt.Errorf("whatsapp connection not established: %w", channels.ErrTemporary)
+	}
+
+	for _, part := range msg.Parts {
+		localPath, err := store.Resolve(part.Ref)
+		if err != nil {
+			logger.ErrorCF("whatsapp", "Failed to resolve media ref", map[string]any{
+				"ref":   part.Ref,
+				"error": err.Error(),
+			})
+			continue
+		}
+
+		payload := map[string]any{
+			"type":       "media",
+			"to":         msg.ChatID,
+			"media_type": part.Type,
+			"path":       localPath,
+		}
+		if part.Caption != "" {
+			payload["caption"] = part.Caption
+		}
+		if part.Filename != "" {
+			payload["filename"] = part.Filename
+		}
+
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal media message: %w", err)
+		}
+
+		_ = c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
+			_ = c.conn.SetWriteDeadline(time.Time{})
+			return nil, fmt.Errorf("whatsapp send media: %w", channels.ErrTemporary)
+		}
+		_ = c.conn.SetWriteDeadline(time.Time{})
+	}
 
 	return nil, nil
 }
