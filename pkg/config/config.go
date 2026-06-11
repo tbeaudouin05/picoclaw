@@ -1092,6 +1092,7 @@ type ToolsConfig struct {
 	SPI             ToolConfig         `json:"spi"               yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SPI_"`
 	Subagent        ToolConfig         `json:"subagent"          yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_SUBAGENT_"`
 	WebFetch        ToolConfig         `json:"web_fetch"         yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WEB_FETCH_"`
+	WhatsAppSend    ToolConfig         `json:"whatsapp_send"     yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WHATSAPP_SEND_"`
 	WriteFile       ToolConfig         `json:"write_file"        yaml:"-"                                                       envPrefix:"PICOCLAW_TOOLS_WRITE_FILE_"`
 }
 
@@ -1903,6 +1904,8 @@ func (t *ToolsConfig) IsToolEnabled(name string) bool {
 		return t.SendFile.Enabled
 	case "send_tts":
 		return t.SendTTS.Enabled
+	case "whatsapp_send":
+		return t.WhatsAppSend.Enabled
 	case "write_file":
 		return t.WriteFile.Enabled
 	case "mcp":
