@@ -256,6 +256,7 @@ func TestCronTool_GetReturnsFullJobPayload(t *testing.T) {
 		message,
 		"telegram",
 		"chat-1",
+		0,
 	)
 	if err != nil {
 		t.Fatalf("AddJob() error: %v", err)
@@ -291,6 +292,7 @@ func TestCronTool_UpdateSchedulePreservesPayload(t *testing.T) {
 		"fetch RSS, include source links",
 		"weixin",
 		"chat-1",
+		0,
 	)
 	if err != nil {
 		t.Fatalf("AddJob() error: %v", err)
@@ -334,6 +336,7 @@ func TestCronTool_UpdateMessagePreservesScheduleAndNextRun(t *testing.T) {
 		"old message",
 		"telegram",
 		"chat-1",
+		0,
 	)
 	if err != nil {
 		t.Fatalf("AddJob() error: %v", err)
@@ -376,6 +379,7 @@ func TestCronTool_UpdateValidationErrors(t *testing.T) {
 		"message",
 		"cli",
 		"direct",
+		0,
 	)
 	if err != nil {
 		t.Fatalf("AddJob() error: %v", err)
@@ -432,6 +436,7 @@ func TestCronTool_ListFiltersJobsForRemoteChannel(t *testing.T) {
 		"visible",
 		"telegram",
 		"chat-1",
+		0,
 	)
 	if err != nil {
 		t.Fatalf("AddJob() error: %v", err)
@@ -442,6 +447,7 @@ func TestCronTool_ListFiltersJobsForRemoteChannel(t *testing.T) {
 		"hidden",
 		"telegram",
 		"chat-2",
+		0,
 	)
 	if err != nil {
 		t.Fatalf("AddJob() error: %v", err)
@@ -452,6 +458,7 @@ func TestCronTool_ListFiltersJobsForRemoteChannel(t *testing.T) {
 		"hidden",
 		"feishu",
 		"chat-1",
+		0,
 	)
 	if err != nil {
 		t.Fatalf("AddJob() error: %v", err)
@@ -462,6 +469,7 @@ func TestCronTool_ListFiltersJobsForRemoteChannel(t *testing.T) {
 		"hidden command",
 		"telegram",
 		"chat-1",
+		0,
 	)
 	if err != nil {
 		t.Fatalf("AddJob() error: %v", err)
@@ -494,6 +502,7 @@ func TestCronTool_RemoteCannotAccessOtherChatJob(t *testing.T) {
 		"secret",
 		"telegram",
 		"chat-1",
+		0,
 	)
 	if err != nil {
 		t.Fatalf("AddJob() error: %v", err)
@@ -526,6 +535,7 @@ func TestCronTool_RemoteCannotAccessCommandJob(t *testing.T) {
 		"run command",
 		"telegram",
 		"chat-1",
+		0,
 	)
 	if err != nil {
 		t.Fatalf("AddJob() error: %v", err)
@@ -566,6 +576,7 @@ func TestCronTool_CommandUpdateSafetyGates(t *testing.T) {
 			"message",
 			"cli",
 			"direct",
+			0,
 		)
 		if err != nil {
 			t.Fatalf("AddJob() error: %v", err)
@@ -594,6 +605,7 @@ func TestCronTool_CommandUpdateSafetyGates(t *testing.T) {
 			"message",
 			"cli",
 			"direct",
+			0,
 		)
 		if err != nil {
 			t.Fatalf("AddJob() error: %v", err)
@@ -650,6 +662,7 @@ func TestCronTool_InternalCanAccessCommandJobFromAnyChannel(t *testing.T) {
 		"run command",
 		"telegram",
 		"chat-1",
+		0,
 	)
 	if err != nil {
 		t.Fatalf("AddJob() error: %v", err)
@@ -827,5 +840,50 @@ func TestCronTool_ExecuteJobReturnsErrorWithoutPublish(t *testing.T) {
 
 	if executor.publishedResp != "" {
 		t.Fatalf("unexpected publish on error path: %q", executor.publishedResp)
+	}
+}
+
+func TestCronTool_AddJob_MaxRuns(t *testing.T) {
+	tool := newTestCronTool(t)
+	ctx := WithToolContext(context.Background(), "telegram", "chat-1")
+	result := tool.Execute(ctx, map[string]any{
+		"action":        "add",
+		"message":       "time to stretch",
+		"every_seconds": float64(600),
+		"max_runs":      float64(5),
+	})
+	if result.IsError {
+		t.Fatalf("expected add to succeed, got: %s", result.ForLLM)
+	}
+	jobs := tool.cronService.ListJobs(true)
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 job, got %d", len(jobs))
+	}
+	if jobs[0].MaxRuns != 5 {
+		t.Fatalf("MaxRuns = %d, want 5", jobs[0].MaxRuns)
+	}
+}
+
+func TestCronTool_UpdateJob_MaxRuns(t *testing.T) {
+	tool := newTestCronTool(t)
+	ctx := WithToolContext(context.Background(), "cli", "direct")
+	job, err := tool.cronService.AddJob("job", cron.CronSchedule{Kind: "cron", Expr: "0 8 * * *"}, "message", "cli", "direct", 0)
+	if err != nil {
+		t.Fatalf("AddJob() error: %v", err)
+	}
+	result := tool.Execute(ctx, map[string]any{
+		"action":   "update",
+		"job_id":   job.ID,
+		"max_runs": float64(3),
+	})
+	if result.IsError {
+		t.Fatalf("expected update to succeed, got: %s", result.ForLLM)
+	}
+	updated, ok := tool.cronService.GetJob(job.ID)
+	if !ok {
+		t.Fatal("updated job not found")
+	}
+	if updated.MaxRuns != 3 {
+		t.Fatalf("MaxRuns = %d, want 3", updated.MaxRuns)
 	}
 }

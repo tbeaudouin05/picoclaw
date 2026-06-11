@@ -20,7 +20,7 @@ func TestSaveStore_FilePermissions(t *testing.T) {
 
 	cs := NewCronService(storePath, nil)
 
-	_, err := cs.AddJob("test", CronSchedule{Kind: "every", EveryMS: int64Ptr(60000)}, "hello", "cli", "direct")
+	_, err := cs.AddJob("test", CronSchedule{Kind: "every", EveryMS: int64Ptr(60000)}, "hello", "cli", "direct", 0)
 	if err != nil {
 		t.Fatalf("AddJob failed: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestCronService_CRUD(t *testing.T) {
 
 	// Test AddJob
 	at := time.Now().Add(time.Hour).UnixMilli()
-	job, err := cs.AddJob("Task1", CronSchedule{Kind: "at", AtMS: &at}, "msg", "ch", "to")
+	job, err := cs.AddJob("Task1", CronSchedule{Kind: "at", AtMS: &at}, "msg", "ch", "to", 0)
 	if err != nil || job.ID == "" {
 		t.Fatalf("AddJob failed: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestCronService_GetJobReturnsCopy(t *testing.T) {
 	defer os.Remove(path)
 
 	everyMS := int64(60_000)
-	job, err := cs.AddJob("Task1", CronSchedule{Kind: "every", EveryMS: &everyMS}, "msg", "ch", "to")
+	job, err := cs.AddJob("Task1", CronSchedule{Kind: "every", EveryMS: &everyMS}, "msg", "ch", "to", 0)
 	if err != nil {
 		t.Fatalf("AddJob failed: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestCronService_UpdateJobRecomputesNextRunOnScheduleOrEnabledChange(t *test
 	defer os.Remove(path)
 
 	at := time.Now().Add(time.Hour).UnixMilli()
-	job, err := cs.AddJob("Task1", CronSchedule{Kind: "at", AtMS: &at}, "msg", "ch", "to")
+	job, err := cs.AddJob("Task1", CronSchedule{Kind: "at", AtMS: &at}, "msg", "ch", "to", 0)
 	if err != nil {
 		t.Fatalf("AddJob failed: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestCronService_UpdateJobPreservesRunStateOnPayloadOnlyChange(t *testing.T)
 	defer os.Remove(path)
 
 	everyMS := int64(60_000)
-	job, err := cs.AddJob("Task1", CronSchedule{Kind: "every", EveryMS: &everyMS}, "msg", "ch", "to")
+	job, err := cs.AddJob("Task1", CronSchedule{Kind: "every", EveryMS: &everyMS}, "msg", "ch", "to", 0)
 	if err != nil {
 		t.Fatalf("AddJob failed: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestCronService_ExecutionFlow(t *testing.T) {
 
 	// Add a job then runs 100ms from now
 	target := time.Now().Add(100 * time.Millisecond).UnixMilli()
-	job, _ := cs.AddJob("FastJob", CronSchedule{Kind: "at", AtMS: &target}, "", "", "")
+	job, _ := cs.AddJob("FastJob", CronSchedule{Kind: "at", AtMS: &target}, "", "", "", 0)
 
 	// Check for job execution with a timeout
 	success := false
@@ -297,7 +297,7 @@ func TestCronService_PersistenceIntegrity(t *testing.T) {
 	// write a job and persist
 	cs1 := NewCronService(tmpFile, nil)
 	at := int64(2000000000000)
-	cs1.AddJob("PersistMe", CronSchedule{Kind: "at", AtMS: &at}, "payload", "ch1", "")
+	cs1.AddJob("PersistMe", CronSchedule{Kind: "at", AtMS: &at}, "payload", "ch1", "", 0)
 
 	// check file exists
 	if _, err := os.Stat(tmpFile); os.IsNotExist(err) {
@@ -423,7 +423,7 @@ func TestCronService_BoundedConcurrency(t *testing.T) {
 	// computeNextRun (which requires AtMS > now).
 	atMS := time.Now().Add(100 * time.Millisecond).UnixMilli()
 	for i := range numJobs {
-		_, err := cs.AddJob(fmt.Sprintf("bounded-%d", i), CronSchedule{Kind: "at", AtMS: &atMS}, "", "cli", "direct")
+		_, err := cs.AddJob(fmt.Sprintf("bounded-%d", i), CronSchedule{Kind: "at", AtMS: &atMS}, "", "cli", "direct", 0)
 		if err != nil {
 			t.Fatalf("AddJob: %v", err)
 		}
@@ -461,7 +461,7 @@ func TestCronService_SameJobNoOverlap(t *testing.T) {
 
 	// Add an every-100ms job.
 	everyMS := int64(100)
-	job, err := cs.AddJob("overlap-job", CronSchedule{Kind: "every", EveryMS: &everyMS}, "", "cli", "direct")
+	job, err := cs.AddJob("overlap-job", CronSchedule{Kind: "every", EveryMS: &everyMS}, "", "cli", "direct", 0)
 	if err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}
@@ -509,7 +509,7 @@ func TestCronService_OverlapSkip_NextRunPreserved(t *testing.T) {
 	defer os.Remove(path)
 
 	everyMS := int64(1000)
-	job, err := cs.AddJob("skip-me", CronSchedule{Kind: "every", EveryMS: &everyMS}, "", "cli", "direct")
+	job, err := cs.AddJob("skip-me", CronSchedule{Kind: "every", EveryMS: &everyMS}, "", "cli", "direct", 0)
 	if err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}
@@ -602,7 +602,7 @@ func TestCronService_DefaultCap1_Serialization(t *testing.T) {
 
 	atMS := time.Now().Add(100 * time.Millisecond).UnixMilli()
 	for i := range numJobs {
-		_, err := cs.AddJob(fmt.Sprintf("serial-%d", i), CronSchedule{Kind: "at", AtMS: &atMS}, "", "cli", "direct")
+		_, err := cs.AddJob(fmt.Sprintf("serial-%d", i), CronSchedule{Kind: "at", AtMS: &atMS}, "", "cli", "direct", 0)
 		if err != nil {
 			t.Fatalf("AddJob: %v", err)
 		}
@@ -644,7 +644,7 @@ func TestCronService_ConcurrentAccess(t *testing.T) {
 			defer wg.Done()
 			for j := range iterations {
 				at := time.Now().Add(time.Hour).UnixMilli()
-				cs.AddJob(fmt.Sprintf("Job-%d-%d", id, j), CronSchedule{Kind: "at", AtMS: &at}, "", "", "")
+				cs.AddJob(fmt.Sprintf("Job-%d-%d", id, j), CronSchedule{Kind: "at", AtMS: &at}, "", "", "", 0)
 				time.Sleep(100 * time.Microsecond)
 			}
 		}(i)
@@ -665,4 +665,86 @@ func TestCronService_ConcurrentAccess(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+func TestCronService_MaxRuns_DisablesAfterN(t *testing.T) {
+	cs, path := setupService(func(job *CronJob) (string, error) { return "ok", nil })
+	defer os.Remove(path)
+
+	everyMS := int64(60_000)
+	job, err := cs.AddJob("bounded", CronSchedule{Kind: "every", EveryMS: &everyMS}, "msg", "cli", "direct", 3)
+	if err != nil {
+		t.Fatalf("AddJob failed: %v", err)
+	}
+
+	for range 3 {
+		cs.executeJobByID(job.ID)
+	}
+
+	updated, ok := cs.GetJob(job.ID)
+	if !ok {
+		t.Fatal("job not found")
+	}
+	if updated.Enabled {
+		t.Fatal("expected job to be disabled after max runs")
+	}
+	if updated.State.RunCount != 3 {
+		t.Fatalf("RunCount = %d, want 3", updated.State.RunCount)
+	}
+	if updated.State.NextRunAtMS != nil {
+		t.Fatal("expected next run to be cleared after max runs")
+	}
+}
+
+func TestCronService_MaxRuns_ZeroIsUnlimited(t *testing.T) {
+	cs, path := setupService(func(job *CronJob) (string, error) { return "ok", nil })
+	defer os.Remove(path)
+
+	everyMS := int64(60_000)
+	job, err := cs.AddJob("unlimited", CronSchedule{Kind: "every", EveryMS: &everyMS}, "msg", "cli", "direct", 0)
+	if err != nil {
+		t.Fatalf("AddJob failed: %v", err)
+	}
+
+	for range 5 {
+		cs.executeJobByID(job.ID)
+	}
+
+	updated, ok := cs.GetJob(job.ID)
+	if !ok {
+		t.Fatal("job not found")
+	}
+	if !updated.Enabled {
+		t.Fatal("expected job to remain enabled with maxRuns=0")
+	}
+	if updated.State.RunCount != 5 {
+		t.Fatalf("RunCount = %d, want 5", updated.State.RunCount)
+	}
+	if updated.State.NextRunAtMS == nil {
+		t.Fatal("expected next run to remain scheduled")
+	}
+}
+
+func TestCronService_MaxRuns_RunCountPersisted(t *testing.T) {
+	cs, path := setupService(func(job *CronJob) (string, error) { return "ok", nil })
+	defer os.Remove(path)
+
+	everyMS := int64(60_000)
+	job, err := cs.AddJob("persist-run-count", CronSchedule{Kind: "every", EveryMS: &everyMS}, "msg", "cli", "direct", 2)
+	if err != nil {
+		t.Fatalf("AddJob failed: %v", err)
+	}
+	cs.executeJobByID(job.ID)
+
+	reloaded := NewCronService(path, nil)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	got, ok := reloaded.GetJob(job.ID)
+	if !ok {
+		t.Fatal("reloaded job not found")
+	}
+	if got.State.RunCount != 1 {
+		t.Fatalf("RunCount = %d, want 1", got.State.RunCount)
+	}
 }

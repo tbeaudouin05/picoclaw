@@ -16,6 +16,7 @@ func newAddCommand(storePath func() string) *cobra.Command {
 		cronExp string
 		channel string
 		to      string
+		maxRuns int
 	)
 
 	cmd := &cobra.Command{
@@ -36,7 +37,7 @@ func newAddCommand(storePath func() string) *cobra.Command {
 			}
 
 			cs := cron.NewCronService(storePath(), nil)
-			job, err := cs.AddJob(name, schedule, message, channel, to)
+			job, err := cs.AddJob(name, schedule, message, channel, to, maxRuns)
 			if err != nil {
 				return fmt.Errorf("error adding job: %w", err)
 			}
@@ -53,6 +54,7 @@ func newAddCommand(storePath func() string) *cobra.Command {
 	cmd.Flags().StringVarP(&cronExp, "cron", "c", "", "Cron expression (e.g. '0 9 * * *')")
 	cmd.Flags().StringVar(&to, "to", "", "Recipient for delivery")
 	cmd.Flags().StringVar(&channel, "channel", "", "Channel for delivery")
+	cmd.Flags().IntVar(&maxRuns, "max-runs", 0, "Maximum number of runs (0 = unlimited)")
 
 	_ = cmd.MarkFlagRequired("name")
 	_ = cmd.MarkFlagRequired("message")

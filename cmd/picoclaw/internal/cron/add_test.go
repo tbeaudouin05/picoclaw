@@ -54,3 +54,9 @@ func TestNewAddCommandEveryAndCronMutuallyExclusive(t *testing.T) {
 	err := cmd.Execute()
 	require.Error(t, err)
 }
+
+func TestNewAddSubcommandHasMaxRunsFlag(t *testing.T) {
+	fn := func() string { return "" }
+	cmd := newAddCommand(fn)
+	assert.NotNil(t, cmd.Flags().Lookup("max-runs"))
+}
