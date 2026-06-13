@@ -394,7 +394,7 @@ func (t *ExecTool) runSync(ctx context.Context, command, cwd string) *ToolResult
 	if runtime.GOOS == "windows" {
 		cmd = exec.CommandContext(cmdCtx, "powershell", "-NoProfile", "-NonInteractive", "-Command", command)
 	} else {
-		cmd = exec.CommandContext(cmdCtx, "sh", "-c", command)
+		cmd = exec.CommandContext(cmdCtx, "/bin/sh", "-c", command)
 	}
 	if cwd != "" {
 		cmd.Dir = cwd
@@ -506,7 +506,7 @@ func (t *ExecTool) runBackground(ctx context.Context, command, cwd string, ptyEn
 	if runtime.GOOS == "windows" {
 		cmd = exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command", command)
 	} else {
-		cmd = exec.Command("sh", "-c", command)
+		cmd = exec.Command("/bin/sh", "-c", command)
 	}
 	if cwd != "" {
 		cmd.Dir = cwd
