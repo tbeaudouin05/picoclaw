@@ -113,6 +113,11 @@ type PromptBuildRequest struct {
 	SenderID          string
 	SenderDisplayName string
 
+	// InboundRaw carries the Raw metadata map from the inbound message context.
+	// Used to surface channel-specific enrichments (e.g. WhatsApp linked phone identity)
+	// into the dynamic prompt section.
+	InboundRaw map[string]string
+
 	ActiveSkills []string
 	Overlays     []PromptPart
 

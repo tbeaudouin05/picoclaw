@@ -396,6 +396,27 @@ func (c *WhatsAppNativeChannel) reconnectWithBackoff() {
 	}
 }
 
+// linkedPhoneInfo holds the resolved phone identity when allowlist matching
+// succeeded via SenderAlt or a LID->PN lookup, and the resolved identity is
+// a phone-number JID (@s.whatsapp.net).
+type linkedPhoneInfo struct {
+	SenderJID    string // raw evt.Info.Sender JID
+	LinkedJID    string // resolved phone JID, e.g. "33695651381@s.whatsapp.net"
+	LinkedNumber string // E.164-like number with "+" prefix, e.g. "+33695651381"
+	Source       string // "sender_alt" or "lid_lookup"
+}
+
+// phoneNumberFromJID extracts the user part of a DefaultUserServer JID and
+// prefixes it with "+" to produce a human-readable phone number.
+// Returns "" for non-phone JIDs.
+func phoneNumberFromJID(jidStr string) string {
+	jid, err := parseJID(jidStr)
+	if err != nil || jid.Server != types.DefaultUserServer || jid.User == "" {
+		return ""
+	}
+	return "+" + jid.User
+}
+
 func whatsappSenderInfo(platformID, displayName string) bus.SenderInfo {
 	return bus.SenderInfo{
 		Platform:    "whatsapp",
@@ -405,16 +426,25 @@ func whatsappSenderInfo(platformID, displayName string) bus.SenderInfo {
 	}
 }
 
-func (c *WhatsAppNativeChannel) allowedWhatsAppSender(sender bus.SenderInfo, senderAlt types.JID) (bus.SenderInfo, bool) {
+func (c *WhatsAppNativeChannel) allowedWhatsAppSender(rawSenderJID string, sender bus.SenderInfo, senderAlt types.JID) (bus.SenderInfo, *linkedPhoneInfo, bool) {
 	if c.IsAllowedSender(sender) {
-		return sender, true
+		return sender, nil, true
 	}
 	if !senderAlt.IsEmpty() {
 		altID := senderAlt.String()
 		if altID != "" && altID != sender.PlatformID {
 			altSender := whatsappSenderInfo(altID, sender.DisplayName)
 			if c.IsAllowedSender(altSender) {
-				return altSender, true
+				var lp *linkedPhoneInfo
+				if senderAlt.Server == types.DefaultUserServer {
+					lp = &linkedPhoneInfo{
+						SenderJID:    rawSenderJID,
+						LinkedJID:    altID,
+						LinkedNumber: phoneNumberFromJID(altID),
+						Source:       "sender_alt",
+					}
+				}
+				return altSender, lp, true
 			}
 		}
 	}
@@ -430,11 +460,17 @@ func (c *WhatsAppNativeChannel) allowedWhatsAppSender(sender bus.SenderInfo, sen
 		if pnJID, status, _ := lookupFn(senderJID); status == "found" && pnJID != "" {
 			lookupSender := whatsappSenderInfo(pnJID, sender.DisplayName)
 			if c.IsAllowedSender(lookupSender) {
-				return lookupSender, true
+				lp := &linkedPhoneInfo{
+					SenderJID:    rawSenderJID,
+					LinkedJID:    pnJID,
+					LinkedNumber: phoneNumberFromJID(pnJID),
+					Source:       "lid_lookup",
+				}
+				return lookupSender, lp, true
 			}
 		}
 	}
-	return bus.SenderInfo{}, false
+	return bus.SenderInfo{}, nil, false
 }
 
 func (c *WhatsAppNativeChannel) handleIncoming(evt *events.Message) {
@@ -478,7 +514,7 @@ func (c *WhatsAppNativeChannel) handleIncoming(evt *events.Message) {
 
 	messageID := evt.Info.ID
 	sender := whatsappSenderInfo(senderID, evt.Info.PushName)
-	allowedSender, allowed := c.allowedWhatsAppSender(sender, evt.Info.SenderAlt)
+	allowedSender, linkedPhone, allowed := c.allowedWhatsAppSender(senderID, sender, evt.Info.SenderAlt)
 
 	if !allowed {
 		logger.WarnCF("whatsapp", "Message rejected by allowlist", c.buildInboundDiagnosticFields(evt))
@@ -588,6 +624,13 @@ func (c *WhatsAppNativeChannel) handleIncoming(evt *events.Message) {
 			"chat_id":    chatID,
 		},
 	)
+
+	if linkedPhone != nil && linkedPhone.LinkedNumber != "" {
+		metadata["whatsapp_sender_jid"] = linkedPhone.SenderJID
+		metadata["whatsapp_linked_phone_jid"] = linkedPhone.LinkedJID
+		metadata["whatsapp_linked_phone_number"] = linkedPhone.LinkedNumber
+		metadata["whatsapp_linked_phone_source"] = linkedPhone.Source
+	}
 
 	inboundCtx := bus.InboundContext{
 		Channel:   "whatsapp",

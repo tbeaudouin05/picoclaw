@@ -173,8 +173,6 @@ func TestMigrateV0ToV3(t *testing.T) {
 	require.NoError(t, err)
 	err = migrateV2ToV3(m)
 	require.NoError(t, err)
-	err = migrateV3ToV4(m)
-	require.NoError(t, err)
 
 	// Version should be set to V3 by the V2→V3 step; LoadConfig applies V3→V4.
 	require.Equal(t, 3, m["version"])
@@ -276,8 +274,6 @@ func TestMigrateV1ToV3(t *testing.T) {
 	err = migrateV1ToV2(m)
 	require.NoError(t, err)
 	err = migrateV2ToV3(m)
-	require.NoError(t, err)
-	err = migrateV3ToV4(m)
 	require.NoError(t, err)
 
 	// Version should be set to V3 by the V2→V3 step; LoadConfig applies V3→V4.

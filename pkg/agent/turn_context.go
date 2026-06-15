@@ -61,6 +61,15 @@ func cloneStringMap(src map[string]string) map[string]string {
 	return cloned
 }
 
+// cloneInboundRaw returns a shallow copy of the Raw metadata map from an
+// InboundContext, or nil if the context or its Raw map is empty.
+func cloneInboundRaw(ctx *bus.InboundContext) map[string]string {
+	if ctx == nil || len(ctx.Raw) == 0 {
+		return nil
+	}
+	return cloneStringMap(ctx.Raw)
+}
+
 func cloneHookMeta(meta HookMeta) HookMeta {
 	meta.turnContext = cloneTurnContext(meta.turnContext)
 	return meta
