@@ -68,7 +68,7 @@ func (s *TursoHTTPStore) Close() error { return nil }
 
 func (s *TursoHTTPStore) InitSchema(ctx context.Context) error {
 	sql := fmt.Sprintf(
-		"CREATE TABLE IF NOT EXISTS %s (%s TEXT PRIMARY KEY, %s INTEGER NOT NULL DEFAULT 1, %s TEXT NOT NULL DEFAULT (strftime('%%Y-%%m-%%dT%%H:%%M:%%fZ','now')), %s TEXT NOT NULL)",
+		"CREATE TABLE IF NOT EXISTS %s (%s TEXT PRIMARY KEY, %s INTEGER NOT NULL DEFAULT 1, %s INTEGER NOT NULL DEFAULT 0, %s TEXT NOT NULL)",
 		s.schema.Table, s.schema.IDColumn, s.schema.VersionColumn, s.schema.UpdatedColumn, s.schema.PayloadColumn,
 	)
 	_, err := s.execute(ctx, sql)
@@ -108,10 +108,10 @@ func (s *TursoHTTPStore) UpdateRecord(ctx context.Context, id string, expectedVe
 		return nil, fmt.Errorf("config_json must be valid JSON")
 	}
 	sql := fmt.Sprintf(
-		"UPDATE %s SET %s = %s + 1, %s = strftime('%%Y-%%m-%%dT%%H:%%M:%%fZ','now'), %s = ? WHERE %s = ? AND %s = ?",
+		"UPDATE %s SET %s = %s + 1, %s = ?, %s = ? WHERE %s = ? AND %s = ?",
 		s.schema.Table, s.schema.VersionColumn, s.schema.VersionColumn, s.schema.UpdatedColumn, s.schema.PayloadColumn, s.schema.IDColumn, s.schema.VersionColumn,
 	)
-	res, err := s.execute(ctx, sql, textArg(string(configJSON)), textArg(id), intArg(expectedVersion))
+	res, err := s.execute(ctx, sql, intArg(time.Now().UnixMilli()), textArg(string(configJSON)), textArg(id), intArg(expectedVersion))
 	if err != nil {
 		return nil, err
 	}
@@ -127,10 +127,10 @@ func (s *TursoHTTPStore) UpsertInitialRecord(ctx context.Context, id string, con
 		return nil, fmt.Errorf("config_json must be valid JSON")
 	}
 	sql := fmt.Sprintf(
-		"INSERT INTO %s (%s, %s, %s, %s) VALUES (?, 1, strftime('%%Y-%%m-%%dT%%H:%%M:%%fZ','now'), ?) ON CONFLICT(%s) DO NOTHING",
+		"INSERT INTO %s (%s, %s, %s, %s) VALUES (?, 1, ?, ?) ON CONFLICT(%s) DO NOTHING",
 		s.schema.Table, s.schema.IDColumn, s.schema.VersionColumn, s.schema.UpdatedColumn, s.schema.PayloadColumn, s.schema.IDColumn,
 	)
-	_, err := s.execute(ctx, sql, textArg(id), textArg(string(configJSON)))
+	_, err := s.execute(ctx, sql, textArg(id), intArg(time.Now().UnixMilli()), textArg(string(configJSON)))
 	if err != nil {
 		return nil, err
 	}
@@ -160,18 +160,40 @@ type executeResult struct {
 }
 
 type sqlValue struct {
-	Type   string `json:"type"`
-	Value  string `json:"value"`
-	Base64 string `json:"base64"`
+	Type   string          `json:"type"`
+	Value  json.RawMessage `json:"value"`
+	Base64 string          `json:"base64"`
 }
 
 func (v sqlValue) String() string {
-	if v.Type == "null" {
+	if v.Type == "null" || len(v.Value) == 0 {
 		return ""
 	}
-	return v.Value
+	// Turso returns text columns as a JSON-encoded string: "\"hello\"".
+	var s string
+	if json.Unmarshal(v.Value, &s) == nil {
+		return s
+	}
+	// Fallback for numeric or other raw JSON forms: return raw bytes as string.
+	return string(v.Value)
 }
-func (v sqlValue) Int64() (int64, error) { return strconv.ParseInt(v.Value, 10, 64) }
+
+func (v sqlValue) Int64() (int64, error) {
+	if len(v.Value) == 0 {
+		return 0, fmt.Errorf("empty integer value")
+	}
+	// Turso spec encodes integers as JSON strings ("42") to preserve precision,
+	// but some server versions return them as raw JSON numbers (42). Handle both.
+	var s string
+	if json.Unmarshal(v.Value, &s) == nil {
+		return strconv.ParseInt(s, 10, 64)
+	}
+	var n int64
+	if json.Unmarshal(v.Value, &n) == nil {
+		return n, nil
+	}
+	return 0, fmt.Errorf("cannot parse integer from %s", v.Value)
+}
 
 type pipelineRequest struct {
 	Requests []pipelineOp `json:"requests"`

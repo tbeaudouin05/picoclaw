@@ -2,6 +2,8 @@ package config
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -144,4 +146,47 @@ func TestConfig_LiveConfig_JSONParse(t *testing.T) {
 	require.Equal(t, []string{"telegram", "discord"}, lc.InjectChannels)
 	require.Equal(t, []string{"admin"}, lc.AdminUpdateChannels)
 	require.True(t, lc.AdminUpdatesEnabled)
+}
+
+func TestLoadConfig_PreservesLiveConfigSchemaWhenSecurityAddsAuthToken(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	rawConfig := `{
+		"version": 4,
+		"live_config": {
+			"enabled": true,
+			"record_id": "instance-mist-test",
+			"driver": {
+				"turso": {
+					"url": "libsql://example.turso.io",
+					"schema": {
+						"table": "runtime_config",
+						"id_column": "config_id",
+						"version_column": "config_version",
+						"updated_column": "updated_at",
+						"payload_column": "config_json"
+					}
+				}
+			},
+			"inject_channels": ["telegram"],
+			"admin_update_channels": ["telegram"],
+			"admin_updates_enabled": true
+		}
+	}`
+	require.NoError(t, os.WriteFile(configPath, []byte(rawConfig), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, SecurityConfigFile), []byte("live_config:\n  driver:\n    turso:\n      auth_token: secure-test-token\n"), 0o600))
+
+	cfg, err := LoadConfig(configPath)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.LiveConfig.Driver.Turso)
+	require.Equal(t, "secure-test-token", cfg.LiveConfig.Driver.Turso.AuthToken.String())
+	require.Equal(t, "libsql://example.turso.io", cfg.LiveConfig.Driver.Turso.URL)
+	require.Equal(t, "instance-mist-test", cfg.LiveConfig.RecordID)
+	require.Equal(t, LiveConfigSchema{
+		Table:         "runtime_config",
+		IDColumn:      "config_id",
+		VersionColumn: "config_version",
+		UpdatedColumn: "updated_at",
+		PayloadColumn: "config_json",
+	}, cfg.LiveConfig.Driver.Turso.Schema)
 }
