@@ -44,7 +44,13 @@ func loadSecurityConfig(cfg *Config, securityPath string) error {
 		return fmt.Errorf("failed to read security config: %w", err)
 	}
 
-	// Save existing channels and ModelList before unmarshal
+	// Save existing public config values that security.yml must not replace.
+	// security.yml intentionally carries only secret material for live_config
+	// (currently the Turso auth token); the public config.json owns the live
+	// record ID, update/injection policy, URL, and schema/table shape.
+	savedLiveConfig := cfg.LiveConfig
+
+	// Save existing channels and ModelList before unmarshal.
 	savedChannels := make(ChannelsConfig, len(cfg.Channels))
 	for name, bc := range cfg.Channels {
 		savedChannels[name] = bc
@@ -76,6 +82,14 @@ func loadSecurityConfig(cfg *Config, securityPath string) error {
 	// This will resolve encrypted values for model_list, tools, etc.
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return fmt.Errorf("failed to parse security config %s: %w", securityPath, err)
+	}
+	secureLiveConfig := cfg.LiveConfig
+	cfg.LiveConfig = savedLiveConfig
+	if secureLiveConfig.Driver.Turso != nil && secureLiveConfig.Driver.Turso.AuthToken.String() != "" {
+		if cfg.LiveConfig.Driver.Turso == nil {
+			cfg.LiveConfig.Driver.Turso = &LiveConfigTursoDriver{}
+		}
+		cfg.LiveConfig.Driver.Turso.AuthToken = secureLiveConfig.Driver.Turso.AuthToken
 	}
 	if err := applyLegacySkillsSecurityConfig(cfg, data); err != nil {
 		return fmt.Errorf("failed to parse legacy skills security config: %w", err)
