@@ -10,10 +10,12 @@ package whatsapp
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -875,8 +877,15 @@ func (c *WhatsAppNativeChannel) Send(ctx context.Context, msg bus.OutboundMessag
 		return nil, fmt.Errorf("invalid chat id %q: %w", msg.ChatID, err)
 	}
 
+	// Track target resolution so a send failure can be diagnosed precisely
+	// (LID->PN resolution and final target server are the usual culprits).
+	originalTarget := to
+	lidResolved := false
+	resolutionStatus := "not_lid"
+
 	// If the target is a LID, resolve it to the corresponding PN JID before
-	// sending. WhatsApp requires a phone-number JID for outbound delivery.
+	// sending. WhatsApp requires a phone-number JID for outbound delivery
+	// (sending to a LID JID is rejected with server error 463).
 	if to.Server == types.HiddenUserServer {
 		lookupFn := c.lidLookupFn
 		if lookupFn == nil {
@@ -885,19 +894,31 @@ func (c *WhatsAppNativeChannel) Send(ctx context.Context, msg bus.OutboundMessag
 			}
 		}
 		resolved, status := resolveOutboundTarget(to, lookupFn)
+		resolutionStatus = status
 		if status == "found" {
-			logger.DebugCF("whatsapp", "LID outbound target resolved to PN JID", map[string]any{
-				"lid": to.String(),
-				"pn":  resolved.String(),
-			})
+			lidResolved = true
 			to = resolved
+			logger.InfoCF("whatsapp", "WhatsApp outbound LID resolved to PN JID", map[string]any{
+				"chat_id":             msg.ChatID,
+				"original_target_jid": originalTarget.String(),
+				"final_target_jid":    to.String(),
+				"target_server":       to.Server,
+				"resolution_status":   status,
+			})
 		} else {
-			logger.WarnCF("whatsapp", "LID outbound target could not be resolved to PN JID; sending to original LID", map[string]any{
-				"lid":    to.String(),
-				"status": status,
-				"chat":   msg.ChatID,
+			logger.WarnCF("whatsapp", "WhatsApp outbound LID could not be resolved to PN JID; sending to original LID", map[string]any{
+				"chat_id":             msg.ChatID,
+				"original_target_jid": originalTarget.String(),
+				"target_server":       to.Server,
+				"resolution_status":   status,
 			})
 		}
+	} else {
+		logger.DebugCF("whatsapp", "WhatsApp outbound target is a phone JID; no LID resolution needed", map[string]any{
+			"chat_id":          msg.ChatID,
+			"final_target_jid": to.String(),
+			"target_server":    to.Server,
+		})
 	}
 
 	waMsg := &waE2E.Message{
@@ -905,9 +926,129 @@ func (c *WhatsAppNativeChannel) Send(ctx context.Context, msg bus.OutboundMessag
 	}
 
 	if _, err = client.SendMessage(ctx, to, waMsg); err != nil {
+		diag := classifyWhatsAppSendError(err)
+		fields := map[string]any{
+			"chat_id":             msg.ChatID,
+			"final_target_jid":    to.String(),
+			"original_target_jid": originalTarget.String(),
+			"target_server":       to.Server,
+			"lid_resolved":        lidResolved,
+			"resolution_status":   resolutionStatus,
+			"error":               err.Error(),
+			"error_class":         diag.Class,
+		}
+		if diag.Code != 0 {
+			fields["server_error_code"] = diag.Code
+		}
+		if diag.Category != "" {
+			fields["server_error_category"] = diag.Category
+		}
+		logger.WarnCF("whatsapp", "WhatsApp outbound send failed", fields)
+
+		// Enrich the returned error so the manager-level failure log surfaces
+		// the parsed server error code/category without WhatsApp-specific
+		// knowledge. Keep ErrTemporary wrapping so retry semantics are unchanged.
+		if diag.Code != 0 {
+			return nil, fmt.Errorf("whatsapp send to server %s failed (server error %d, category %s): %v: %w",
+				to.Server, diag.Code, diag.categoryOrUnknown(), err, channels.ErrTemporary)
+		}
 		return nil, fmt.Errorf("whatsapp send: %v: %w", err, channels.ErrTemporary)
 	}
 	return nil, nil
+}
+
+// sendErrorDiagnostic captures a parsed WhatsApp send error for structured
+// logging. It contains no message content or secrets — only a coarse error
+// class, the numeric WhatsApp status code (0 when not derivable), and a
+// human-readable category derived from the code.
+type sendErrorDiagnostic struct {
+	Class    string // coarse bucket: server_returned_error, iq_error, timeout, not_connected, unknown
+	Code     int    // WhatsApp numeric status code (0 if unknown)
+	Category string // category derived from Code (e.g. "addressing", "rate_limited")
+}
+
+func (d sendErrorDiagnostic) categoryOrUnknown() string {
+	if d.Category == "" {
+		return "unknown"
+	}
+	return d.Category
+}
+
+// classifyWhatsAppSendError inspects an error returned by client.SendMessage and
+// extracts a safely-derivable error class, numeric code, and category. It never
+// inspects or returns message content.
+func classifyWhatsAppSendError(err error) sendErrorDiagnostic {
+	if err == nil {
+		return sendErrorDiagnostic{}
+	}
+	d := sendErrorDiagnostic{Class: "unknown"}
+
+	var iqErr *whatsmeow.IQError
+	switch {
+	case errors.As(err, &iqErr):
+		d.Class = "iq_error"
+		d.Code = iqErr.Code
+	case errors.Is(err, whatsmeow.ErrServerReturnedError):
+		d.Class = "server_returned_error"
+		d.Code = parseServerErrorCode(err.Error())
+	case errors.Is(err, whatsmeow.ErrMessageTimedOut) || errors.Is(err, whatsmeow.ErrIQTimedOut):
+		d.Class = "timeout"
+	case errors.Is(err, whatsmeow.ErrNotConnected):
+		d.Class = "not_connected"
+	}
+	d.Category = whatsAppErrorCategory(d.Code)
+	return d
+}
+
+// parseServerErrorCode extracts the trailing numeric code from a
+// whatsmeow.ErrServerReturnedError message, which has the form
+// "server returned error 463". Returns 0 when no code can be parsed.
+func parseServerErrorCode(msg string) int {
+	const prefix = "server returned error "
+	idx := strings.LastIndex(msg, prefix)
+	if idx < 0 {
+		return 0
+	}
+	rest := strings.TrimSpace(msg[idx+len(prefix):])
+	end := 0
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return 0
+	}
+	code, err := strconv.Atoi(rest[:end])
+	if err != nil {
+		return 0
+	}
+	return code
+}
+
+// whatsAppErrorCategory maps a WhatsApp/IQ status code to a coarse, stable
+// category for diagnostics. Returns "" for an unknown/zero code.
+func whatsAppErrorCategory(code int) string {
+	switch code {
+	case 0:
+		return ""
+	case 400:
+		return "bad_request"
+	case 401, 403:
+		return "forbidden"
+	case 404:
+		return "not_found"
+	case 405, 406:
+		return "not_allowed"
+	case 419, 429:
+		return "rate_limited"
+	case 463:
+		// Recipient/device addressing failure — commonly seen when sending to a
+		// LID JID instead of the resolved phone-number JID.
+		return "addressing"
+	case 500, 503, 530:
+		return "server_error"
+	default:
+		return "other"
+	}
 }
 
 // parseJID converts a chat ID (phone number or JID string) to types.JID.
