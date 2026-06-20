@@ -521,6 +521,15 @@ func (c *WhatsAppNativeChannel) handleIncoming(evt *events.Message) {
 		return
 	}
 
+	// For a direct message where the chat JID is a LID but we resolved a PN JID,
+	// normalise chatID to the PN JID. WhatsApp rejects outbound sends to LID JIDs
+	// (error 463); using the PN JID here ensures replies, session key, toggle, and
+	// dedup stores all use the stable phone identity that WhatsApp accepts.
+	if !isGroup && evt.Info.Chat.Server == types.HiddenUserServer && linkedPhone != nil && linkedPhone.LinkedJID != "" {
+		chatID = linkedPhone.LinkedJID
+		metadata["peer_id"] = chatID
+	}
+
 	logger.InfoCF("whatsapp", "WhatsApp inbound sender diagnostic", c.buildInboundDiagnosticFields(evt))
 
 	// Apply the group trigger-name gate before processing toggle commands so
