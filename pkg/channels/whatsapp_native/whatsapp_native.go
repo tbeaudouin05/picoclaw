@@ -818,6 +818,25 @@ func callJIDStoreLookupOnStore(store any, storeFieldName, methodName string, inp
 	return jid.String(), "found", ""
 }
 
+// resolveOutboundTarget resolves a LID/HiddenUserServer JID to its corresponding
+// phone-number JID using lookupFn. Returns (original JID, "not_lid") when to is
+// not a LID, (resolved JID, "found") on success, or (zero JID, status) on failure.
+// lookupFn must be non-nil when to.Server == types.HiddenUserServer.
+func resolveOutboundTarget(to types.JID, lookupFn func(types.JID) (string, string, string)) (types.JID, string) {
+	if to.Server != types.HiddenUserServer {
+		return to, "not_lid"
+	}
+	pnJIDStr, status, _ := lookupFn(to)
+	if status != "found" || pnJIDStr == "" {
+		return types.JID{}, status
+	}
+	pnJID, err := parseJID(pnJIDStr)
+	if err != nil {
+		return types.JID{}, "parse_error"
+	}
+	return pnJID, "found"
+}
+
 func (c *WhatsAppNativeChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]string, error) {
 	if !c.IsRunning() {
 		return nil, channels.ErrNotRunning
@@ -847,12 +866,37 @@ func (c *WhatsAppNativeChannel) Send(ctx context.Context, msg bus.OutboundMessag
 		return nil, fmt.Errorf("invalid chat id %q: %w", msg.ChatID, err)
 	}
 
+	// If the target is a LID, resolve it to the corresponding PN JID before
+	// sending. WhatsApp requires a phone-number JID for outbound delivery.
+	if to.Server == types.HiddenUserServer {
+		lookupFn := c.lidLookupFn
+		if lookupFn == nil {
+			lookupFn = func(jid types.JID) (string, string, string) {
+				return lookupPNForLID(client, jid)
+			}
+		}
+		resolved, status := resolveOutboundTarget(to, lookupFn)
+		if status == "found" {
+			logger.DebugCF("whatsapp", "LID outbound target resolved to PN JID", map[string]any{
+				"lid": to.String(),
+				"pn":  resolved.String(),
+			})
+			to = resolved
+		} else {
+			logger.WarnCF("whatsapp", "LID outbound target could not be resolved to PN JID; sending to original LID", map[string]any{
+				"lid":    to.String(),
+				"status": status,
+				"chat":   msg.ChatID,
+			})
+		}
+	}
+
 	waMsg := &waE2E.Message{
 		Conversation: proto.String(msg.Content),
 	}
 
 	if _, err = client.SendMessage(ctx, to, waMsg); err != nil {
-		return nil, fmt.Errorf("whatsapp send: %w", channels.ErrTemporary)
+		return nil, fmt.Errorf("whatsapp send: %v: %w", err, channels.ErrTemporary)
 	}
 	return nil, nil
 }
