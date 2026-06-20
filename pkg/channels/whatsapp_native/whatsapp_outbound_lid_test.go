@@ -92,6 +92,70 @@ func TestResolveOutboundTarget(t *testing.T) {
 	}
 }
 
+func TestOutboundSendTargets(t *testing.T) {
+	lid := types.NewJID("106000011014190", types.HiddenUserServer)
+	phone := types.NewJID("393391077930", types.DefaultUserServer)
+	group := types.NewJID("123456789", types.GroupServer)
+
+	tests := []struct {
+		name           string
+		original       types.JID
+		resolved       types.JID
+		resolvedStatus string
+		want           []types.JID
+	}{
+		{
+			name:           "resolved LID sends PN first then original LID fallback",
+			original:       lid,
+			resolved:       phone,
+			resolvedStatus: "found",
+			want:           []types.JID{phone, lid},
+		},
+		{
+			name:           "unresolved LID sends original LID only",
+			original:       lid,
+			resolved:       lid,
+			resolvedStatus: "not_found",
+			want:           []types.JID{lid},
+		},
+		{
+			name:           "phone number target has no alternate",
+			original:       phone,
+			resolved:       phone,
+			resolvedStatus: "not_lid",
+			want:           []types.JID{phone},
+		},
+		{
+			name:           "group target has no alternate",
+			original:       group,
+			resolved:       group,
+			resolvedStatus: "not_lid",
+			want:           []types.JID{group},
+		},
+		{
+			name:           "resolved status with same target deduplicates",
+			original:       lid,
+			resolved:       lid,
+			resolvedStatus: "found",
+			want:           []types.JID{lid},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := outboundSendTargets(tt.original, tt.resolved, tt.resolvedStatus)
+			if len(got) != len(tt.want) {
+				t.Fatalf("len=%d, want %d; got=%v", len(got), len(tt.want), got)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Fatalf("target[%d]=%v, want %v; all=%v", i, got[i], tt.want[i], got)
+				}
+			}
+		})
+	}
+}
+
 // TestSendErrorFormat verifies that the error returned when client.SendMessage fails
 // satisfies errors.Is(err, channels.ErrTemporary) while including the underlying
 // error text for diagnostics — matching the fmt.Errorf pattern used in Send.

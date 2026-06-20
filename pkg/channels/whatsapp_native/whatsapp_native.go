@@ -837,6 +837,14 @@ func resolveOutboundTarget(to types.JID, lookupFn func(types.JID) (string, strin
 	return pnJID, "found"
 }
 
+func outboundSendTargets(original, resolved types.JID, resolvedStatus string) []types.JID {
+	targets := []types.JID{resolved}
+	if resolvedStatus == "found" && original.Server == types.HiddenUserServer && original != resolved {
+		targets = append(targets, original)
+	}
+	return targets
+}
+
 func (c *WhatsAppNativeChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]string, error) {
 	if !c.IsRunning() {
 		return nil, channels.ErrNotRunning
@@ -865,9 +873,11 @@ func (c *WhatsAppNativeChannel) Send(ctx context.Context, msg bus.OutboundMessag
 	if err != nil {
 		return nil, fmt.Errorf("invalid chat id %q: %w", msg.ChatID, err)
 	}
+	originalTo := to
+	resolveStatus := "not_lid"
 
-	// If the target is a LID, resolve it to the corresponding PN JID before
-	// sending. WhatsApp requires a phone-number JID for outbound delivery.
+	// If the target is a LID, resolve it to the corresponding PN JID for the
+	// primary send attempt while keeping the original LID as a transport fallback.
 	if to.Server == types.HiddenUserServer {
 		lookupFn := c.lidLookupFn
 		if lookupFn == nil {
@@ -876,6 +886,7 @@ func (c *WhatsAppNativeChannel) Send(ctx context.Context, msg bus.OutboundMessag
 			}
 		}
 		resolved, status := resolveOutboundTarget(to, lookupFn)
+		resolveStatus = status
 		if status == "found" {
 			logger.DebugCF("whatsapp", "LID outbound target resolved to PN JID", map[string]any{
 				"lid": to.String(),
@@ -895,10 +906,33 @@ func (c *WhatsAppNativeChannel) Send(ctx context.Context, msg bus.OutboundMessag
 		Conversation: proto.String(msg.Content),
 	}
 
-	if _, err = client.SendMessage(ctx, to, waMsg); err != nil {
-		return nil, fmt.Errorf("whatsapp send: %v: %w", err, channels.ErrTemporary)
+	targets := outboundSendTargets(originalTo, to, resolveStatus)
+	var lastErr error
+	for i, target := range targets {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+		if _, err = client.SendMessage(ctx, target, waMsg); err == nil {
+			if i > 0 {
+				logger.InfoCF("whatsapp", "WhatsApp outbound send succeeded with fallback target", map[string]any{
+					"primary":  to.String(),
+					"fallback": target.String(),
+				})
+			}
+			return nil, nil
+		}
+		lastErr = err
+		if i == 0 && len(targets) > 1 {
+			logger.WarnCF("whatsapp", "WhatsApp outbound primary target failed; trying original LID fallback", map[string]any{
+				"primary":  target.String(),
+				"fallback": originalTo.String(),
+				"error":    err.Error(),
+			})
+		}
 	}
-	return nil, nil
+	return nil, fmt.Errorf("whatsapp send: %v: %w", lastErr, channels.ErrTemporary)
 }
 
 // parseJID converts a chat ID (phone number or JID string) to types.JID.
