@@ -6,14 +6,17 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	picointernal "github.com/sipeed/picoclaw/cmd/picoclaw/internal"
 	"github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/bus"
+	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/liveconfig"
 	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/media"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
@@ -250,6 +253,11 @@ func runInjectedTurn(ctx context.Context, channel string, req injectTurnRequest)
 	defer msgBus.Close()
 	loop := agent.NewAgentLoop(cfg, msgBus, provider)
 	defer loop.Close()
+	if store := configureInjectedTurnMedia(loop, cfg); store != nil {
+		if fms, ok := store.(*media.FileMediaStore); ok {
+			defer fms.Stop()
+		}
+	}
 	msg := bus.InboundMessage{
 		Context: bus.InboundContext{
 			Channel:  channel,
@@ -262,6 +270,35 @@ func runInjectedTurn(ctx context.Context, channel string, req injectTurnRequest)
 		SessionKey: req.SessionKey,
 	}
 	return loop.ProcessInjectedMessage(ctx, msg)
+}
+
+// mediaStoreConfigurer is the slice of the agent loop the runtime inject-turn
+// path needs to wire outbound media. *agent.AgentLoop satisfies it.
+type mediaStoreConfigurer interface {
+	SetMediaStore(media.MediaStore)
+}
+
+// configureInjectedTurnMedia initializes a MediaStore and injects it into the
+// agent loop whenever a media-emitting tool (send_file, load_image) is enabled.
+// The gateway wires this during normal startup, but the runtime inject-turn
+// path built its own loop without it — so send_file aborted with "media store
+// not configured". Returns the store (nil when no media tool is enabled) so the
+// caller can stop its background cleanup.
+func configureInjectedTurnMedia(loop mediaStoreConfigurer, cfg *config.Config) media.MediaStore {
+	if loop == nil || cfg == nil {
+		return nil
+	}
+	if !cfg.Tools.IsToolEnabled("send_file") && !cfg.Tools.IsToolEnabled("load_image") {
+		return nil
+	}
+	store := media.NewFileMediaStoreWithCleanup(media.MediaCleanerConfig{
+		Enabled:  cfg.Tools.MediaCleanup.Enabled,
+		MaxAge:   time.Duration(cfg.Tools.MediaCleanup.MaxAge) * time.Minute,
+		Interval: time.Duration(cfg.Tools.MediaCleanup.Interval) * time.Minute,
+	})
+	store.Start()
+	loop.SetMediaStore(store)
+	return store
 }
 
 func writeInjectTurnResponse(w io.Writer, channel, response string, req injectTurnRequest) error {
