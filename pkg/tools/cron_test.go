@@ -843,6 +843,166 @@ func TestCronTool_ExecuteJobReturnsErrorWithoutPublish(t *testing.T) {
 	}
 }
 
+func TestCronTool_AddJob_IsHidden(t *testing.T) {
+	tool := newTestCronTool(t)
+	ctx := WithToolContext(context.Background(), "telegram", "chat-1")
+	result := tool.Execute(ctx, map[string]any{
+		"action":        "add",
+		"message":       "silent check-in",
+		"every_seconds": float64(600),
+		"is_hidden":     true,
+	})
+	if result.IsError {
+		t.Fatalf("expected add to succeed, got: %s", result.ForLLM)
+	}
+	jobs := tool.cronService.ListJobs(true)
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 job, got %d", len(jobs))
+	}
+	if !jobs[0].IsHidden {
+		t.Fatal("expected IsHidden to be true")
+	}
+}
+
+func TestCronTool_AddJob_DefaultsNotHidden(t *testing.T) {
+	tool := newTestCronTool(t)
+	ctx := WithToolContext(context.Background(), "telegram", "chat-1")
+	result := tool.Execute(ctx, map[string]any{
+		"action":        "add",
+		"message":       "regular reminder",
+		"every_seconds": float64(600),
+	})
+	if result.IsError {
+		t.Fatalf("expected add to succeed, got: %s", result.ForLLM)
+	}
+	jobs := tool.cronService.ListJobs(true)
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 job, got %d", len(jobs))
+	}
+	if jobs[0].IsHidden {
+		t.Fatal("expected IsHidden to default to false")
+	}
+}
+
+func TestCronTool_AddJob_IsHiddenRejectsNonBool(t *testing.T) {
+	tool := newTestCronTool(t)
+	ctx := WithToolContext(context.Background(), "telegram", "chat-1")
+	result := tool.Execute(ctx, map[string]any{
+		"action":        "add",
+		"message":       "reminder",
+		"every_seconds": float64(600),
+		"is_hidden":     "yes",
+	})
+	if !result.IsError || !strings.Contains(result.ForLLM, "is_hidden must be a boolean") {
+		t.Fatalf("expected boolean validation error, got: %+v", result)
+	}
+}
+
+func TestCronTool_UpdateJob_TogglesIsHidden(t *testing.T) {
+	tool := newTestCronTool(t)
+	ctx := WithToolContext(context.Background(), "cli", "direct")
+	job, err := tool.cronService.AddJob("job", cron.CronSchedule{Kind: "cron", Expr: "0 8 * * *"}, "message", "cli", "direct", 0)
+	if err != nil {
+		t.Fatalf("AddJob() error: %v", err)
+	}
+
+	result := tool.Execute(ctx, map[string]any{
+		"action":    "update",
+		"job_id":    job.ID,
+		"is_hidden": true,
+	})
+	if result.IsError {
+		t.Fatalf("expected update to succeed, got: %s", result.ForLLM)
+	}
+	updated, _ := tool.cronService.GetJob(job.ID)
+	if !updated.IsHidden {
+		t.Fatal("expected IsHidden to be true after update")
+	}
+
+	result = tool.Execute(ctx, map[string]any{
+		"action":    "update",
+		"job_id":    job.ID,
+		"is_hidden": false,
+	})
+	if result.IsError {
+		t.Fatalf("expected update to succeed, got: %s", result.ForLLM)
+	}
+	updated, _ = tool.cronService.GetJob(job.ID)
+	if updated.IsHidden {
+		t.Fatal("expected IsHidden to be false after update")
+	}
+}
+
+func TestCronTool_ExecuteHiddenJobSuppressesAgentResponse(t *testing.T) {
+	executor := &stubJobExecutor{response: "generated reply"}
+	tool := newTestCronToolWithExecutorAndConfig(t, executor, config.DefaultConfig())
+
+	job := &cron.CronJob{ID: "job-hidden", IsHidden: true}
+	job.Payload.Channel = "telegram"
+	job.Payload.To = "chat-1"
+	job.Payload.Message = "send me a poem"
+
+	if got := tool.ExecuteJob(context.Background(), job); got != "ok" {
+		t.Fatalf("ExecuteJob() = %q, want ok", got)
+	}
+
+	// The agent turn still runs for hidden jobs.
+	if executor.lastPrompt != "send me a poem" {
+		t.Fatalf("expected agent turn to run, prompt = %q", executor.lastPrompt)
+	}
+	// But the response is never delivered to the channel.
+	if executor.publishedResp != "" {
+		t.Fatalf("expected no published response for hidden job, got: %q", executor.publishedResp)
+	}
+}
+
+func TestCronTool_ExecuteHiddenCommandJobSuppressesOutput(t *testing.T) {
+	tool := newTestCronToolWithConfig(t, config.DefaultConfig())
+	job := &cron.CronJob{ID: "job-hidden-cmd", IsHidden: true}
+	job.Payload.Channel = "cli"
+	job.Payload.To = "direct"
+	job.Payload.Command = "echo cron-test-ok"
+
+	if got := tool.ExecuteJob(context.Background(), job); got != "ok" {
+		t.Fatalf("ExecuteJob() = %q, want ok", got)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	select {
+	case msg := <-tool.msgBus.OutboundChan():
+		t.Fatalf("expected no outbound message for hidden command job, got: %s", msg.Content)
+	case <-ctx.Done():
+		// No message delivered, as expected.
+	}
+}
+
+func TestCronTool_ExecuteHiddenCommandJobSuppressesExecDisabledError(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Tools.Exec.Enabled = false
+
+	tool := newTestCronToolWithConfig(t, cfg)
+	job := &cron.CronJob{ID: "job-hidden-disabled", IsHidden: true}
+	job.Payload.Channel = "cli"
+	job.Payload.To = "direct"
+	job.Payload.Command = "df -h"
+
+	if got := tool.ExecuteJob(context.Background(), job); got != "ok" {
+		t.Fatalf("ExecuteJob() = %q, want ok", got)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	select {
+	case msg := <-tool.msgBus.OutboundChan():
+		t.Fatalf("expected no outbound message for hidden job, got: %s", msg.Content)
+	case <-ctx.Done():
+		// No message delivered, as expected.
+	}
+}
+
 func TestCronTool_AddJob_MaxRuns(t *testing.T) {
 	tool := newTestCronTool(t)
 	ctx := WithToolContext(context.Background(), "telegram", "chat-1")

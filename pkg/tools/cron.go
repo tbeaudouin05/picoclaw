@@ -137,6 +137,10 @@ func (t *CronTool) Parameters() map[string]any {
 				"type":        "integer",
 				"description": "Maximum number of times to run before auto-disabling. Omit or 0 for unlimited.",
 			},
+			"is_hidden": map[string]any{
+				"type":        "boolean",
+				"description": "Optional: when true, the job runs normally (including shell command or LLM jobs) but no message is sent to the originating channel/chat when it triggers. Defaults to false.",
+			},
 			"job_id": map[string]any{
 				"type":        "string",
 				"description": "Job ID (for get/update/remove/enable/disable)",
@@ -246,6 +250,11 @@ func (t *CronTool) addJob(ctx context.Context, args map[string]any) *ToolResult 
 		return errResult
 	}
 
+	isHidden, _, errResult := optionalBool(args, "is_hidden")
+	if errResult != nil {
+		return errResult
+	}
+
 	// Truncate message for job name (max 30 chars)
 	messagePreview := utils.Truncate(message, 30)
 
@@ -265,6 +274,10 @@ func (t *CronTool) addJob(ctx context.Context, args map[string]any) *ToolResult 
 	needsUpdate := false
 	if command != "" {
 		job.Payload.Command = command
+		needsUpdate = true
+	}
+	if isHidden {
+		job.IsHidden = true
 		needsUpdate = true
 	}
 	if needsUpdate {
@@ -378,6 +391,15 @@ func (t *CronTool) updateJob(ctx context.Context, args map[string]any) *ToolResu
 		patches++
 	}
 
+	isHidden, isHiddenPresent, errResult := optionalBool(args, "is_hidden")
+	if errResult != nil {
+		return errResult
+	}
+	if isHiddenPresent {
+		job.IsHidden = isHidden
+		patches++
+	}
+
 	_, commandPresent, errResult := optionalString(args, "command")
 	if errResult != nil {
 		return errResult
@@ -440,6 +462,18 @@ func optionalNonEmptyString(args map[string]any, key string) (string, bool, *Too
 		return "", false, ErrorResult(fmt.Sprintf("%s cannot be empty", key))
 	}
 	return text, true, nil
+}
+
+func optionalBool(args map[string]any, key string) (bool, bool, *ToolResult) {
+	value, present := args[key]
+	if !present {
+		return false, false, nil
+	}
+	b, ok := value.(bool)
+	if !ok {
+		return false, false, ErrorResult(fmt.Sprintf("%s must be a boolean", key))
+	}
+	return b, true, nil
 }
 
 func optionalString(args map[string]any, key string) (string, bool, *ToolResult) {
@@ -699,13 +733,16 @@ func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) string {
 	// Execute command if present
 	if job.Payload.Command != "" {
 		if !t.execEnabled || t.execTool == nil {
-			output := "Error executing scheduled command: command execution is disabled"
-			pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer pubCancel()
-			t.msgBus.PublishOutbound(pubCtx, bus.OutboundMessage{
-				Context: bus.NewOutboundContext(channel, chatID, ""),
-				Content: output,
-			})
+			// Hidden jobs run normally but never deliver a message to the channel.
+			if !job.IsHidden {
+				output := "Error executing scheduled command: command execution is disabled"
+				pubCtx, pubCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer pubCancel()
+				t.msgBus.PublishOutbound(pubCtx, bus.OutboundMessage{
+					Context: bus.NewOutboundContext(channel, chatID, ""),
+					Content: output,
+				})
+			}
 			return "ok"
 		}
 
@@ -717,6 +754,12 @@ func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) string {
 		}
 
 		result := t.execTool.Execute(ctx, args)
+
+		// Hidden jobs execute the command above but suppress the result message.
+		if job.IsHidden {
+			return "ok"
+		}
+
 		var output string
 		if result.IsError {
 			output = fmt.Sprintf("Error executing scheduled command: %s", result.ForLLM)
@@ -747,7 +790,9 @@ func (t *CronTool) ExecuteJob(ctx context.Context, job *cron.CronJob) string {
 		return fmt.Sprintf("Error: %v", err)
 	}
 
-	if response != "" {
+	// Hidden jobs run the agent turn above but never deliver its response to the
+	// originating channel/chat.
+	if response != "" && !job.IsHidden {
 		t.executor.PublishResponseIfNeeded(ctx, channel, chatID, sessionKey, response)
 	}
 	return "ok"
