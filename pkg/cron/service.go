@@ -145,6 +145,16 @@ func (cs *CronService) Stop() {
 	}
 }
 
+// IsRunning reports whether the scheduler loop has been started (via Start)
+// and not yet stopped. It is read-only and safe for concurrent use; callers
+// that build the service without scheduled execution (e.g. the inject-turn
+// smoke path) can assert the scheduler never started.
+func (cs *CronService) IsRunning() bool {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
+	return cs.running
+}
+
 func (cs *CronService) runLoop(stopChan chan struct{}) {
 	timer := time.NewTimer(time.Hour)
 	if !timer.Stop() {

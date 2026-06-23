@@ -6,15 +6,18 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	picointernal "github.com/sipeed/picoclaw/cmd/picoclaw/internal"
 	"github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/bus"
+	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/liveconfig"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
 type updateRequest struct {
@@ -250,6 +253,13 @@ func runInjectedTurn(ctx context.Context, channel string, req injectTurnRequest)
 	defer msgBus.Close()
 	loop := agent.NewAgentLoop(cfg, msgBus, provider)
 	defer loop.Close()
+
+	// Register the cron tool through the same shared runtime builder the gateway
+	// uses, so the inject-turn smoke path exposes an identical tool surface.
+	if err := registerInjectTurnCronTool(loop, msgBus, cfg); err != nil {
+		return "", err
+	}
+
 	msg := bus.InboundMessage{
 		Context: bus.InboundContext{
 			Channel:  channel,
@@ -262,6 +272,27 @@ func runInjectedTurn(ctx context.Context, channel string, req injectTurnRequest)
 		SessionKey: req.SessionKey,
 	}
 	return loop.ProcessInjectedMessage(ctx, msg)
+}
+
+// registerInjectTurnCronTool registers the cron tool on the inject-turn agent
+// loop through the shared runtime builder used by the gateway.
+//
+// Safety: inject-turn must register the cron tool for tool-surface parity but
+// must never trigger scheduled execution, so this intentionally does NOT start
+// the scheduler or wire job-execution callbacks (cron.CronService.SetOnJob /
+// Start). The returned service is discarded for exactly that reason.
+func registerInjectTurnCronTool(loop *agent.AgentLoop, msgBus *bus.MessageBus, cfg *config.Config) error {
+	execTimeout := time.Duration(cfg.Tools.Cron.ExecTimeoutMinutes) * time.Minute
+	_, _, err := tools.BuildCronRuntime(tools.CronRuntimeParams{
+		Executor:    loop,
+		Registrar:   loop,
+		MsgBus:      msgBus,
+		Workspace:   cfg.WorkspacePath(),
+		Restrict:    cfg.Agents.Defaults.RestrictToWorkspace,
+		ExecTimeout: execTimeout,
+		Config:      cfg,
+	})
+	return err
 }
 
 func writeInjectTurnResponse(w io.Writer, channel, response string, req injectTurnRequest) error {

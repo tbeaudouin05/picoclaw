@@ -794,20 +794,20 @@ func setupCronTool(
 	execTimeout time.Duration,
 	cfg *config.Config,
 ) (*cron.CronService, error) {
-	cronStorePath := filepath.Join(workspace, "cron", "jobs.json")
-
-	cronService := cron.NewCronService(cronStorePath, nil)
-	cronService.SetMaxConcurrentJobs(cfg.Tools.Cron.EffectiveMaxConcurrent())
-
-	var cronTool *tools.CronTool
-	if cfg.Tools.IsToolEnabled("cron") {
-		var err error
-		cronTool, err = tools.NewCronTool(cronService, agentLoop, msgBus, workspace, restrict, execTimeout, cfg)
-		if err != nil {
-			return nil, fmt.Errorf("critical error during CronTool initialization: %w", err)
-		}
-
-		agentLoop.RegisterTool(cronTool)
+	// Build the cron service and register the cron tool through the shared
+	// runtime builder. The builder only handles construction + registration;
+	// the gateway owns the scheduler lifecycle below (SetOnJob + Start).
+	cronService, cronTool, err := tools.BuildCronRuntime(tools.CronRuntimeParams{
+		Executor:    agentLoop,
+		Registrar:   agentLoop,
+		MsgBus:      msgBus,
+		Workspace:   workspace,
+		Restrict:    restrict,
+		ExecTimeout: execTimeout,
+		Config:      cfg,
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	if cronTool != nil {
