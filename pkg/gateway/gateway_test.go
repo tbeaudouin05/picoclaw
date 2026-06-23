@@ -209,3 +209,69 @@ func receiveGatewayRuntimeEvent(t *testing.T, ch <-chan runtimeevents.Event) run
 		return runtimeevents.Event{}
 	}
 }
+
+func gatewayHasCronTool(al *agent.AgentLoop) bool {
+	info := al.GetStartupInfo()
+	toolsInfo, ok := info["tools"].(map[string]any)
+	if !ok {
+		return false
+	}
+	names, ok := toolsInfo["names"].([]string)
+	if !ok {
+		return false
+	}
+	for _, n := range names {
+		if n == "cron" {
+			return true
+		}
+	}
+	return false
+}
+
+// TestSetupCronTool_RegistersToolWithoutStartingScheduler verifies the gateway
+// builds its cron runtime through the shared builder: the cron tool is
+// registered on the agent loop, but setupCronTool itself does not start the
+// scheduler (the caller starts it explicitly afterwards).
+func TestSetupCronTool_RegistersToolWithoutStartingScheduler(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Tools.Cron.Enabled = true
+
+	al := agent.NewAgentLoop(cfg, bus.NewMessageBus(), &startupBlockedProvider{reason: "not used"})
+	t.Cleanup(al.Close)
+
+	cronService, err := setupCronTool(al, bus.NewMessageBus(), t.TempDir(), true, 0, cfg)
+	if err != nil {
+		t.Fatalf("setupCronTool() error: %v", err)
+	}
+	t.Cleanup(cronService.Stop)
+
+	if cronService.IsRunning() {
+		t.Fatal("setupCronTool must not start the scheduler; the caller does that")
+	}
+	if !gatewayHasCronTool(al) {
+		t.Fatal("expected cron tool to be registered on the agent loop")
+	}
+}
+
+// TestSetupCronTool_OmitsToolWhenDisabled verifies the gateway path leaves the
+// cron tool unregistered when cron is disabled, while still returning a service.
+func TestSetupCronTool_OmitsToolWhenDisabled(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Tools.Cron.Enabled = false
+
+	al := agent.NewAgentLoop(cfg, bus.NewMessageBus(), &startupBlockedProvider{reason: "not used"})
+	t.Cleanup(al.Close)
+
+	cronService, err := setupCronTool(al, bus.NewMessageBus(), t.TempDir(), true, 0, cfg)
+	if err != nil {
+		t.Fatalf("setupCronTool() error: %v", err)
+	}
+	if cronService == nil {
+		t.Fatal("expected non-nil cron service even when cron is disabled")
+	}
+	t.Cleanup(cronService.Stop)
+
+	if gatewayHasCronTool(al) {
+		t.Fatal("expected no cron tool registered when cron is disabled")
+	}
+}
