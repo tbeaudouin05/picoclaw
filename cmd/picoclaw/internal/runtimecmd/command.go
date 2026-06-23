@@ -250,6 +250,13 @@ func runInjectedTurn(ctx context.Context, channel string, req injectTurnRequest)
 	defer msgBus.Close()
 	loop := agent.NewAgentLoop(cfg, msgBus, provider)
 	defer loop.Close()
+	cronTool, err := buildRuntimeCronTool(cfg, loop, msgBus)
+	if err != nil {
+		return "", err
+	}
+	if cronTool != nil {
+		loop.RegisterTool(cronTool)
+	}
 	msg := bus.InboundMessage{
 		Context: bus.InboundContext{
 			Channel:  channel,
