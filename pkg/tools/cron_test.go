@@ -843,6 +843,166 @@ func TestCronTool_ExecuteJobReturnsErrorWithoutPublish(t *testing.T) {
 	}
 }
 
+func TestCronTool_AddJob_IsHidden(t *testing.T) {
+	tool := newTestCronTool(t)
+	ctx := WithToolContext(context.Background(), "telegram", "chat-1")
+	result := tool.Execute(ctx, map[string]any{
+		"action":        "add",
+		"message":       "silent check-in",
+		"every_seconds": float64(600),
+		"is_hidden":     true,
+	})
+	if result.IsError {
+		t.Fatalf("expected add to succeed, got: %s", result.ForLLM)
+	}
+	jobs := tool.cronService.ListJobs(true)
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 job, got %d", len(jobs))
+	}
+	if !jobs[0].IsHidden {
+		t.Fatal("expected IsHidden to be true")
+	}
+}
+
+func TestCronTool_AddJob_DefaultsNotHidden(t *testing.T) {
+	tool := newTestCronTool(t)
+	ctx := WithToolContext(context.Background(), "telegram", "chat-1")
+	result := tool.Execute(ctx, map[string]any{
+		"action":        "add",
+		"message":       "regular reminder",
+		"every_seconds": float64(600),
+	})
+	if result.IsError {
+		t.Fatalf("expected add to succeed, got: %s", result.ForLLM)
+	}
+	jobs := tool.cronService.ListJobs(true)
+	if len(jobs) != 1 {
+		t.Fatalf("expected 1 job, got %d", len(jobs))
+	}
+	if jobs[0].IsHidden {
+		t.Fatal("expected IsHidden to default to false")
+	}
+}
+
+func TestCronTool_AddJob_IsHiddenRejectsNonBool(t *testing.T) {
+	tool := newTestCronTool(t)
+	ctx := WithToolContext(context.Background(), "telegram", "chat-1")
+	result := tool.Execute(ctx, map[string]any{
+		"action":        "add",
+		"message":       "reminder",
+		"every_seconds": float64(600),
+		"is_hidden":     "yes",
+	})
+	if !result.IsError || !strings.Contains(result.ForLLM, "is_hidden must be a boolean") {
+		t.Fatalf("expected boolean validation error, got: %+v", result)
+	}
+}
+
+func TestCronTool_UpdateJob_TogglesIsHidden(t *testing.T) {
+	tool := newTestCronTool(t)
+	ctx := WithToolContext(context.Background(), "cli", "direct")
+	job, err := tool.cronService.AddJob("job", cron.CronSchedule{Kind: "cron", Expr: "0 8 * * *"}, "message", "cli", "direct", 0)
+	if err != nil {
+		t.Fatalf("AddJob() error: %v", err)
+	}
+
+	result := tool.Execute(ctx, map[string]any{
+		"action":    "update",
+		"job_id":    job.ID,
+		"is_hidden": true,
+	})
+	if result.IsError {
+		t.Fatalf("expected update to succeed, got: %s", result.ForLLM)
+	}
+	updated, _ := tool.cronService.GetJob(job.ID)
+	if !updated.IsHidden {
+		t.Fatal("expected IsHidden to be true after update")
+	}
+
+	result = tool.Execute(ctx, map[string]any{
+		"action":    "update",
+		"job_id":    job.ID,
+		"is_hidden": false,
+	})
+	if result.IsError {
+		t.Fatalf("expected update to succeed, got: %s", result.ForLLM)
+	}
+	updated, _ = tool.cronService.GetJob(job.ID)
+	if updated.IsHidden {
+		t.Fatal("expected IsHidden to be false after update")
+	}
+}
+
+func TestCronTool_ExecuteHiddenJobSuppressesAgentResponse(t *testing.T) {
+	executor := &stubJobExecutor{response: "generated reply"}
+	tool := newTestCronToolWithExecutorAndConfig(t, executor, config.DefaultConfig())
+
+	job := &cron.CronJob{ID: "job-hidden", IsHidden: true}
+	job.Payload.Channel = "telegram"
+	job.Payload.To = "chat-1"
+	job.Payload.Message = "send me a poem"
+
+	if got := tool.ExecuteJob(context.Background(), job); got != "ok" {
+		t.Fatalf("ExecuteJob() = %q, want ok", got)
+	}
+
+	// The agent turn still runs for hidden jobs.
+	if executor.lastPrompt != "send me a poem" {
+		t.Fatalf("expected agent turn to run, prompt = %q", executor.lastPrompt)
+	}
+	// But the response is never delivered to the channel.
+	if executor.publishedResp != "" {
+		t.Fatalf("expected no published response for hidden job, got: %q", executor.publishedResp)
+	}
+}
+
+func TestCronTool_ExecuteHiddenCommandJobSuppressesOutput(t *testing.T) {
+	tool := newTestCronToolWithConfig(t, config.DefaultConfig())
+	job := &cron.CronJob{ID: "job-hidden-cmd", IsHidden: true}
+	job.Payload.Channel = "cli"
+	job.Payload.To = "direct"
+	job.Payload.Command = "echo cron-test-ok"
+
+	if got := tool.ExecuteJob(context.Background(), job); got != "ok" {
+		t.Fatalf("ExecuteJob() = %q, want ok", got)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	select {
+	case msg := <-tool.msgBus.OutboundChan():
+		t.Fatalf("expected no outbound message for hidden command job, got: %s", msg.Content)
+	case <-ctx.Done():
+		// No message delivered, as expected.
+	}
+}
+
+func TestCronTool_ExecuteHiddenCommandJobSuppressesExecDisabledError(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Tools.Exec.Enabled = false
+
+	tool := newTestCronToolWithConfig(t, cfg)
+	job := &cron.CronJob{ID: "job-hidden-disabled", IsHidden: true}
+	job.Payload.Channel = "cli"
+	job.Payload.To = "direct"
+	job.Payload.Command = "df -h"
+
+	if got := tool.ExecuteJob(context.Background(), job); got != "ok" {
+		t.Fatalf("ExecuteJob() = %q, want ok", got)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	select {
+	case msg := <-tool.msgBus.OutboundChan():
+		t.Fatalf("expected no outbound message for hidden job, got: %s", msg.Content)
+	case <-ctx.Done():
+		// No message delivered, as expected.
+	}
+}
+
 func TestCronTool_AddJob_MaxRuns(t *testing.T) {
 	tool := newTestCronTool(t)
 	ctx := WithToolContext(context.Background(), "telegram", "chat-1")
@@ -885,5 +1045,243 @@ func TestCronTool_UpdateJob_MaxRuns(t *testing.T) {
 	}
 	if updated.MaxRuns != 3 {
 		t.Fatalf("MaxRuns = %d, want 3", updated.MaxRuns)
+	}
+}
+
+// remoteAllowlistConfig returns a config whose cron tool allows a fixed command
+// for the telegram channel via the remote_command_allowlist.
+func remoteAllowlistConfig() *config.Config {
+	cfg := config.DefaultConfig()
+	cfg.Tools.Cron.RemoteCommandAllowlist = []config.RemoteCommandAllowEntry{
+		{
+			ID:       "disk-report",
+			Channels: []string{"telegram"},
+			Command:  "/bin/df -h",
+		},
+	}
+	return cfg
+}
+
+// TestCronTool_RemoteAllowlistedRawCommand verifies a non-internal channel may
+// schedule a command whose exact text matches an allowlist entry.
+func TestCronTool_RemoteAllowlistedRawCommand(t *testing.T) {
+	tool := newTestCronToolWithConfig(t, remoteAllowlistConfig())
+	ctx := WithToolContext(context.Background(), "telegram", "chat-1")
+	result := tool.Execute(ctx, map[string]any{
+		"action":     "add",
+		"message":    "disk report",
+		"command":    "/bin/df -h",
+		"at_seconds": float64(60),
+	})
+
+	if result.IsError {
+		t.Fatalf("expected allowlisted command to be accepted, got: %s", result.ForLLM)
+	}
+	jobs := tool.cronService.ListJobs(false)
+	if len(jobs) != 1 || jobs[0].Payload.Command != "/bin/df -h" {
+		t.Fatalf("expected stored command '/bin/df -h', got: %+v", jobs)
+	}
+}
+
+// TestCronTool_RemoteNonAllowlistedRawCommandBlocked verifies a non-internal
+// channel cannot schedule an arbitrary command that is not allowlisted.
+func TestCronTool_RemoteNonAllowlistedRawCommandBlocked(t *testing.T) {
+	tool := newTestCronToolWithConfig(t, remoteAllowlistConfig())
+	ctx := WithToolContext(context.Background(), "telegram", "chat-1")
+	result := tool.Execute(ctx, map[string]any{
+		"action":     "add",
+		"message":    "danger",
+		"command":    "/bin/rm -rf /",
+		"at_seconds": float64(60),
+	})
+
+	if !result.IsError {
+		t.Fatal("expected non-allowlisted command to be blocked from remote channel")
+	}
+	if !strings.Contains(result.ForLLM, "restricted to internal channels") {
+		t.Errorf("expected 'restricted to internal channels', got: %s", result.ForLLM)
+	}
+}
+
+// TestCronTool_RemoteCommandIDResolves verifies command_id resolves to the
+// configured command for the channel without sending the raw string.
+func TestCronTool_RemoteCommandIDResolves(t *testing.T) {
+	tool := newTestCronToolWithConfig(t, remoteAllowlistConfig())
+	ctx := WithToolContext(context.Background(), "telegram", "chat-1")
+	result := tool.Execute(ctx, map[string]any{
+		"action":     "add",
+		"message":    "disk report",
+		"command_id": "disk-report",
+		"at_seconds": float64(60),
+	})
+
+	if result.IsError {
+		t.Fatalf("expected command_id scheduling to succeed, got: %s", result.ForLLM)
+	}
+	jobs := tool.cronService.ListJobs(false)
+	if len(jobs) != 1 || jobs[0].Payload.Command != "/bin/df -h" {
+		t.Fatalf("expected resolved command '/bin/df -h', got: %+v", jobs)
+	}
+}
+
+// TestCronTool_RemoteCommandIDUnknownBlocked verifies an unknown command_id is
+// rejected.
+func TestCronTool_RemoteCommandIDUnknownBlocked(t *testing.T) {
+	tool := newTestCronToolWithConfig(t, remoteAllowlistConfig())
+	ctx := WithToolContext(context.Background(), "telegram", "chat-1")
+	result := tool.Execute(ctx, map[string]any{
+		"action":     "add",
+		"message":    "mystery",
+		"command_id": "does-not-exist",
+		"at_seconds": float64(60),
+	})
+
+	if !result.IsError {
+		t.Fatal("expected unknown command_id to be rejected")
+	}
+	if !strings.Contains(result.ForLLM, "not allowlisted") {
+		t.Errorf("expected 'not allowlisted' message, got: %s", result.ForLLM)
+	}
+}
+
+// TestCronTool_RemoteCommandIDWrongChannelBlocked verifies command_id only
+// resolves for channels listed on the entry.
+func TestCronTool_RemoteCommandIDWrongChannelBlocked(t *testing.T) {
+	tool := newTestCronToolWithConfig(t, remoteAllowlistConfig())
+	ctx := WithToolContext(context.Background(), "whatsapp", "chat-9")
+	result := tool.Execute(ctx, map[string]any{
+		"action":     "add",
+		"message":    "disk report",
+		"command_id": "disk-report",
+		"at_seconds": float64(60),
+	})
+
+	if !result.IsError {
+		t.Fatal("expected command_id to be rejected for a channel not on the allowlist entry")
+	}
+	if !strings.Contains(result.ForLLM, "not allowlisted") {
+		t.Errorf("expected 'not allowlisted' message, got: %s", result.ForLLM)
+	}
+}
+
+// TestCronTool_CommandAndCommandIDConflict verifies that supplying both command
+// and command_id is rejected.
+func TestCronTool_CommandAndCommandIDConflict(t *testing.T) {
+	tool := newTestCronToolWithConfig(t, remoteAllowlistConfig())
+	ctx := WithToolContext(context.Background(), "telegram", "chat-1")
+	result := tool.Execute(ctx, map[string]any{
+		"action":     "add",
+		"message":    "disk report",
+		"command":    "/bin/df -h",
+		"command_id": "disk-report",
+		"at_seconds": float64(60),
+	})
+
+	if !result.IsError {
+		t.Fatal("expected error when both command and command_id are supplied")
+	}
+	if !strings.Contains(result.ForLLM, "either command or command_id") {
+		t.Errorf("expected conflict message, got: %s", result.ForLLM)
+	}
+}
+
+// TestCronTool_RemoteAllowlistRequiresAbsolutePath verifies that allowlist
+// entries whose program is not an absolute path never match.
+func TestCronTool_RemoteAllowlistRequiresAbsolutePath(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Tools.Cron.RemoteCommandAllowlist = []config.RemoteCommandAllowEntry{
+		{ID: "relative", Channels: []string{"telegram"}, Command: "df -h"},
+	}
+	tool := newTestCronToolWithConfig(t, cfg)
+	ctx := WithToolContext(context.Background(), "telegram", "chat-1")
+
+	// Raw command matching the (relative) entry text must still be blocked.
+	raw := tool.Execute(ctx, map[string]any{
+		"action": "add", "message": "x", "command": "df -h", "at_seconds": float64(60),
+	})
+	if !raw.IsError || !strings.Contains(raw.ForLLM, "restricted to internal channels") {
+		t.Fatalf("expected relative raw command to be blocked, got: %s", raw.ForLLM)
+	}
+
+	// command_id pointing at a relative entry must also be rejected.
+	byID := tool.Execute(ctx, map[string]any{
+		"action": "add", "message": "x", "command_id": "relative", "at_seconds": float64(60),
+	})
+	if !byID.IsError || !strings.Contains(byID.ForLLM, "not allowlisted") {
+		t.Fatalf("expected relative command_id to be rejected, got: %s", byID.ForLLM)
+	}
+}
+
+// TestCronTool_InternalChannelRawCommandUnaffectedByAllowlist verifies internal
+// channels keep full raw-command access regardless of the allowlist.
+func TestCronTool_InternalChannelRawCommandUnaffectedByAllowlist(t *testing.T) {
+	tool := newTestCronToolWithConfig(t, remoteAllowlistConfig())
+	ctx := WithToolContext(context.Background(), "cli", "direct")
+	result := tool.Execute(ctx, map[string]any{
+		"action":          "add",
+		"message":         "arbitrary",
+		"command":         "/usr/bin/uptime && echo hi",
+		"command_confirm": true,
+		"at_seconds":      float64(60),
+	})
+
+	if result.IsError {
+		t.Fatalf("expected internal channel to schedule arbitrary command, got: %s", result.ForLLM)
+	}
+}
+
+// TestCronTool_UpdateRemoteAddsAllowlistedCommand verifies a non-internal
+// channel may attach an allowlisted command to a reminder it owns via update.
+func TestCronTool_UpdateRemoteAddsAllowlistedCommand(t *testing.T) {
+	tool := newTestCronToolWithConfig(t, remoteAllowlistConfig())
+	ctx := WithToolContext(context.Background(), "telegram", "chat-1")
+	job, err := tool.cronService.AddJob(
+		"reminder", cron.CronSchedule{Kind: "cron", Expr: "0 8 * * *"},
+		"reminder", "telegram", "chat-1", 0,
+	)
+	if err != nil {
+		t.Fatalf("AddJob() error: %v", err)
+	}
+
+	result := tool.Execute(ctx, map[string]any{
+		"action":     "update",
+		"job_id":     job.ID,
+		"command_id": "disk-report",
+	})
+	if result.IsError {
+		t.Fatalf("expected update with allowlisted command_id to succeed, got: %s", result.ForLLM)
+	}
+	updated, ok := tool.cronService.GetJob(job.ID)
+	if !ok {
+		t.Fatal("updated job not found")
+	}
+	if updated.Payload.Command != "/bin/df -h" {
+		t.Fatalf("expected resolved command '/bin/df -h', got: %q", updated.Payload.Command)
+	}
+}
+
+// TestCronTool_UpdateRemoteNonAllowlistedCommandBlocked verifies a non-internal
+// channel cannot attach an arbitrary command via update.
+func TestCronTool_UpdateRemoteNonAllowlistedCommandBlocked(t *testing.T) {
+	tool := newTestCronToolWithConfig(t, remoteAllowlistConfig())
+	ctx := WithToolContext(context.Background(), "telegram", "chat-1")
+	job, err := tool.cronService.AddJob(
+		"reminder", cron.CronSchedule{Kind: "cron", Expr: "0 8 * * *"},
+		"reminder", "telegram", "chat-1", 0,
+	)
+	if err != nil {
+		t.Fatalf("AddJob() error: %v", err)
+	}
+
+	result := tool.Execute(ctx, map[string]any{
+		"action":  "update",
+		"job_id":  job.ID,
+		"command": "/bin/rm -rf /",
+	})
+	if !result.IsError {
+		t.Fatal("expected non-allowlisted command update to be blocked from remote channel")
+	}
+	if !strings.Contains(result.ForLLM, "restricted to internal channels") {
+		t.Errorf("expected 'restricted to internal channels', got: %s", result.ForLLM)
 	}
 }

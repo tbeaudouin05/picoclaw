@@ -50,6 +50,9 @@ type CronJob struct {
 	UpdatedAtMS    int64        `json:"updatedAtMs"`
 	DeleteAfterRun bool         `json:"deleteAfterRun"`
 	MaxRuns        int          `json:"maxRuns,omitempty"`
+	// IsHidden, when true, runs the job normally (shell command or LLM turn) but
+	// suppresses delivery of any result message to the originating channel/chat.
+	IsHidden bool `json:"isHidden,omitempty"`
 }
 
 type CronStore struct {

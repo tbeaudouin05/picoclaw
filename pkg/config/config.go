@@ -995,12 +995,36 @@ type WebToolsConfig struct {
 
 type CronToolsConfig struct {
 	ToolConfig         `     envPrefix:"PICOCLAW_TOOLS_CRON_"`
-	ExecTimeoutMinutes int  `                                 json:"exec_timeout_minutes"  env:"PICOCLAW_TOOLS_CRON_EXEC_TIMEOUT_MINUTES"`  // 0 means no timeout
+	ExecTimeoutMinutes int  `                                 json:"exec_timeout_minutes"  env:"PICOCLAW_TOOLS_CRON_EXEC_TIMEOUT_MINUTES"` // 0 means no timeout
 	AllowCommand       bool `                                 json:"allow_command"         env:"PICOCLAW_TOOLS_CRON_ALLOW_COMMAND"`
 	// MaxConcurrent caps how many cron jobs may execute simultaneously across
 	// the whole scheduler. 0 or negative clamps to 1 (one at a time). Individual
 	// jobs still never overlap with themselves regardless of this setting.
 	MaxConcurrent int `                                    json:"max_concurrent"        env:"PICOCLAW_TOOLS_CRON_MAX_CONCURRENT"`
+	// RemoteCommandAllowlist lets non-internal channels schedule a fixed set of
+	// shell commands without lifting the general restriction on arbitrary
+	// commands. Each entry binds an id and an exact command to one or more
+	// channels. Non-internal channels may schedule a command only when it
+	// matches an entry exactly (or is referenced by command_id) for that
+	// channel. Arbitrary raw commands from non-internal channels stay blocked.
+	RemoteCommandAllowlist []RemoteCommandAllowEntry `json:"remote_command_allowlist,omitempty"`
+}
+
+// RemoteCommandAllowEntry describes a single shell command that the listed
+// non-internal channels are permitted to schedule via the cron tool.
+type RemoteCommandAllowEntry struct {
+	// ID is a stable identifier used by the tool's command_id input to
+	// reference this command without sending the raw string.
+	ID string `json:"id"`
+	// Channels lists the channels permitted to schedule this command.
+	Channels []string `json:"channels"`
+	// Command is the exact shell command to schedule. It must use an absolute
+	// path for its program so resolution does not depend on PATH.
+	Command string `json:"command"`
+	// AllowArgs reserves space for future per-entry argument support. Dynamic
+	// arguments are not implemented yet, so only exact command matches are
+	// honored regardless of this flag.
+	AllowArgs bool `json:"allow_args"`
 }
 
 // EffectiveMaxConcurrent returns the effective cap on simultaneously running
