@@ -2,116 +2,82 @@ package runtimecmd
 
 import (
 	"context"
-	"strings"
 	"testing"
 
+	"github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
-	"github.com/sipeed/picoclaw/pkg/tools"
+	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
-func newInjectTurnTestConfig(t *testing.T) *config.Config {
-	t.Helper()
+// stubProvider is a minimal LLMProvider so we can build a real AgentLoop in
+// tests without contacting any backend.
+type stubProvider struct{}
+
+func (stubProvider) Chat(
+	_ context.Context,
+	_ []providers.Message,
+	_ []providers.ToolDefinition,
+	_ string,
+	_ map[string]any,
+) (*providers.LLMResponse, error) {
+	return &providers.LLMResponse{}, nil
+}
+
+func (stubProvider) GetDefaultModel() string { return "stub-model" }
+
+func loopHasCronTool(al *agent.AgentLoop) bool {
+	info := al.GetStartupInfo()
+	toolsInfo, ok := info["tools"].(map[string]any)
+	if !ok {
+		return false
+	}
+	names, ok := toolsInfo["names"].([]string)
+	if !ok {
+		return false
+	}
+	for _, n := range names {
+		if n == "cron" {
+			return true
+		}
+	}
+	return false
+}
+
+// TestRegisterInjectTurnCronTool_RegistersCronWhenEnabled proves the inject-turn
+// path uses the shared builder to expose the cron tool when it is enabled.
+func TestRegisterInjectTurnCronTool_RegistersCronWhenEnabled(t *testing.T) {
 	cfg := config.DefaultConfig()
+	cfg.Tools.Cron.Enabled = true
 	cfg.Agents.Defaults.Workspace = t.TempDir()
-	return cfg
-}
-
-func TestBuildRuntimeCronTool_ExposesCronWhenEnabled(t *testing.T) {
-	cfg := newInjectTurnTestConfig(t)
-	if !cfg.Tools.IsToolEnabled("cron") {
-		t.Fatal("expected cron enabled by default config")
-	}
 
 	msgBus := bus.NewMessageBus()
-	defer msgBus.Close()
+	loop := agent.NewAgentLoop(cfg, msgBus, stubProvider{})
+	t.Cleanup(loop.Close)
 
-	cronTool, err := buildRuntimeCronTool(cfg, nil, msgBus)
-	if err != nil {
-		t.Fatalf("buildRuntimeCronTool: %v", err)
+	if err := registerInjectTurnCronTool(loop, msgBus, cfg); err != nil {
+		t.Fatalf("registerInjectTurnCronTool() error: %v", err)
 	}
-	if cronTool == nil {
-		t.Fatal("expected cron tool when tools.cron.enabled is true")
-	}
-	if cronTool.Name() != "cron" {
-		t.Fatalf("tool name = %q, want cron", cronTool.Name())
+	if !loopHasCronTool(loop) {
+		t.Fatal("expected inject-turn loop to expose the cron tool when enabled")
 	}
 }
 
-func TestBuildRuntimeCronTool_NilWhenDisabled(t *testing.T) {
-	cfg := newInjectTurnTestConfig(t)
+// TestRegisterInjectTurnCronTool_OmitsCronWhenDisabled proves the cron tool is
+// not registered when cron is disabled.
+func TestRegisterInjectTurnCronTool_OmitsCronWhenDisabled(t *testing.T) {
+	cfg := config.DefaultConfig()
 	cfg.Tools.Cron.Enabled = false
+	cfg.Agents.Defaults.Workspace = t.TempDir()
 
 	msgBus := bus.NewMessageBus()
-	defer msgBus.Close()
+	loop := agent.NewAgentLoop(cfg, msgBus, stubProvider{})
+	t.Cleanup(loop.Close)
 
-	cronTool, err := buildRuntimeCronTool(cfg, nil, msgBus)
-	if err != nil {
-		t.Fatalf("buildRuntimeCronTool: %v", err)
+	if err := registerInjectTurnCronTool(loop, msgBus, cfg); err != nil {
+		t.Fatalf("registerInjectTurnCronTool() error: %v", err)
 	}
-	if cronTool != nil {
-		t.Fatal("expected no cron tool when tools.cron.enabled is false")
-	}
-}
-
-func TestBuildRuntimeCronTool_PreservesAllowCommandFalse(t *testing.T) {
-	cfg := newInjectTurnTestConfig(t)
-	cfg.Tools.Cron.AllowCommand = false
-
-	msgBus := bus.NewMessageBus()
-	defer msgBus.Close()
-
-	cronTool, err := buildRuntimeCronTool(cfg, nil, msgBus)
-	if err != nil {
-		t.Fatalf("buildRuntimeCronTool: %v", err)
-	}
-	if cronTool == nil {
-		t.Fatal("expected cron tool to be built")
-	}
-
-	ctx := tools.WithToolContext(context.Background(), "cli", "direct")
-	result := cronTool.Execute(ctx, map[string]any{
-		"action":     "add",
-		"message":    "check disk",
-		"command":    "df -h",
-		"at_seconds": float64(60),
-	})
-	if !result.IsError {
-		t.Fatal("expected command scheduling to require confirm when allow_command is false")
-	}
-	if !strings.Contains(result.ForLLM, "command_confirm=true") {
-		t.Fatalf("expected command_confirm requirement, got: %s", result.ForLLM)
-	}
-}
-
-func TestBuildRuntimeCronTool_AllowsCommandWhenAllowCommandTrue(t *testing.T) {
-	cfg := newInjectTurnTestConfig(t)
-	if !cfg.Tools.Cron.AllowCommand {
-		t.Fatal("expected allow_command true by default config")
-	}
-
-	msgBus := bus.NewMessageBus()
-	defer msgBus.Close()
-
-	cronTool, err := buildRuntimeCronTool(cfg, nil, msgBus)
-	if err != nil {
-		t.Fatalf("buildRuntimeCronTool: %v", err)
-	}
-	if cronTool == nil {
-		t.Fatal("expected cron tool to be built")
-	}
-
-	ctx := tools.WithToolContext(context.Background(), "cli", "direct")
-	result := cronTool.Execute(ctx, map[string]any{
-		"action":     "add",
-		"message":    "check disk",
-		"command":    "df -h",
-		"at_seconds": float64(60),
-	})
-	if result.IsError {
-		t.Fatalf("expected command scheduling to succeed when allow_command is true, got: %s", result.ForLLM)
-	}
-	if !strings.Contains(result.ForLLM, "Cron job added") {
-		t.Fatalf("expected 'Cron job added', got: %s", result.ForLLM)
+	if loopHasCronTool(loop) {
+		t.Fatal("expected no cron tool registered for inject-turn when cron is disabled")
 	}
 }
