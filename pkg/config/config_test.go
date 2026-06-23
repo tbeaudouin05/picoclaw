@@ -1577,6 +1577,40 @@ func TestLoadConfig_CronAllowCommandDefaultsTrueWhenUnset(t *testing.T) {
 	}
 }
 
+func TestDefaultConfig_CronRemoteCommandAllowlistEmpty(t *testing.T) {
+	cfg := DefaultConfig()
+	if len(cfg.Tools.Cron.RemoteCommandAllowlist) != 0 {
+		t.Fatalf("DefaultConfig().Tools.Cron.RemoteCommandAllowlist should be empty, got %+v",
+			cfg.Tools.Cron.RemoteCommandAllowlist)
+	}
+}
+
+func TestLoadConfig_CronRemoteCommandAllowlist(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	configJSON := `{"version":1,"tools":{"cron":{"remote_command_allowlist":[` +
+		`{"id":"disk-report","channels":["telegram","whatsapp"],"command":"/bin/df -h","allow_args":false}]}}}`
+	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+	allowlist := cfg.Tools.Cron.RemoteCommandAllowlist
+	if len(allowlist) != 1 {
+		t.Fatalf("expected 1 allowlist entry, got %d", len(allowlist))
+	}
+	entry := allowlist[0]
+	if entry.ID != "disk-report" || entry.Command != "/bin/df -h" || entry.AllowArgs {
+		t.Fatalf("unexpected entry: %+v", entry)
+	}
+	if len(entry.Channels) != 2 || entry.Channels[0] != "telegram" || entry.Channels[1] != "whatsapp" {
+		t.Fatalf("unexpected channels: %+v", entry.Channels)
+	}
+}
+
 func TestLoadConfig_WebToolsProxy(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.json")

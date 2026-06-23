@@ -26,12 +26,13 @@ type JobExecutor interface {
 
 // CronTool provides scheduling capabilities for the agent
 type CronTool struct {
-	cronService  *cron.CronService
-	executor     JobExecutor
-	msgBus       *bus.MessageBus
-	execTool     *ExecTool
-	allowCommand bool
-	execEnabled  bool
+	cronService     *cron.CronService
+	executor        JobExecutor
+	msgBus          *bus.MessageBus
+	execTool        *ExecTool
+	allowCommand    bool
+	execEnabled     bool
+	remoteAllowlist []config.RemoteCommandAllowEntry
 }
 
 // NewCronTool creates a new CronTool
@@ -59,14 +60,18 @@ func NewCronTool(
 	if execTool != nil {
 		execTool.SetTimeout(execTimeout)
 	}
-	return &CronTool{
+	tool := &CronTool{
 		cronService:  cronService,
 		executor:     executor,
 		msgBus:       msgBus,
 		execTool:     execTool,
 		allowCommand: allowCommand,
 		execEnabled:  execEnabled,
-	}, nil
+	}
+	if config != nil {
+		tool.remoteAllowlist = config.Tools.Cron.RemoteCommandAllowlist
+	}
+	return tool, nil
 }
 
 // Name returns the tool name
@@ -106,7 +111,11 @@ func (t *CronTool) Parameters() map[string]any {
 			},
 			"command": map[string]any{
 				"type":        "string",
-				"description": "Optional: Shell command to execute directly (e.g., 'df -h'). If set, the agent will run this command and report output instead of just showing the message. For update, omit to preserve the command or pass an empty string to clear it.",
+				"description": "Optional: Shell command to execute directly (e.g., 'df -h'). If set, the agent will run this command and report output instead of just showing the message. For update, omit to preserve the command or pass an empty string to clear it. Internal channels may schedule any command; non-internal channels may only schedule a command that exactly matches a configured remote_command_allowlist entry for the channel.",
+			},
+			"command_id": map[string]any{
+				"type":        "string",
+				"description": "Optional: id of a configured remote_command_allowlist entry. Resolves to the allowlisted command for the current channel. Use this instead of 'command' to schedule a pre-approved command from a non-internal channel. Cannot be combined with 'command'.",
 			},
 			"command_confirm": map[string]any{
 				"type":        "boolean",
@@ -212,19 +221,22 @@ func (t *CronTool) addJob(ctx context.Context, args map[string]any) *ToolResult 
 		return ErrorResult("one of at_seconds, every_seconds, or cron_expr is required")
 	}
 
-	// GHSA-pv8c-p6jf-3fpp: command scheduling requires internal channel. When
-	// allow_command is disabled, explicit confirmation is required as an override.
-	// Non-command reminders remain open to all channels.
-	command, _ := args["command"].(string)
+	// GHSA-pv8c-p6jf-3fpp: arbitrary command scheduling requires an internal
+	// channel. Non-internal channels may schedule a command only when it is an
+	// exact match for a configured remote_command_allowlist entry (resolved
+	// either from a raw command string or a command_id). When allow_command is
+	// disabled, internal channels still require explicit confirmation as an
+	// override. Non-command reminders remain open to all channels.
+	command, errResult := t.resolveScheduledCommand(channel, args)
+	if errResult != nil {
+		return errResult
+	}
 	commandConfirm, _ := args["command_confirm"].(bool)
 	if command != "" {
 		if !t.execEnabled {
 			return ErrorResult("command execution is disabled")
 		}
-		if !constants.IsInternalChannel(channel) {
-			return ErrorResult("scheduling command execution is restricted to internal channels")
-		}
-		if !t.allowCommand && !commandConfirm {
+		if constants.IsInternalChannel(channel) && !t.allowCommand && !commandConfirm {
 			return ErrorResult("command_confirm=true is required when allow_command is disabled")
 		}
 	}
@@ -366,15 +378,20 @@ func (t *CronTool) updateJob(ctx context.Context, args map[string]any) *ToolResu
 		patches++
 	}
 
-	command, commandPresent, errResult := optionalString(args, "command")
+	_, commandPresent, errResult := optionalString(args, "command")
 	if errResult != nil {
 		return errResult
 	}
-	if commandPresent {
-		if errResult := t.validateCommandMutation(ctx, args); errResult != nil {
+	_, commandIDPresent := args["command_id"]
+	if commandPresent || commandIDPresent {
+		resolved, errResult := t.resolveScheduledCommand(ToolChannel(ctx), args)
+		if errResult != nil {
 			return errResult
 		}
-		job.Payload.Command = command
+		if errResult := t.validateCommandMutation(ctx, resolved, args); errResult != nil {
+			return errResult
+		}
+		job.Payload.Command = resolved
 		patches++
 	}
 
@@ -526,18 +543,102 @@ func positiveSeconds(args map[string]any, key string) (int64, *ToolResult) {
 	return seconds, nil
 }
 
-func (t *CronTool) validateCommandMutation(ctx context.Context, args map[string]any) *ToolResult {
+func (t *CronTool) validateCommandMutation(ctx context.Context, command string, args map[string]any) *ToolResult {
 	if !t.execEnabled {
 		return ErrorResult("command execution is disabled")
 	}
-	if !constants.IsInternalChannel(ToolChannel(ctx)) {
+	channel := ToolChannel(ctx)
+	if constants.IsInternalChannel(channel) {
+		commandConfirm, _ := args["command_confirm"].(bool)
+		if !t.allowCommand && !commandConfirm {
+			return ErrorResult("command_confirm=true is required when allow_command is disabled")
+		}
+		return nil
+	}
+	// Non-internal channels reach here only via resolveScheduledCommand, which
+	// already enforced the remote_command_allowlist for non-empty commands.
+	// An empty command means a clear/edit of an existing command job, which
+	// remote channels are not allowed to perform.
+	if command == "" {
 		return ErrorResult("updating command execution is restricted to internal channels")
 	}
-	commandConfirm, _ := args["command_confirm"].(bool)
-	if !t.allowCommand && !commandConfirm {
-		return ErrorResult("command_confirm=true is required when allow_command is disabled")
-	}
 	return nil
+}
+
+// resolveScheduledCommand determines the shell command to schedule from the
+// tool args and enforces channel authorization. Internal channels may schedule
+// any raw command. Non-internal channels may only schedule a command that
+// exactly matches a configured remote_command_allowlist entry for the channel,
+// referenced either by raw command string or by command_id. Returns ("", nil)
+// when no command is requested.
+func (t *CronTool) resolveScheduledCommand(channel string, args map[string]any) (string, *ToolResult) {
+	commandID, _ := args["command_id"].(string)
+	commandID = strings.TrimSpace(commandID)
+	command, _ := args["command"].(string)
+
+	if commandID != "" {
+		if strings.TrimSpace(command) != "" {
+			return "", ErrorResult("provide either command or command_id, not both")
+		}
+		entry, ok := t.lookupRemoteCommand(channel, commandID)
+		if !ok {
+			return "", ErrorResult(fmt.Sprintf("command_id %q is not allowlisted for this channel", commandID))
+		}
+		return entry.Command, nil
+	}
+
+	if command == "" {
+		return "", nil
+	}
+	if constants.IsInternalChannel(channel) {
+		return command, nil
+	}
+	if !t.isRemoteCommandAllowed(channel, command) {
+		return "", ErrorResult("scheduling command execution is restricted to internal channels")
+	}
+	return command, nil
+}
+
+// lookupRemoteCommand returns the allowlist entry matching id for the channel.
+func (t *CronTool) lookupRemoteCommand(channel, id string) (config.RemoteCommandAllowEntry, bool) {
+	for _, entry := range t.remoteAllowlist {
+		if entry.ID == id && channelInList(entry.Channels, channel) && isAbsoluteProgramCommand(entry.Command) {
+			return entry, true
+		}
+	}
+	return config.RemoteCommandAllowEntry{}, false
+}
+
+// isRemoteCommandAllowed reports whether the exact command is allowlisted for
+// the channel.
+func (t *CronTool) isRemoteCommandAllowed(channel, command string) bool {
+	for _, entry := range t.remoteAllowlist {
+		if entry.Command == command && channelInList(entry.Channels, channel) && isAbsoluteProgramCommand(entry.Command) {
+			return true
+		}
+	}
+	return false
+}
+
+// channelInList reports whether channel is present in channels.
+func channelInList(channels []string, channel string) bool {
+	for _, c := range channels {
+		if c == channel {
+			return true
+		}
+	}
+	return false
+}
+
+// isAbsoluteProgramCommand reports whether the command's program (its first
+// whitespace-delimited token) is an absolute path. Allowlisted commands must
+// use an absolute path so resolution never depends on PATH.
+func isAbsoluteProgramCommand(command string) bool {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return false
+	}
+	return strings.HasPrefix(fields[0], "/")
 }
 
 func (t *CronTool) canAccessJob(ctx context.Context, job *cron.CronJob) bool {
