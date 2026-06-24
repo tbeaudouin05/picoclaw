@@ -30,6 +30,7 @@ import (
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/skills"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/status"
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/version"
+	"github.com/sipeed/picoclaw/cmd/picoclaw/internal/whatsappsend"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/updater"
 )
@@ -143,6 +144,7 @@ picoclaw --no-color status`,
 		model.NewModelCommand(),
 		updater.NewUpdateCommand("picoclaw"),
 		version.NewVersionCommand(),
+		whatsappsend.NewWhatsAppSendCommand(),
 	)
 
 	return cmd
@@ -173,7 +175,10 @@ func main() {
 	// Initialize Termux SSL certificate detection before anything else
 	initTermuxSSL()
 
-	machineRuntime := len(os.Args) > 1 && os.Args[1] == "runtime"
+	// Treat machine-oriented entrypoints (the hidden runtime helpers and the
+	// dispatcher-callable whatsapp-send primitive) as quiet: no banner and no
+	// color, so external callers get clean, parseable output.
+	machineRuntime := len(os.Args) > 1 && (os.Args[1] == "runtime" || os.Args[1] == "whatsapp-send")
 	cliui.Init(earlyColorDisabled() || machineRuntime)
 
 	if !machineRuntime {
