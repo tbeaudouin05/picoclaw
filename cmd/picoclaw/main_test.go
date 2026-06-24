@@ -51,6 +51,7 @@ func TestNewPicoclawCommand(t *testing.T) {
 		"status",
 		"update",
 		"version",
+		"whatsapp-send",
 	}
 
 	subcommands := cmd.Commands()
@@ -60,7 +61,7 @@ func TestNewPicoclawCommand(t *testing.T) {
 		found := slices.Contains(allowedCommands, subcmd.Name())
 		assert.True(t, found, "unexpected subcommand %q", subcmd.Name())
 
-		if subcmd.Name() == "runtime" {
+		if subcmd.Name() == "runtime" || subcmd.Name() == "whatsapp-send" {
 			assert.True(t, subcmd.Hidden)
 		} else {
 			assert.False(t, subcmd.Hidden)
