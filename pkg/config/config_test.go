@@ -1058,6 +1058,48 @@ func TestDefaultConfig_WebTools(t *testing.T) {
 	}
 }
 
+func TestSaveConfig_RedactsVoiceAPIKey(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "config.json")
+	cfg := DefaultConfig()
+	cfg.Voice.ElevenLabsAPIKey.Set("secret-elevenlabs-key")
+
+	if err := SaveConfig(path, cfg); err != nil {
+		t.Fatalf("SaveConfig failed: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+	if strings.Contains(string(data), "secret-elevenlabs-key") {
+		t.Fatalf("config file contains plaintext ElevenLabs API key")
+	}
+}
+
+func TestSaveConfig_GroupReadableForSupplementaryGroup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file permission bits are not enforced on Windows")
+	}
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "config.json")
+
+	if err := SaveConfig(path, DefaultConfig()); err != nil {
+		t.Fatalf("SaveConfig failed: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat failed: %v", err)
+	}
+
+	// Regression: product-owned services such as booking reminders can run as
+	// an admin user with the customer group as a supplementary group, so the
+	// customer config must be readable via the group bit.
+	perm := info.Mode().Perm()
+	if perm&0o040 == 0 {
+		t.Fatalf("config file mode %04o is not group-readable; want group-read bit set", perm)
+	}
+}
+
 func TestSaveConfig_FilePermissions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("file permission bits are not enforced on Windows")
@@ -1077,8 +1119,8 @@ func TestSaveConfig_FilePermissions(t *testing.T) {
 	}
 
 	perm := info.Mode().Perm()
-	if perm != 0o600 {
-		t.Errorf("config file has permission %04o, want 0600", perm)
+	if perm != 0o640 {
+		t.Errorf("config file has permission %04o, want 0640", perm)
 	}
 }
 
