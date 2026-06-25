@@ -728,10 +728,10 @@ type DevicesConfig struct {
 }
 
 type VoiceConfig struct {
-	ModelName         string `json:"model_name,omitempty"         env:"PICOCLAW_VOICE_MODEL_NAME"`
-	TTSModelName      string `json:"tts_model_name,omitempty"     env:"PICOCLAW_VOICE_TTS_MODEL_NAME"`
-	EchoTranscription bool   `json:"echo_transcription"           env:"PICOCLAW_VOICE_ECHO_TRANSCRIPTION"`
-	ElevenLabsAPIKey  string `json:"elevenlabs_api_key,omitempty" env:"PICOCLAW_VOICE_ELEVENLABS_API_KEY"`
+	ModelName         string       `json:"model_name,omitempty"         env:"PICOCLAW_VOICE_MODEL_NAME"`
+	TTSModelName      string       `json:"tts_model_name,omitempty"     env:"PICOCLAW_VOICE_TTS_MODEL_NAME"`
+	EchoTranscription bool         `json:"echo_transcription"           env:"PICOCLAW_VOICE_ECHO_TRANSCRIPTION"`
+	ElevenLabsAPIKey  SecureString `json:"elevenlabs_api_key,omitzero" env:"PICOCLAW_VOICE_ELEVENLABS_API_KEY"`
 }
 
 type ModelStreamingConfig struct {
@@ -1722,7 +1722,7 @@ func SaveConfig(path string, cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	return fileutil.WriteFileAtomic(path, data, 0o600)
+	return fileutil.WriteFileAtomic(path, data, 0o640)
 }
 
 func (c *Config) WorkspacePath() string {
