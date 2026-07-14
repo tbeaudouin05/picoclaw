@@ -1227,7 +1227,7 @@ func (c *TelegramChannel) handleMessages(ctx context.Context, messages []*telego
 
 	inboundCtx := bus.InboundContext{
 		Channel:   c.Name(),
-		ChatID:    fmt.Sprintf("%d", chatID),
+		ChatID:    compositeChatID,
 		ChatType:  peerKind,
 		SenderID:  platformID,
 		MessageID: messageID,
@@ -1268,6 +1268,13 @@ func (c *TelegramChannel) collectTelegramMessageParts(
 	}
 	if caption := strings.TrimSpace(msg.Caption); caption != "" {
 		parts.content = append(parts.content, caption)
+	}
+	if msg.Location != nil {
+		parts.content = append(parts.content, fmt.Sprintf(
+			"[User location: lat=%.6f, lng=%.6f]",
+			msg.Location.Latitude,
+			msg.Location.Longitude,
+		))
 	}
 	if len(msg.Photo) > 0 {
 		photo := msg.Photo[len(msg.Photo)-1]

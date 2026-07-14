@@ -114,10 +114,11 @@ type ActiveTurnInfo struct {
 
 type turnExecution struct {
 	// Core message state (accumulates throughout the turn)
-	messages        []providers.Message // built from ContextBuilder, grows per-iteration
-	pendingMessages []providers.Message // steering/SubTurn messages awaiting injection
-	history         []providers.Message // from ContextManager.Assemble
-	summary         string
+	messages         []providers.Message // built from ContextBuilder, grows per-iteration
+	pendingMessages  []providers.Message // steering/SubTurn messages awaiting injection
+	history          []providers.Message // from ContextManager.Assemble
+	summary          string
+	currentTurnStart int
 
 	// Turn output
 	finalContent string
@@ -164,12 +165,13 @@ func newTurnExecution(
 	messages []providers.Message,
 ) *turnExecution {
 	return &turnExecution{
-		history:         history,
-		summary:         summary,
-		messages:        messages,
-		pendingMessages: append([]providers.Message(nil), opts.InitialSteeringMessages...),
-		iteration:       0,
-		phase:           LLMPhaseSetup,
+		history:          history,
+		summary:          summary,
+		messages:         messages,
+		pendingMessages:  append([]providers.Message(nil), opts.InitialSteeringMessages...),
+		currentTurnStart: len(messages),
+		iteration:        0,
+		phase:            LLMPhaseSetup,
 	}
 }
 
@@ -288,7 +290,17 @@ func (al *AgentLoop) registerActiveTurn(ts *turnState) {
 }
 
 func (al *AgentLoop) clearActiveTurn(ts *turnState) {
-	al.activeTurnStates.Delete(ts.sessionKey)
+	al.releaseSessionTurnState(ts.sessionKey, ts)
+}
+
+func (al *AgentLoop) releaseSessionTurnState(sessionKey string, expected *turnState) {
+	if expected == nil {
+		al.activeTurnStates.Delete(sessionKey)
+		return
+	}
+	if actual, ok := al.activeTurnStates.Load(sessionKey); ok && actual == expected {
+		al.activeTurnStates.Delete(sessionKey)
+	}
 }
 
 func (al *AgentLoop) getActiveTurnState(sessionKey string) *turnState {

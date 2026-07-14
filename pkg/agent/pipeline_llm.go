@@ -37,7 +37,7 @@ func (p *Pipeline) CallLLM(
 
 	// PreLLM: resolve media refs (except on iteration 1 where user media is already resolved)
 	if iteration > 1 {
-		exec.messages = resolveMediaRefs(exec.messages, p.MediaStore, maxMediaSize)
+		exec.messages = resolveMediaRefs(exec.messages, p.MediaStore, maxMediaSize, exec.currentTurnStart)
 	}
 
 	// PreLLM: graceful terminal handling
@@ -69,6 +69,9 @@ func (p *Pipeline) CallLLM(
 		exec.callMessages = append(append([]providers.Message(nil), exec.messages...), ts.interruptHintMessage())
 		exec.providerToolDefs = nil
 		ts.markGracefulTerminalUsed()
+	}
+	if err := p.routeMediaTurn(ts, exec); err != nil {
+		return ControlBreak, err
 	}
 
 	exec.llmOpts = map[string]any{
@@ -176,8 +179,8 @@ func (p *Pipeline) CallLLM(
 			ts.clearProviderCancel(providerCancel)
 		}()
 
-		al.activeRequests.Add(1)
-		defer al.activeRequests.Done()
+		al.activeRequestsInc()
+		defer al.activeRequestsDec()
 		watchdogDone := startLLMCallWatchdog(
 			providerCtx,
 			ts,
@@ -198,36 +201,62 @@ func (p *Pipeline) CallLLM(
 			return response, streamErr
 		}
 
-		if len(exec.activeCandidates) > 1 && p.Fallback != nil {
-			fbResult, fbErr := p.Fallback.ExecuteCandidate(
-				providerCtx,
+		runCandidate := func(
+			ctx context.Context,
+			candidate providers.FallbackCandidate,
+		) (*providers.LLMResponse, error) {
+			candidateProvider, err := providerForFallbackCandidate(
+				ts.agent,
+				exec.activeProvider,
 				exec.activeCandidates,
-				func(ctx context.Context, candidate providers.FallbackCandidate) (*providers.LLMResponse, error) {
-					candidateProvider, err := providerForFallbackCandidate(
-						ts.agent,
-						exec.activeProvider,
-						exec.activeCandidates,
-						candidate.Provider,
-						candidate.Model,
-					)
-					if err != nil {
-						return nil, err
-					}
-					callOpts := shallowCloneLLMOptions(exec.llmOpts)
-					delete(callOpts, "thinking_level")
-					candidateCfg := resolveActiveModelConfig(
-						p.Cfg,
-						ts.agent.Workspace,
-						[]providers.FallbackCandidate{candidate},
-						candidate.Model,
-						p.Cfg.Agents.Defaults.Provider,
-					)
-					candidateThinking := thinkingSettingsFromModelConfig(candidateCfg)
-					applyThinkingOption(callOpts, candidateProvider, candidateThinking, true, ts.agent.ID)
-					exec.suppressReasoning = shouldSuppressReasoningFor(candidateThinking)
-					return candidateProvider.Chat(ctx, messagesForCall, toolDefsForCall, candidate.Model, callOpts)
-				},
+				candidate.Provider,
+				candidate.Model,
 			)
+			if err != nil {
+				return nil, err
+			}
+			callOpts := shallowCloneLLMOptions(exec.llmOpts)
+			delete(callOpts, "thinking_level")
+			candidateCfg := resolveActiveModelConfig(
+				p.Cfg,
+				ts.agent.Workspace,
+				[]providers.FallbackCandidate{candidate},
+				candidate.Model,
+				p.Cfg.Agents.Defaults.Provider,
+			)
+			candidateThinking := thinkingSettingsFromModelConfig(candidateCfg)
+			applyThinkingOption(callOpts, candidateProvider, candidateThinking, true, ts.agent.ID)
+			exec.suppressReasoning = shouldSuppressReasoningFor(candidateThinking)
+			return candidateProvider.Chat(ctx, messagesForCall, toolDefsForCall, candidate.Model, callOpts)
+		}
+
+		if len(exec.activeCandidates) > 1 && p.Fallback != nil {
+			var (
+				fbResult *providers.FallbackResult
+				fbErr    error
+			)
+			if hasMediaRefs(messagesForCall) {
+				fbResult, fbErr = p.Fallback.ExecuteImage(
+					providerCtx,
+					exec.activeCandidates,
+					func(ctx context.Context, provider, model string) (*providers.LLMResponse, error) {
+						candidate := providers.FallbackCandidate{Provider: provider, Model: model}
+						for _, configured := range exec.activeCandidates {
+							if configured.Provider == provider && configured.Model == model {
+								candidate = configured
+								break
+							}
+						}
+						return runCandidate(ctx, candidate)
+					},
+				)
+			} else {
+				fbResult, fbErr = p.Fallback.ExecuteCandidate(
+					providerCtx,
+					exec.activeCandidates,
+					runCandidate,
+				)
+			}
 			if fbErr != nil {
 				return nil, fbErr
 			}
@@ -294,33 +323,11 @@ func (p *Pipeline) CallLLM(
 			break
 		}
 
-		// Retry without media if vision is unsupported
-		if hasMediaRefs(exec.callMessages) && isVisionUnsupportedError(err) && retry < maxRetries {
-			al.emitEvent(
-				runtimeevents.KindAgentLLMRetry,
-				ts.eventMeta("runTurn", "turn.llm.retry"),
-				LLMRetryPayload{
-					Attempt:    retry + 1,
-					MaxRetries: maxRetries,
-					Reason:     "vision_unsupported",
-					Error:      err.Error(),
-					Backoff:    0,
-				},
+		if hasMediaRefs(exec.callMessages) && isVisionUnsupportedError(err) {
+			return ControlBreak, visionUnsupportedModelError(
+				exec.llmModelName,
+				len(ts.agent.ImageCandidates) > 0,
 			)
-			logger.WarnCF("agent", "Vision unsupported, retrying without media", map[string]any{
-				"error": err.Error(),
-				"retry": retry,
-			})
-			exec.callMessages = stripMessageMedia(exec.callMessages)
-			if !ts.opts.NoHistory {
-				exec.history = stripMessageMedia(exec.history)
-				ts.agent.Sessions.SetHistory(ts.sessionKey, exec.history)
-				for i := range ts.persistedMessages {
-					ts.persistedMessages[i].Media = nil
-				}
-				ts.refreshRestorePointFromSession(ts.agent)
-			}
-			continue
 		}
 
 		errMsg := strings.ToLower(err.Error())
@@ -425,7 +432,13 @@ func (p *Pipeline) CallLLM(
 				fullHistory := append(append([]providers.Message(nil), trimmedHistory...), protectedTurnTail...)
 				rebuildPromptReq := promptBuildRequestForTurn(ts, fullHistory, exec.summary, "", nil, p.Cfg)
 				rebuildPromptReq.ActiveSkills = append([]string(nil), contextualSkills...)
-				return ts.agent.ContextBuilder.BuildMessagesFromPrompt(rebuildPromptReq)
+				rebuilt := ts.agent.ContextBuilder.BuildMessagesFromPrompt(rebuildPromptReq)
+				return resolveMediaRefs(
+					rebuilt,
+					p.MediaStore,
+					maxMediaSize,
+					len(rebuilt)-len(protectedTurnTail),
+				)
 			}
 			originalHistoryCount := len(exec.history)
 			var fit bool
@@ -445,6 +458,7 @@ func (p *Pipeline) CallLLM(
 			)
 			exec.history = append(trimmedStableHistory, protectedTurnTail...)
 			exec.messages = buildMessages(trimmedStableHistory)
+			exec.currentTurnStart = len(exec.messages) - len(protectedTurnTail)
 			if exec.gracefulTerminal {
 				msgs := append([]providers.Message(nil), exec.messages...)
 				exec.callMessages = append(msgs, ts.interruptHintMessage())
@@ -525,11 +539,16 @@ func (p *Pipeline) CallLLM(
 		}
 	}
 
-	// Save finishReason to turnState for SubTurn truncation detection
-	if innerTS := turnStateFromContext(ctx); innerTS != nil {
-		innerTS.SetLastFinishReason(exec.response.FinishReason)
+	// Save finishReason and usage on the turn state. Use ts directly (the
+	// authoritative turn state for this call) rather than a context lookup:
+	// the raw ctx passed to CallLLM is not seeded with turnState (only turnCtx
+	// is), so turnStateFromContext(ctx) returns nil here and silently dropped
+	// both the finish reason and the per-turn token usage. ts is also exactly
+	// what the streaming publisher reads via GetLastUsage at finalize.
+	if ts != nil {
+		ts.SetLastFinishReason(exec.response.FinishReason)
 		if exec.response.Usage != nil {
-			innerTS.SetLastUsage(exec.response.Usage)
+			ts.SetLastUsage(exec.response.Usage)
 		}
 	}
 
