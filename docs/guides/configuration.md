@@ -81,6 +81,7 @@ The `evolution` block controls PicoClaw's self-evolution runtime. When enabled, 
     "state_dir": "",
     "min_task_count": 2,
     "min_success_ratio": 0.7,
+    "task_record_retention_hours": 720,
     "cold_path_trigger": "after_turn",
     "cold_path_times": []
   }
@@ -94,6 +95,7 @@ The `evolution` block controls PicoClaw's self-evolution runtime. When enabled, 
 | `state_dir` | `""` | Optional directory for evolution state. Leave empty to use the default under the workspace. |
 | `min_task_count` | `2` | Minimum related task records required before a pattern is eligible for draft generation. |
 | `min_success_ratio` | `0.7` | Minimum success ratio for a task cluster. Use a value greater than `0` and up to `1`. |
+| `task_record_retention_hours` | `720` | Retains task records for 30 days by default. Cold-path runs prune older records only when no live pattern, candidate draft, or applied skill depends on them. |
 | `cold_path_trigger` | `after_turn` | Runs draft generation `after_turn`, on a `scheduled` cadence, or disables automatic cold-path runs when set to `manual`. There is no user-facing manual trigger yet. Applies only in `draft` and `apply` modes. |
 | `cold_path_times` | `[]` | Scheduled run times used when `cold_path_trigger` is `scheduled`, written as `HH:MM` strings. |
 

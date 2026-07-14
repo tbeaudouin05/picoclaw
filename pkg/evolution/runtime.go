@@ -268,10 +268,21 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) error 
 	if err != nil {
 		return err
 	}
+	prunedCount, err := rt.pruneExpiredTaskRecords(store, workspace, patternRecords)
+	if err != nil {
+		return err
+	}
+	if prunedCount > 0 {
+		taskRecords, err = store.LoadTaskRecords()
+		if err != nil {
+			return err
+		}
+	}
 	logger.DebugCF("evolution", "Loaded evolution records", map[string]any{
 		"workspace":     workspace,
 		"task_count":    len(taskRecords),
 		"pattern_count": len(patternRecords),
+		"pruned_tasks":  prunedCount,
 		"run_id":        runID,
 	})
 
@@ -526,6 +537,68 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) error 
 		"run_id":             runID,
 	})
 	return rt.runLifecycleMaintenance(workspace, store, runID)
+}
+
+func (rt *Runtime) pruneExpiredTaskRecords(
+	store *Store,
+	workspace string,
+	patterns []LearningRecord,
+) (int, error) {
+	// Normal loaded configs carry the explicit default. Keep zero-value configs used by
+	// embedders and focused runtimes non-destructive unless retention was configured.
+	if rt.cfg.TaskRecordRetentionHours <= 0 {
+		return 0, nil
+	}
+	drafts, err := store.LoadDrafts()
+	if err != nil {
+		return 0, err
+	}
+	profiles, err := store.LoadProfiles()
+	if err != nil {
+		return 0, err
+	}
+
+	livePatternIDs := make(map[string]struct{})
+	for _, pattern := range patterns {
+		if pattern.WorkspaceID == workspace && pattern.Status == RecordStatus("ready") {
+			livePatternIDs[pattern.ID] = struct{}{}
+		}
+	}
+	liveDraftIDs := make(map[string]struct{})
+	for _, profile := range profiles {
+		if !profileBelongsToWorkspace(store.paths, workspace, profile) || profile.Status == SkillStatusDeleted {
+			continue
+		}
+		for _, version := range profile.VersionHistory {
+			if version.DraftID != "" {
+				liveDraftIDs[version.DraftID] = struct{}{}
+			}
+		}
+	}
+	for _, draft := range drafts {
+		if draft.WorkspaceID != workspace {
+			continue
+		}
+		_, applied := liveDraftIDs[draft.ID]
+		if draft.Status == DraftStatusCandidate || applied {
+			livePatternIDs[draft.SourceRecordID] = struct{}{}
+		}
+	}
+
+	protectedTaskIDs := make(map[string]struct{})
+	for _, pattern := range patterns {
+		if pattern.WorkspaceID != workspace {
+			continue
+		}
+		if _, live := livePatternIDs[pattern.ID]; !live {
+			continue
+		}
+		for _, taskID := range pattern.TaskRecordIDs {
+			protectedTaskIDs[taskID] = struct{}{}
+		}
+	}
+	retention := time.Duration(rt.cfg.EffectiveTaskRecordRetentionHours()) * time.Hour
+	return store.PruneTaskRecords(workspace, rt.now().Add(-retention), protectedTaskIDs)
 }
 
 func (rt *Runtime) recordsForColdPathInputs(

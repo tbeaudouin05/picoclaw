@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/fileutil"
 	"github.com/sipeed/picoclaw/pkg/skills"
@@ -189,6 +190,62 @@ func (s *Store) loadLegacyPatternRecords() ([]LearningRecord, error) {
 
 func (s *Store) SaveTaskRecords(records []LearningRecord) error {
 	return s.saveJSONLRecords(s.paths.TaskRecords, records)
+}
+
+func (s *Store) PruneTaskRecords(
+	workspace string,
+	cutoff time.Time,
+	protectedIDs map[string]struct{},
+) (int, error) {
+	unlock := lockStoreFile(s.paths.TaskRecords)
+	defer unlock()
+
+	current, err := s.loadRecordsFromPath(s.paths.TaskRecords)
+	if err != nil {
+		return 0, err
+	}
+	legacy, err := s.loadLegacyTaskRecords()
+	if err != nil {
+		return 0, err
+	}
+	records := mergeLearningRecordsByID(legacy, current)
+	kept := make([]LearningRecord, 0, len(records))
+	pruned := 0
+	for _, record := range records {
+		_, protected := protectedIDs[record.ID]
+		if record.WorkspaceID == workspace && !protected && record.CreatedAt.Before(cutoff) {
+			pruned++
+			continue
+		}
+		kept = append(kept, record)
+	}
+	if pruned == 0 {
+		return 0, nil
+	}
+
+	// Migrate retained legacy tasks into the current task file, then remove only task
+	// entries from the legacy mixed record file so they cannot be reloaded later.
+	legacyUnlock := lockStoreFile(s.paths.LearningRecords)
+	defer legacyUnlock()
+	legacyRecords, err := s.loadRecordsFromPath(s.paths.LearningRecords)
+	if err != nil {
+		return 0, err
+	}
+	legacyPatterns := make([]LearningRecord, 0, len(legacyRecords))
+	for _, record := range legacyRecords {
+		if !isTaskRecordKind(record.Kind) {
+			legacyPatterns = append(legacyPatterns, record)
+		}
+	}
+	if err := s.saveJSONLRecordsLocked(s.paths.TaskRecords, kept); err != nil {
+		return 0, err
+	}
+	if len(legacyRecords) > 0 {
+		if err := s.saveJSONLRecordsLocked(s.paths.LearningRecords, legacyPatterns); err != nil {
+			return 0, err
+		}
+	}
+	return pruned, nil
 }
 
 func (s *Store) MarkTaskRecordsClustered(ids []string) error {
