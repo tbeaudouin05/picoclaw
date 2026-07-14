@@ -13,7 +13,7 @@ import (
 // CronToolRegistrar registers a tool with every agent so scheduled and ad-hoc
 // turns can invoke it. *agent.AgentLoop satisfies this interface.
 type CronToolRegistrar interface {
-	RegisterTool(Tool)
+	RegisterTool(tool Tool)
 }
 
 // CronRuntimeParams carries the inputs shared by the gateway and the runtime

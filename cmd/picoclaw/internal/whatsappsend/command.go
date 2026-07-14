@@ -56,8 +56,8 @@ func NewWhatsAppSendCommand() *cobra.Command {
 			}
 			// Validate guard rails before loading config so bad invocations fail
 			// fast and never reach the channel layer.
-			if err := validateRequest(req); err != nil {
-				return err
+			if validationErr := validateRequest(req); validationErr != nil {
+				return validationErr
 			}
 
 			cfg, err := configLoader()

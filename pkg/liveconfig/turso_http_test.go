@@ -45,11 +45,17 @@ func TestTursoHTTPStore_UpdateRecord_UsesIntegerUpdatedAtAndDecodesIntegerVersio
 				t.Fatalf("unexpected update arg types: %#v", args)
 			}
 			// UPDATE response: affected_row_count=1, no rows.
-			fmt.Fprint(w, `{"results":[{"type":"ok","response":{"type":"execute","result":{"cols":[],"rows":[],"affected_row_count":1}}}]}`)
+			fmt.Fprint(
+				w,
+				`{"results":[{"type":"ok","response":{"type":"execute","result":{"cols":[],"rows":[],"affected_row_count":1}}}]}`,
+			)
 		default:
 			// SELECT response (GetRecord): config_version and updated_at returned as
 			// raw JSON numbers, not strings.
-			fmt.Fprint(w, `{"results":[{"type":"ok","response":{"type":"execute","result":{"cols":[{"name":"id"},{"name":"config_version"},{"name":"updated_at"},{"name":"config_json"}],"rows":[[{"type":"text","value":"main"},{"type":"integer","value":6},{"type":"integer","value":1781705705369},{"type":"text","value":"{}"}]],"affected_row_count":0}}}]}`)
+			fmt.Fprint(
+				w,
+				`{"results":[{"type":"ok","response":{"type":"execute","result":{"cols":[{"name":"id"},{"name":"config_version"},{"name":"updated_at"},{"name":"config_json"}],"rows":[[{"type":"text","value":"main"},{"type":"integer","value":6},{"type":"integer","value":1781705705369},{"type":"text","value":"{}"}]],"affected_row_count":0}}}]}`,
+			)
 		}
 	}))
 	defer srv.Close()
@@ -80,7 +86,10 @@ func TestTursoHTTPStore_GetRecord_DecodesIntegerVersionAsString(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// Canonical hrana-2 format: integer value as JSON string.
-		fmt.Fprint(w, `{"results":[{"type":"ok","response":{"type":"execute","result":{"cols":[{"name":"id"},{"name":"config_version"},{"name":"updated_at"},{"name":"config_json"}],"rows":[[{"type":"text","value":"main"},{"type":"integer","value":"3"},{"type":"integer","value":"1781705705369"},{"type":"text","value":"{\"k\":\"v\"}"}]],"affected_row_count":0}}}]}`)
+		fmt.Fprint(
+			w,
+			`{"results":[{"type":"ok","response":{"type":"execute","result":{"cols":[{"name":"id"},{"name":"config_version"},{"name":"updated_at"},{"name":"config_json"}],"rows":[[{"type":"text","value":"main"},{"type":"integer","value":"3"},{"type":"integer","value":"1781705705369"},{"type":"text","value":"{\"k\":\"v\"}"}]],"affected_row_count":0}}}]}`,
+		)
 	}))
 	defer srv.Close()
 

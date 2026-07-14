@@ -174,7 +174,14 @@ func TestLoadConfig_PreservesLiveConfigSchemaWhenSecurityAddsAuthToken(t *testin
 		}
 	}`
 	require.NoError(t, os.WriteFile(configPath, []byte(rawConfig), 0o600))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, SecurityConfigFile), []byte("live_config:\n  driver:\n    turso:\n      auth_token: secure-test-token\n"), 0o600))
+	require.NoError(
+		t,
+		os.WriteFile(
+			filepath.Join(dir, SecurityConfigFile),
+			[]byte("live_config:\n  driver:\n    turso:\n      auth_token: secure-test-token\n"),
+			0o600,
+		),
+	)
 
 	cfg, err := LoadConfig(configPath)
 	require.NoError(t, err)

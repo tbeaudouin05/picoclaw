@@ -30,7 +30,13 @@ func TestNewRuntimeCommand_IncludesInjectTurnSurfaces(t *testing.T) {
 
 func TestWriteInjectTurnResponse(t *testing.T) {
 	var buf bytes.Buffer
-	req := injectTurnRequest{Text: "hello", SessionKey: "sess-1", ChatID: "chat-1", SenderID: "sender-1", DisplayName: "Demo"}
+	req := injectTurnRequest{
+		Text:        "hello",
+		SessionKey:  "sess-1",
+		ChatID:      "chat-1",
+		SenderID:    "sender-1",
+		DisplayName: "Demo",
+	}
 	if err := writeInjectTurnResponse(&buf, "telegram", "hello back", req); err != nil {
 		t.Fatalf("writeInjectTurnResponse: %v", err)
 	}

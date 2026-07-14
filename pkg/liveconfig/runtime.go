@@ -24,7 +24,11 @@ func NewRuntime(cfg config.LiveConfig) (*Runtime, error) {
 	if cfg.Driver.Turso == nil {
 		return nil, fmt.Errorf("live_config driver.turso is required")
 	}
-	store, err := NewTursoHTTPStore(cfg.Driver.Turso.URL, cfg.Driver.Turso.AuthToken.String(), schemaFromConfig(cfg.Driver.Turso.Schema))
+	store, err := NewTursoHTTPStore(
+		cfg.Driver.Turso.URL,
+		cfg.Driver.Turso.AuthToken.String(),
+		schemaFromConfig(cfg.Driver.Turso.Schema),
+	)
 	if err != nil {
 		return nil, err
 	}

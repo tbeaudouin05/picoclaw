@@ -79,7 +79,11 @@ func (c *WhatsAppChannel) Start(ctx context.Context) error {
 		if c.config.SessionStorePath != "" {
 			store, err := openDirectSeenStore(c.config.SessionStorePath)
 			if err != nil {
-				logger.WarnCF("whatsapp", "Failed to init direct_seen store; allow_initial_direct_reply disabled", map[string]any{"err": err.Error()})
+				logger.WarnCF(
+					"whatsapp",
+					"Failed to init direct_seen store; allow_initial_direct_reply disabled",
+					map[string]any{"err": err.Error()},
+				)
 			} else {
 				c.directSeen = store
 			}
@@ -268,7 +272,8 @@ func (c *WhatsAppChannel) handleIncomingMessage(msg map[string]any) {
 
 	isGroup := chatID != senderID
 	skipTriggerCheck := false
-	if !isGroup && c.config != nil && c.config.AllowInitialDirectReply && c.directSeen != nil && shouldRequireTriggerName(false, c.config) {
+	if !isGroup && c.config != nil && c.config.AllowInitialDirectReply && c.directSeen != nil &&
+		shouldRequireTriggerName(false, c.config) {
 		consumed, err := c.directSeen.consumeInitialDirectReply(senderID)
 		if err != nil {
 			logger.WarnCF("whatsapp", "direct_seen check failed", map[string]any{"err": err.Error()})
@@ -276,7 +281,8 @@ func (c *WhatsAppChannel) handleIncomingMessage(msg map[string]any) {
 			skipTriggerCheck = true
 		}
 	}
-	if !skipTriggerCheck && shouldRequireTriggerName(isGroup, c.config) && shouldDropGroupMessageForTriggerName(groupTriggerName(c.config), content) {
+	if !skipTriggerCheck && shouldRequireTriggerName(isGroup, c.config) &&
+		shouldDropGroupMessageForTriggerName(groupTriggerName(c.config), content) {
 		logger.DebugCF("whatsapp", "WhatsApp message ignored: trigger name absent", map[string]any{
 			"chat": chatID,
 		})

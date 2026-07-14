@@ -410,7 +410,9 @@ func migrateV3ToV4(m map[string]any) error {
 		return fmt.Errorf("migrateV3ToV4: expected version 3, got %v", m["version"])
 	}
 	if _, hasOldRuntimeState := m["runtime_state"]; hasOldRuntimeState {
-		return fmt.Errorf("runtime_state was removed in config version 4; configure live_config.driver.turso with record_id and schema instead")
+		return fmt.Errorf(
+			"runtime_state was removed in config version 4; configure live_config.driver.turso with record_id and schema instead",
+		)
 	}
 	m["version"] = 4
 	return nil

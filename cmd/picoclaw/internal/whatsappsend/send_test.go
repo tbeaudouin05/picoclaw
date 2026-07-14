@@ -192,7 +192,12 @@ func TestSendStartErrorIsSurfaced(t *testing.T) {
 	fake := &fakeChannel{startErr: errors.New("not yet paired")}
 	resolve, _ := newResolver(fake, nil, nil)
 
-	err := Send(context.Background(), &config.Config{}, SendRequest{Channel: config.ChannelWhatsAppNative, To: "123", Text: "hi"}, resolve)
+	err := Send(
+		context.Background(),
+		&config.Config{},
+		SendRequest{Channel: config.ChannelWhatsAppNative, To: "123", Text: "hi"},
+		resolve,
+	)
 	if err == nil {
 		t.Fatal("expected start error")
 	}
@@ -206,7 +211,12 @@ func TestSendDeliveryErrorIsSurfacedWithoutBody(t *testing.T) {
 	resolve, _ := newResolver(fake, nil, nil)
 
 	body := "confidential-reminder-7788"
-	err := Send(context.Background(), &config.Config{}, SendRequest{Channel: config.ChannelWhatsAppNative, To: "123", Text: body}, resolve)
+	err := Send(
+		context.Background(),
+		&config.Config{},
+		SendRequest{Channel: config.ChannelWhatsAppNative, To: "123", Text: body},
+		resolve,
+	)
 	if err == nil {
 		t.Fatal("expected send error")
 	}
@@ -221,7 +231,12 @@ func TestSendDeliveryErrorIsSurfacedWithoutBody(t *testing.T) {
 func TestSendResolverErrorIsSurfaced(t *testing.T) {
 	resolve, _ := newResolver(nil, nil, errors.New("channel \"whatsapp_native\" is not configured"))
 
-	err := Send(context.Background(), &config.Config{}, SendRequest{Channel: config.ChannelWhatsAppNative, To: "123", Text: "hi"}, resolve)
+	err := Send(
+		context.Background(),
+		&config.Config{},
+		SendRequest{Channel: config.ChannelWhatsAppNative, To: "123", Text: "hi"},
+		resolve,
+	)
 	if err == nil {
 		t.Fatal("expected resolver error")
 	}
@@ -230,7 +245,12 @@ func TestSendResolverErrorIsSurfaced(t *testing.T) {
 func TestSendNilConfig(t *testing.T) {
 	fake := &fakeChannel{}
 	resolve, _ := newResolver(fake, nil, nil)
-	err := Send(context.Background(), nil, SendRequest{Channel: config.ChannelWhatsAppNative, To: "123", Text: "hi"}, resolve)
+	err := Send(
+		context.Background(),
+		nil,
+		SendRequest{Channel: config.ChannelWhatsAppNative, To: "123", Text: "hi"},
+		resolve,
+	)
 	if err == nil {
 		t.Fatal("expected error for nil config")
 	}

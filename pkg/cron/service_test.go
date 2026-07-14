@@ -730,7 +730,14 @@ func TestCronService_MaxRuns_RunCountPersisted(t *testing.T) {
 	defer os.Remove(path)
 
 	everyMS := int64(60_000)
-	job, err := cs.AddJob("persist-run-count", CronSchedule{Kind: "every", EveryMS: &everyMS}, "msg", "cli", "direct", 2)
+	job, err := cs.AddJob(
+		"persist-run-count",
+		CronSchedule{Kind: "every", EveryMS: &everyMS},
+		"msg",
+		"cli",
+		"direct",
+		2,
+	)
 	if err != nil {
 		t.Fatalf("AddJob failed: %v", err)
 	}

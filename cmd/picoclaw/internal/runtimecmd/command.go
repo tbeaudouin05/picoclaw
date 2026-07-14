@@ -31,8 +31,18 @@ type updateRequest struct {
 
 func NewRuntimeCommand() *cobra.Command {
 	cmd := &cobra.Command{Use: "runtime", Hidden: true, Args: cobra.NoArgs}
-	admin := &cobra.Command{Use: "admin", Short: "Hidden admin runtime helper group, including primary smoke-test prompt injection", Hidden: true, Args: cobra.NoArgs}
-	customer := &cobra.Command{Use: "customer", Short: "Hidden customer runtime helper group, including primary smoke-test prompt injection", Hidden: true, Args: cobra.NoArgs}
+	admin := &cobra.Command{
+		Use:    "admin",
+		Short:  "Hidden admin runtime helper group, including primary smoke-test prompt injection",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+	}
+	customer := &cobra.Command{
+		Use:    "customer",
+		Short:  "Hidden customer runtime helper group, including primary smoke-test prompt injection",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+	}
 	admin.AddCommand(newRuntimeConfigCommand(), newInjectTurnCommand("admin", "telegram"))
 	customer.AddCommand(newInjectTurnCommand("customer", "whatsapp"))
 	cmd.AddCommand(admin, customer)
@@ -57,8 +67,8 @@ func newRuntimeConfigGetCommand() *cobra.Command {
 				return writeRuntimeError(cmd.OutOrStdout(), err)
 			}
 			defer store.Close()
-			if err := store.InitSchema(cmd.Context()); err != nil {
-				return writeRuntimeError(cmd.OutOrStdout(), err)
+			if initErr := store.InitSchema(cmd.Context()); initErr != nil {
+				return writeRuntimeError(cmd.OutOrStdout(), initErr)
 			}
 			rec, err := store.GetRecord(cmd.Context(), recordID)
 			if err != nil {
@@ -85,12 +95,12 @@ func newRuntimeConfigUpdateCommand() *cobra.Command {
 				return writeRuntimeError(cmd.OutOrStdout(), err)
 			}
 			defer store.Close()
-			if err := store.InitSchema(cmd.Context()); err != nil {
-				return writeRuntimeError(cmd.OutOrStdout(), err)
+			if initErr := store.InitSchema(cmd.Context()); initErr != nil {
+				return writeRuntimeError(cmd.OutOrStdout(), initErr)
 			}
 			var req updateRequest
-			if err := json.NewDecoder(cmd.InOrStdin()).Decode(&req); err != nil && err != io.EOF {
-				return writeRuntimeError(cmd.OutOrStdout(), fmt.Errorf("decode update request: %w", err))
+			if decodeErr := json.NewDecoder(cmd.InOrStdin()).Decode(&req); decodeErr != nil && decodeErr != io.EOF {
+				return writeRuntimeError(cmd.OutOrStdout(), fmt.Errorf("decode update request: %w", decodeErr))
 			}
 			current, err := store.GetRecord(cmd.Context(), recordID)
 			if err != nil {
@@ -119,7 +129,13 @@ func newRuntimeConfigUpdateCommand() *cobra.Command {
 			if err != nil {
 				return writeRuntimeError(cmd.OutOrStdout(), err)
 			}
-			out := map[string]any{"status": "ok", "record_id": updated.ID, "config_version": updated.ConfigVersion, "updated_at": updated.UpdatedAt, "changed_paths": changed}
+			out := map[string]any{
+				"status":         "ok",
+				"record_id":      updated.ID,
+				"config_version": updated.ConfigVersion,
+				"updated_at":     updated.UpdatedAt,
+				"changed_paths":  changed,
+			}
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(out)
 		},
 	}
@@ -155,7 +171,14 @@ func writeRecord(w io.Writer, rec *liveconfig.Record) error {
 	if err := json.Unmarshal(rec.ConfigJSON, &cfg); err != nil {
 		return err
 	}
-	out := map[string]any{"status": "ok", "record_id": rec.ID, "config_id": rec.ID, "config_version": rec.ConfigVersion, "updated_at": rec.UpdatedAt, "config": cfg}
+	out := map[string]any{
+		"status":         "ok",
+		"record_id":      rec.ID,
+		"config_id":      rec.ID,
+		"config_version": rec.ConfigVersion,
+		"updated_at":     rec.UpdatedAt,
+		"config":         cfg,
+	}
 	return json.NewEncoder(w).Encode(out)
 }
 

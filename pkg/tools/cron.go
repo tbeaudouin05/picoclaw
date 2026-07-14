@@ -93,8 +93,6 @@ Use 'command' to execute shell commands directly.`
 }
 
 // Parameters returns the tool parameters schema
-//
-//nolint:dupl // Tool parameter schemas intentionally use similar JSON-schema map literals.
 func (t *CronTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -651,7 +649,9 @@ func (t *CronTool) resolveScheduledCommand(channel, chatID string, args map[stri
 		return command, nil
 	}
 	if !t.isRemoteCommandAllowed(channel, command) {
-		return "", ErrorResult("scheduling command execution is restricted to internal channels or configured remote commands")
+		return "", ErrorResult(
+			"scheduling command execution is restricted to internal channels or configured remote commands",
+		)
 	}
 	return command, nil
 }
@@ -670,7 +670,8 @@ func (t *CronTool) lookupRemoteCommand(channel, id string) (config.RemoteCommand
 // the channel.
 func (t *CronTool) isRemoteCommandAllowed(channel, command string) bool {
 	for _, entry := range t.remoteAllowlist {
-		if entry.Command == command && channelInList(entry.Channels, channel) && isAbsoluteProgramCommand(entry.Command) {
+		if entry.Command == command && channelInList(entry.Channels, channel) &&
+			isAbsoluteProgramCommand(entry.Command) {
 			return true
 		}
 	}
