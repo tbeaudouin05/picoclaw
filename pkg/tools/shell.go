@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/constants"
 	"github.com/sipeed/picoclaw/pkg/isolation"
+	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
 var (
@@ -162,7 +164,9 @@ func NewExecToolWithConfig(
 				denyPatterns = append(denyPatterns, windowsDenyPatterns...)
 			}
 			if len(execConfig.CustomDenyPatterns) > 0 {
-				fmt.Printf("Using custom deny patterns: %v\n", execConfig.CustomDenyPatterns)
+				logger.InfoCF("tools", "using custom deny patterns", map[string]any{
+					"patterns": execConfig.CustomDenyPatterns,
+				})
 				for _, pattern := range execConfig.CustomDenyPatterns {
 					re, err := regexp.Compile(pattern)
 					if err != nil {
@@ -173,7 +177,7 @@ func NewExecToolWithConfig(
 			}
 		} else {
 			// If deny patterns are disabled, we won't add any patterns, allowing all commands.
-			fmt.Println("Warning: deny patterns are disabled. All commands will be allowed.")
+			logger.WarnCF("tools", "deny patterns are disabled, all commands will be allowed", nil)
 		}
 		for _, pattern := range execConfig.CustomAllowPatterns {
 			re, err := regexp.Compile(pattern)
@@ -414,6 +418,16 @@ func (t *ExecTool) runSync(ctx context.Context, command, cwd string) *ToolResult
 
 	done := make(chan error, 1)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.ErrorCF("shell", "cmd.Wait goroutine panic recovered",
+					map[string]any{
+						"panic": fmt.Sprintf("%v", r),
+						"stack": string(debug.Stack()),
+					})
+				done <- fmt.Errorf("panic in cmd.Wait: %v", r)
+			}
+		}()
 		done <- cmd.Wait()
 	}()
 
@@ -555,7 +569,7 @@ func (t *ExecTool) runBackground(ctx context.Context, command, cwd string, ptyEn
 	// with synchronous exec runs.
 	if err := isolation.Start(cmd); err != nil {
 		if session.ptyMaster != nil {
-			session.ptyMaster.Close()
+			_ = session.ptyMaster.Close()
 		}
 		return ErrorResult(fmt.Sprintf("failed to start command: %v", err))
 	}
@@ -570,6 +584,18 @@ func (t *ExecTool) runBackground(ctx context.Context, command, cwd string, ptyEn
 	// so we need cmd.Wait() in a separate goroutine to detect process exit.
 	if session.PTY && session.ptyMaster != nil {
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logger.ErrorCF("shell", "PTY cmd.Wait goroutine panic recovered",
+						map[string]any{
+							"panic": fmt.Sprintf("%v", r),
+							"stack": string(debug.Stack()),
+						})
+					session.mu.Lock()
+					session.Status = "error"
+					session.mu.Unlock()
+				}
+			}()
 			cmd.Wait() // Wait for process to exit
 			session.mu.Lock()
 			if cmd.ProcessState != nil {
@@ -580,6 +606,15 @@ func (t *ExecTool) runBackground(ctx context.Context, command, cwd string, ptyEn
 		}()
 
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logger.ErrorCF("shell", "PTY read goroutine panic recovered",
+						map[string]any{
+							"panic": fmt.Sprintf("%v", r),
+							"stack": string(debug.Stack()),
+						})
+				}
+			}()
 			buf := make([]byte, 4096)
 			for {
 				n, err := session.ptyMaster.Read(buf)
@@ -610,6 +645,15 @@ func (t *ExecTool) runBackground(ctx context.Context, command, cwd string, ptyEn
 		// When Read() returns EOF (pipe closed), we break.
 		// When process exits, OS closes pipe write end → Read() returns EOF → we exit.
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logger.ErrorCF("shell", "pipe read goroutine panic recovered",
+						map[string]any{
+							"panic": fmt.Sprintf("%v", r),
+							"stack": string(debug.Stack()),
+						})
+				}
+			}()
 			buf := make([]byte, 4096)
 
 			// Read stdout
@@ -654,7 +698,7 @@ func (t *ExecTool) runBackground(ctx context.Context, command, cwd string, ptyEn
 
 			// All pipes closed, get exit status
 			if stdinWriter != nil {
-				stdinWriter.Close()
+				_ = stdinWriter.Close()
 			}
 			cmd.Wait()
 
@@ -1091,36 +1135,35 @@ func expandPowerShellEnvVars(cmd string) string {
 	})
 }
 
+func (t *ExecTool) commandMatchesAllowPattern(lower string) bool {
+	for _, pattern := range t.allowPatterns {
+		if pattern.MatchString(lower) {
+			return true
+		}
+	}
+	for _, pattern := range t.customAllowPatterns {
+		if pattern.MatchString(lower) {
+			return true
+		}
+	}
+	return false
+}
+
 func (t *ExecTool) guardCommand(command, cwd string) string {
 	cmd := strings.TrimSpace(command)
 	lower := strings.ToLower(cmd)
 
-	// Custom allow patterns exempt a command from deny checks.
-	explicitlyAllowed := false
-	for _, pattern := range t.customAllowPatterns {
+	// Deny patterns always apply, even when a command matches a custom allow rule.
+	// Custom allow rules can permit a command, but must not disable secret-safety
+	// deny rules such as jq env access checks (#3079).
+	for _, pattern := range t.denyPatterns {
 		if pattern.MatchString(lower) {
-			explicitlyAllowed = true
-			break
-		}
-	}
-
-	if !explicitlyAllowed {
-		for _, pattern := range t.denyPatterns {
-			if pattern.MatchString(lower) {
-				return "Command blocked by safety guard (dangerous pattern detected)"
-			}
+			return "Command blocked by safety guard (dangerous pattern detected)"
 		}
 	}
 
 	if len(t.allowPatterns) > 0 {
-		allowed := false
-		for _, pattern := range t.allowPatterns {
-			if pattern.MatchString(lower) {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
+		if !t.commandMatchesAllowPattern(lower) {
 			return "Command blocked by safety guard (not in allowlist)"
 		}
 	}
@@ -1198,7 +1241,7 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 				}
 			}
 
-			p, err := filepath.Abs(raw)
+			p, err := commandPathAbs(commandPathTextFromMatch(cmd, loc[0], loc[1]), cwdPath)
 			if err != nil {
 				continue
 			}
@@ -1238,6 +1281,66 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 	}
 
 	return ""
+}
+
+func commandPathAbs(pathText, cwdPath string) (string, error) {
+	if filepath.IsAbs(pathText) {
+		return filepath.Abs(pathText)
+	}
+	return filepath.Abs(filepath.Join(cwdPath, pathText))
+}
+
+func commandPathTextFromMatch(cmd string, start, end int) string {
+	raw := cmd[start:end]
+	if !strings.HasPrefix(raw, "/") || isUnixAbsolutePathMatchStart(cmd, start) {
+		return raw
+	}
+
+	tokenStart, tokenEnd := shellTokenBounds(cmd, start)
+	prefix := cmd[tokenStart:start]
+	// For --flag=rel/path, validate the value. For ambiguous attached option
+	// forms like -isystem/path, keep the slash-starting path conservative.
+	if eq := strings.IndexByte(prefix, '='); eq >= 0 {
+		return cmd[tokenStart+eq+1 : tokenEnd]
+	}
+	if strings.HasPrefix(prefix, "-") {
+		return raw
+	}
+	return cmd[tokenStart:tokenEnd]
+}
+
+func shellTokenBounds(cmd string, idx int) (int, int) {
+	start := idx
+	for start > 0 && !isShellTokenBoundary(cmd[start-1]) {
+		start--
+	}
+	end := idx
+	for end < len(cmd) && !isShellTokenBoundary(cmd[end]) {
+		end++
+	}
+	return start, end
+}
+
+// isUnixAbsolutePathMatchStart returns true when a regex match beginning with
+// "/" is actually an absolute path token, not the separator inside a relative
+// path such as "skills/foo.py".
+func isUnixAbsolutePathMatchStart(cmd string, idx int) bool {
+	if idx <= 0 {
+		return true
+	}
+
+	prev := cmd[idx-1]
+	if isShellTokenBoundary(prev) || prev == '=' || prev == ',' || prev == '(' || prev == '[' || prev == '{' {
+		return true
+	}
+
+	j := idx - 1
+	for j >= 0 && !isShellTokenBoundary(cmd[j]) {
+		j--
+	}
+	prefix := cmd[j+1 : idx]
+
+	return strings.HasPrefix(prefix, "-") && !strings.Contains(prefix, "=")
 }
 
 // isShellTokenBoundary returns true when b is a byte that separates

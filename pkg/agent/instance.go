@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -44,6 +43,7 @@ type AgentInstance struct {
 	SkillsFilter              []string
 	MCPServerAllowlist        map[string]struct{}
 	Candidates                []providers.FallbackCandidate
+	ImageCandidates           []providers.FallbackCandidate
 
 	// Router is non-nil when model routing is configured and the light model
 	// was successfully resolved. It scores each incoming message and decides
@@ -103,8 +103,25 @@ func NewAgentInstance(
 			toolsRegistry.Register(tools.NewReadFileBytesTool(workspace, readRestrict, maxReadFileSize, allowReadPaths))
 		}
 	}
+	if cfg.Tools.IsToolEnabled("edit_file") {
+		toolsRegistry.Register(tools.NewEditFileTool(workspace, restrict, allowWritePaths))
+	}
+	if cfg.Tools.IsToolEnabled("append_file") {
+		toolsRegistry.Register(tools.NewAppendFileTool(workspace, restrict, allowWritePaths))
+	}
+	// Build write_file's copy from the registered editors so it steers the agent
+	// to edit_file/append_file only when those tools are actually available.
 	if cfg.Tools.IsToolEnabled("write_file") {
-		toolsRegistry.Register(tools.NewWriteFileTool(workspace, restrict, allowWritePaths))
+		writeTool := tools.NewWriteFileTool(workspace, restrict, allowWritePaths)
+		var altTools []string
+		if toolsRegistry.HasRegistered("append_file") {
+			altTools = append(altTools, "append_file")
+		}
+		if toolsRegistry.HasRegistered("edit_file") {
+			altTools = append(altTools, "edit_file")
+		}
+		writeTool.SetAlternativeTools(altTools)
+		toolsRegistry.Register(writeTool)
 	}
 	if cfg.Tools.IsToolEnabled("list_dir") {
 		toolsRegistry.Register(tools.NewListDirTool(workspace, readRestrict, allowReadPaths))
@@ -117,13 +134,6 @@ func NewAgentInstance(
 		} else {
 			toolsRegistry.Register(execTool)
 		}
-	}
-
-	if cfg.Tools.IsToolEnabled("edit_file") {
-		toolsRegistry.Register(tools.NewEditFileTool(workspace, restrict, allowWritePaths))
-	}
-	if cfg.Tools.IsToolEnabled("append_file") {
-		toolsRegistry.Register(tools.NewAppendFileTool(workspace, restrict, allowWritePaths))
 	}
 
 	sessionsDir := filepath.Join(workspace, "sessions")
@@ -199,9 +209,19 @@ func NewAgentInstance(
 
 	// Resolve fallback candidates
 	candidates := resolveModelCandidates(cfg, defaults.Provider, model, fallbacks)
+	imageCandidates := resolveModelCandidates(
+		cfg,
+		defaults.Provider,
+		defaults.ImageModel,
+		defaults.ImageModelFallbacks,
+	)
 
 	candidateProviders := make(map[string]providers.LLMProvider)
 	populateCandidateProvidersFromNames(cfg, workspace, fallbacks, candidateProviders)
+	if strings.TrimSpace(defaults.ImageModel) != "" {
+		imageNames := append([]string{defaults.ImageModel}, defaults.ImageModelFallbacks...)
+		populateCandidateProvidersFromNames(cfg, workspace, imageNames, candidateProviders)
+	}
 
 	// Model routing setup: pre-resolve light model candidates at creation time
 	// to avoid repeated model_list lookups on every incoming message.
@@ -266,6 +286,7 @@ func NewAgentInstance(
 		SkillsFilter:              skillsFilter,
 		MCPServerAllowlist:        agentMCPServerAllowlist,
 		Candidates:                candidates,
+		ImageCandidates:           imageCandidates,
 		Router:                    router,
 		LightCandidates:           lightCandidates,
 		LightProvider:             lightProvider,
@@ -414,7 +435,10 @@ func compilePatterns(patterns []string) []*regexp.Regexp {
 	for _, p := range patterns {
 		re, err := regexp.Compile(p)
 		if err != nil {
-			fmt.Printf("Warning: invalid path pattern %q: %v\n", p, err)
+			logger.WarnCF("agent", "invalid path pattern in compilePatterns", map[string]any{
+				"pattern": p,
+				"error":   err.Error(),
+			})
 			continue
 		}
 		compiled = append(compiled, re)

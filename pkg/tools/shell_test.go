@@ -426,6 +426,90 @@ func TestShellTool_RestrictToWorkspace(t *testing.T) {
 	}
 }
 
+// TestShellTool_RelativePathWithSlashAllowed verifies that local relative paths
+// under the workspace are not mistaken for absolute paths by the safety guard.
+func TestShellTool_RelativePathWithSlashAllowed(t *testing.T) {
+	tmpDir := t.TempDir()
+	scriptDir := filepath.Join(tmpDir, "skills", "calendar-query", "scripts")
+	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+		t.Fatalf("failed to create script dir: %v", err)
+	}
+	scriptPath := filepath.Join(scriptDir, "query_calendar.py")
+	if err := os.WriteFile(scriptPath, []byte("calendar ok\n"), 0o644); err != nil {
+		t.Fatalf("failed to create script: %v", err)
+	}
+
+	tool, err := NewExecTool(tmpDir, true)
+	if err != nil {
+		t.Fatalf("unable to configure exec tool: %s", err)
+	}
+
+	result := tool.Execute(context.Background(), map[string]any{
+		"action":  "run",
+		"command": "cat skills/calendar-query/scripts/query_calendar.py",
+	})
+
+	if result.IsError {
+		t.Fatalf("relative workspace script path should be allowed, got: %s", result.ForLLM)
+	}
+	if !strings.Contains(result.ForLLM, "calendar ok") {
+		t.Fatalf("expected script output, got: %s", result.ForLLM)
+	}
+}
+
+func TestShellTool_AttachedAbsolutePathsStillBlocked(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool, err := NewExecTool(tmpDir, true)
+	if err != nil {
+		t.Fatalf("unable to configure exec tool: %s", err)
+	}
+
+	commands := []string{
+		"cat --file=/etc/passwd",
+		"cc -I/etc main.c",
+		"echo -isystem/usr/include",
+	}
+
+	for _, cmd := range commands {
+		result := tool.Execute(context.Background(), map[string]any{"action": "run", "command": cmd})
+		if !result.IsError || !strings.Contains(result.ForLLM, "path outside working dir") {
+			t.Errorf("attached absolute path should be blocked: %q\n  got: %s", cmd, result.ForLLM)
+		}
+	}
+}
+
+func TestShellTool_OptionValueRelativeSymlinkEscapeBlocked(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	outsideDir := filepath.Join(root, "outside")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("failed to create workspace: %v", err)
+	}
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatalf("failed to create outside dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outsideDir, "passwd"), []byte("secret\n"), 0o644); err != nil {
+		t.Fatalf("failed to create outside file: %v", err)
+	}
+	if err := os.Symlink(outsideDir, filepath.Join(workspace, "link")); err != nil {
+		t.Skipf("symlinks not supported in this environment: %v", err)
+	}
+
+	tool, err := NewExecTool(workspace, true)
+	if err != nil {
+		t.Fatalf("unable to configure exec tool: %s", err)
+	}
+
+	result := tool.Execute(context.Background(), map[string]any{
+		"action":  "run",
+		"command": "echo --config=link/passwd",
+	})
+
+	if !result.IsError || !strings.Contains(result.ForLLM, "path outside working dir") {
+		t.Fatalf("option value symlink escape should be blocked, got: %s", result.ForLLM)
+	}
+}
+
 // TestShellTool_DevNullAllowed verifies that /dev/null redirections are not blocked (issue #964).
 func TestShellTool_DevNullAllowed(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -1850,5 +1934,56 @@ func TestShellTool_SchemelessURLDetection(t *testing.T) {
 		if result.IsError && strings.Contains(result.ForLLM, "path outside working dir") {
 			t.Errorf("command with multiple web URLs should not be blocked: %s\n  error: %s", cmd, result.ForLLM)
 		}
+	}
+}
+
+func TestShellTool_CustomAllowDoesNotBypassDenyPatterns(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Tools.Exec.EnableDenyPatterns = true
+	cfg.Tools.Exec.CustomAllowPatterns = []string{`^jq\b`}
+	cfg.Tools.Exec.CustomDenyPatterns = []string{`\$env\b`, `(^|[^.$a-z0-9_])env([^a-z0-9_]|$)`}
+
+	tool, err := NewExecToolWithConfig(t.TempDir(), false, cfg)
+	if err != nil {
+		t.Fatalf("NewExecToolWithConfig() error: %v", err)
+	}
+
+	got := tool.guardCommand(`jq -n '$ENV.PICOCLAW_VARIANT_CANARY'`, t.TempDir())
+	if !strings.Contains(got, "dangerous pattern detected") {
+		t.Fatalf("custom allow should not bypass deny patterns, got: %q", got)
+	}
+}
+
+func TestShellTool_CustomAllowStillPermitsSafeMatch(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Tools.Exec.EnableDenyPatterns = true
+	cfg.Tools.Exec.CustomAllowPatterns = []string{`^jq\b`}
+	cfg.Tools.Exec.CustomDenyPatterns = []string{`\$env\b`, `(^|[^.$a-z0-9_])env([^a-z0-9_]|$)`}
+
+	tool, err := NewExecToolWithConfig(t.TempDir(), false, cfg)
+	if err != nil {
+		t.Fatalf("NewExecToolWithConfig() error: %v", err)
+	}
+
+	got := tool.guardCommand(`jq -n '"ok"'`, t.TempDir())
+	if got != "" {
+		t.Fatalf("safe custom-allowed command should pass guard, got: %q", got)
+	}
+}
+
+func TestShellTool_CustomAllowDoesNotBecomeStrictAllowlist(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Tools.Exec.EnableDenyPatterns = true
+	cfg.Tools.Exec.CustomAllowPatterns = []string{`^jq\b`}
+	cfg.Tools.Exec.CustomDenyPatterns = []string{`\$env\b`, `(^|[^.$a-z0-9_])env([^a-z0-9_]|$)`}
+
+	tool, err := NewExecToolWithConfig(t.TempDir(), false, cfg)
+	if err != nil {
+		t.Fatalf("NewExecToolWithConfig() error: %v", err)
+	}
+
+	got := tool.guardCommand("ls", t.TempDir())
+	if got != "" {
+		t.Fatalf("custom allow patterns should not become a strict allowlist, got: %q", got)
 	}
 }

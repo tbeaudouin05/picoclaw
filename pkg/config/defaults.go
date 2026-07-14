@@ -88,7 +88,7 @@ func DefaultConfig() *Config {
 			{
 				ModelName: "claude-sonnet-4.6",
 				Provider:  "anthropic",
-				Model:     "claude-sonnet-4.6",
+				Model:     "claude-sonnet-4-6",
 				APIBase:   "https://api.anthropic.com/v1",
 			},
 
@@ -106,6 +106,14 @@ func DefaultConfig() *Config {
 				Provider:  "venice",
 				Model:     "venice-uncensored",
 				APIBase:   "https://api.venice.ai/api/v1",
+			},
+
+			// NEAR AI Cloud TEE inference - https://near.ai
+			{
+				ModelName: "nearai-glm",
+				Provider:  "nearai",
+				Model:     "zai-org/GLM-5.1-FP8",
+				APIBase:   "https://cloud-api.near.ai/v1",
 			},
 
 			// Google Gemini - https://ai.google.dev/
@@ -333,6 +341,11 @@ func DefaultConfig() *Config {
 					Enabled:    false,
 					MaxResults: 5,
 				},
+				Kagi: KagiConfig{
+					Enabled:    false,
+					BaseURL:    "https://kagi.com/api/v1/search",
+					MaxResults: 5,
+				},
 				Sogou: SogouConfig{
 					Enabled:    true,
 					MaxResults: 5,
@@ -534,6 +547,13 @@ func defaultChannels() ChannelsConfig {
 			"settings": map[string]any{
 				"homeserver":     "https://matrix.org",
 				"join_on_invite": true,
+			},
+		},
+		"deltachat": map[string]any{
+			"group_trigger": map[string]any{"mention_only": true},
+			"settings": map[string]any{
+				"email":        "@nine.testrun.org",
+				"display_name": "PicoClaw Bot",
 			},
 		},
 		"line": map[string]any{

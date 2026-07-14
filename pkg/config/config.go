@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -258,7 +259,7 @@ func (c *Config) MarshalJSON() ([]byte, error) {
 		Alias: (*Alias)(c),
 	}
 
-	if len(c.Session.Dimensions) > 0 || len(c.Session.IdentityLinks) > 0 {
+	if len(c.Session.Dimensions) > 0 || len(c.Session.IdentityLinks) > 0 || c.Session.DmScope != "" {
 		sessionCfg := c.Session
 		aux.Session = &sessionCfg
 	}
@@ -350,6 +351,47 @@ type DispatchSelector struct {
 type SessionConfig struct {
 	Dimensions    []string            `json:"dimensions,omitempty"`
 	IdentityLinks map[string][]string `json:"identity_links,omitempty"`
+	DmScope       string              `json:"dm_scope,omitempty"`
+}
+
+// ApplyDmScope translates the user-facing dm_scope value into the internal
+// dimensions array that the routing layer consumes. It is a no-op when
+// DmScope is empty or when Dimensions is already set (explicit Dimensions
+// take precedence over the derived value).
+func (s *SessionConfig) ApplyDmScope() {
+	if s.DmScope == "" || len(s.Dimensions) > 0 {
+		return
+	}
+	switch s.DmScope {
+	case "per-channel-peer":
+		s.Dimensions = []string{"chat", "sender"}
+	case "per-channel":
+		s.Dimensions = []string{"chat"}
+	case "per-peer":
+		s.Dimensions = []string{"sender"}
+	case "global":
+		s.Dimensions = nil
+	}
+}
+
+// DeriveDmScope sets DmScope based on Dimensions when DmScope is empty.
+// This handles legacy/fresh configs that only have explicit Dimensions
+// without a corresponding DmScope value, ensuring the API response always
+// includes a dm_scope that matches the actual runtime dimensions.
+func (s *SessionConfig) DeriveDmScope() {
+	if s.DmScope != "" || len(s.Dimensions) == 0 {
+		return
+	}
+	switch {
+	case slices.Equal(s.Dimensions, []string{"chat", "sender"}):
+		s.DmScope = "per-channel-peer"
+	case slices.Equal(s.Dimensions, []string{"chat"}):
+		s.DmScope = "per-channel"
+	case slices.Equal(s.Dimensions, []string{"sender"}):
+		s.DmScope = "per-peer"
+	}
+	// Dimensions not matching any known scope mapping (custom array)
+	// is fine — DmScope stays empty and the UI can handle it.
 }
 
 // RoutingConfig controls the intelligent model routing feature.
@@ -589,6 +631,31 @@ type MatrixSettings struct {
 	MessageFormat      string       `json:"message_format,omitempty"       yaml:"-"`
 	CryptoDatabasePath string       `json:"crypto_database_path,omitempty" yaml:"-"`
 	CryptoPassphrase   string       `json:"crypto_passphrase,omitempty"    yaml:"-"`
+}
+
+// DeltaChatSettings configures the Delta Chat channel. Delta Chat is an
+// email-based, end-to-end encrypted messenger; PicoClaw talks to a local
+// `deltachat-rpc-server` process over JSON-RPC (stdio).
+//
+// Email is the only required setting. A full address selects an already
+// configured account in DataDir; a first-run marker such as "@nine.testrun.org"
+// creates a chatmail account and tells the user which full email to save.
+// Mailbox credentials stay in the Delta Chat account store. DisplayName and
+// AvatarImage are optional profile settings applied on startup. Password remains
+// only for legacy PicoClaw-managed email configuration.
+type DeltaChatSettings struct {
+	Email          string       `json:"email"                     yaml:"-"                  env:"PICOCLAW_CHANNELS_DELTACHAT_EMAIL"`
+	Password       SecureString `json:"password,omitzero"         yaml:"password,omitempty" env:"PICOCLAW_CHANNELS_DELTACHAT_PASSWORD"`
+	DisplayName    string       `json:"display_name,omitempty"    yaml:"-"                  env:"PICOCLAW_CHANNELS_DELTACHAT_DISPLAY_NAME"`
+	AvatarImage    string       `json:"avatar_image,omitempty"    yaml:"-"                  env:"PICOCLAW_CHANNELS_DELTACHAT_AVATAR_IMAGE"`
+	DataDir        string       `json:"data_dir,omitempty"        yaml:"-"                  env:"PICOCLAW_CHANNELS_DELTACHAT_DATA_DIR"`
+	RPCServerPath  string       `json:"rpc_server_path,omitempty" yaml:"-"                  env:"PICOCLAW_CHANNELS_DELTACHAT_RPC_SERVER_PATH"`
+	InviteLink     string       `json:"invite_link,omitempty"     yaml:"-"                  env:"PICOCLAW_CHANNELS_DELTACHAT_INVITE_LINK"`
+	AllowCrosspost bool         `json:"allow_crosspost,omitempty" yaml:"-"                  env:"PICOCLAW_CHANNELS_DELTACHAT_ALLOW_CROSSPOST"`
+	IMAPServer     string       `json:"imap_server,omitempty"     yaml:"-"`
+	IMAPPort       int          `json:"imap_port,omitempty"       yaml:"-"`
+	SMTPServer     string       `json:"smtp_server,omitempty"     yaml:"-"`
+	SMTPPort       int          `json:"smtp_port,omitempty"       yaml:"-"`
 }
 
 type LINESettings struct {
@@ -908,6 +975,31 @@ func (c *TavilyConfig) SetAPIKeys(keys []string) {
 	}
 }
 
+type KagiConfig struct {
+	Enabled    bool          `json:"enabled"           yaml:"-"                  env:"PICOCLAW_TOOLS_WEB_KAGI_ENABLED"`
+	APIKeys    SecureStrings `json:"api_keys,omitzero" yaml:"api_keys,omitempty" env:"PICOCLAW_TOOLS_WEB_KAGI_API_KEYS"`
+	BaseURL    string        `json:"base_url"          yaml:"-"                  env:"PICOCLAW_TOOLS_WEB_KAGI_BASE_URL"`
+	MaxResults int           `json:"max_results"       yaml:"-"                  env:"PICOCLAW_TOOLS_WEB_KAGI_MAX_RESULTS"`
+}
+
+// APIKey returns the Kagi API key
+func (c *KagiConfig) APIKey() string {
+	if len(c.APIKeys) == 0 {
+		return ""
+	}
+	return c.APIKeys[0].String()
+}
+
+// SetAPIKey sets the Kagi API key
+func (c *KagiConfig) SetAPIKey(key string) {
+	c.APIKeys = SimpleSecureStrings(key)
+}
+
+// SetAPIKeys sets the Kagi API keys
+func (c *KagiConfig) SetAPIKeys(keys []string) {
+	c.APIKeys = SimpleSecureStrings(keys...)
+}
+
 type DuckDuckGoConfig struct {
 	Enabled    bool `json:"enabled"     env:"PICOCLAW_TOOLS_WEB_DUCKDUCKGO_ENABLED"`
 	MaxResults int  `json:"max_results" env:"PICOCLAW_TOOLS_WEB_DUCKDUCKGO_MAX_RESULTS"`
@@ -971,6 +1063,7 @@ type WebToolsConfig struct {
 	ToolConfig  `                   yaml:"-"                      envPrefix:"PICOCLAW_TOOLS_WEB_"`
 	Brave       BraveConfig        `yaml:"brave,omitempty"                                        json:"brave"`
 	Tavily      TavilyConfig       `yaml:"tavily,omitempty"                                       json:"tavily"`
+	Kagi        KagiConfig         `yaml:"kagi,omitempty"                                         json:"kagi"`
 	Sogou       SogouConfig        `yaml:"-"                                                      json:"sogou"`
 	DuckDuckGo  DuckDuckGoConfig   `yaml:"-"                                                      json:"duckduckgo"`
 	Gemini      GeminiSearchConfig `yaml:"gemini,omitempty"                                       json:"gemini"`
@@ -994,9 +1087,11 @@ type WebToolsConfig struct {
 }
 
 type CronToolsConfig struct {
-	ToolConfig         `     envPrefix:"PICOCLAW_TOOLS_CRON_"`
-	ExecTimeoutMinutes int  `                                 json:"exec_timeout_minutes"  env:"PICOCLAW_TOOLS_CRON_EXEC_TIMEOUT_MINUTES"` // 0 means no timeout
-	AllowCommand       bool `                                 json:"allow_command"         env:"PICOCLAW_TOOLS_CRON_ALLOW_COMMAND"`
+	ToolConfig `envPrefix:"PICOCLAW_TOOLS_CRON_"`
+	// 0 means no timeout.
+	ExecTimeoutMinutes    int      `json:"exec_timeout_minutes"    env:"PICOCLAW_TOOLS_CRON_EXEC_TIMEOUT_MINUTES"`
+	AllowCommand          bool     `json:"allow_command"           env:"PICOCLAW_TOOLS_CRON_ALLOW_COMMAND"`
+	CommandAllowedRemotes []string `json:"command_allowed_remotes" env:"PICOCLAW_TOOLS_CRON_COMMAND_ALLOWED_REMOTES"`
 	// MaxConcurrent caps how many cron jobs may execute simultaneously across
 	// the whole scheduler. 0 or negative clamps to 1 (one at a time). Individual
 	// jobs still never overlap with themselves regardless of this setting.
@@ -1573,6 +1668,9 @@ func LoadConfig(path string) (*Config, error) {
 		cfg.Agents.Defaults.Workspace = filepath.Join(homePath, pkg.WorkspaceName)
 	}
 
+	cfg.Session.ApplyDmScope()
+	cfg.Session.DeriveDmScope()
+
 	return cfg, nil
 }
 
@@ -1794,6 +1892,8 @@ func ResetToDefaults(configPath string) error {
 		return fmt.Errorf("backup before reset: %w", err)
 	}
 	cfg := DefaultConfig()
+	cfg.Session.ApplyDmScope()
+	cfg.Session.DeriveDmScope()
 	if err := cfg.SecurityCopyFrom(configPath); err != nil {
 		logger.WarnF("could not preserve security config", map[string]any{"error": err})
 	}

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -211,6 +213,33 @@ func TestSendMedia_ImageFallbacksToDocumentOnInvalidDimensions(t *testing.T) {
 	assert.Equal(t, len(content), constructor.calls[0].FileSizes["photo"])
 	assert.Equal(t, len(content), constructor.calls[1].FileSizes["document"])
 	assert.Equal(t, "caption", constructor.calls[1].Parameters["caption"])
+}
+
+func TestDownloadFileWithInfo_AllowsLocalConfiguredBaseURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got, want := r.URL.Path, "/file/bot"+testToken+"/photos/image"; got != want {
+			t.Fatalf("request path = %q, want %q", got, want)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("telegram-local-bot-api"))
+	}))
+	defer server.Close()
+
+	ch, err := NewTelegramChannel(
+		&config.Channel{Type: config.ChannelTelegram, Enabled: true},
+		&config.TelegramSettings{
+			Token:   *config.NewSecureString(testToken),
+			BaseURL: server.URL,
+		},
+		nil,
+	)
+	require.NoError(t, err)
+
+	path := ch.downloadFileWithInfo(&telego.File{FilePath: "photos/image"}, "")
+	if path == "" {
+		t.Fatal("expected local base_url download to succeed")
+	}
+	defer os.Remove(path)
 }
 
 func TestSendMedia_ImageNonDimensionErrorDoesNotFallback(t *testing.T) {
@@ -1212,8 +1241,9 @@ func TestHandleMessage_ForumTopic_SetsMetadata(t *testing.T) {
 	inbound, ok := <-messageBus.InboundChan()
 	require.True(t, ok, "expected inbound message")
 
-	// ChatID remains the parent chat; TopicID isolates the sub-conversation.
-	assert.Equal(t, "-1001234567890", inbound.ChatID)
+	// ChatID includes the thread ID for forum topics so outbound
+	// delivery resolves the correct topic without relying solely on TopicID fallback.
+	assert.Equal(t, "-1001234567890/42", inbound.ChatID)
 	assert.Equal(t, "group", inbound.Context.ChatType)
 	assert.Equal(t, "42", inbound.Context.TopicID)
 }
@@ -1494,6 +1524,42 @@ func TestHandleMessage_EmptyContent_Ignored(t *testing.T) {
 	case <-messageBus.InboundChan():
 		t.Fatal("Empty message should not be published to message bus")
 	default:
+	}
+}
+
+func TestHandleMessage_LocationForwardedAsText(t *testing.T) {
+	messageBus := bus.NewMessageBus()
+	ch := &TelegramChannel{
+		BaseChannel: channels.NewBaseChannel("telegram", nil, messageBus, nil),
+		chatIDs:     make(map[string]int64),
+		ctx:         context.Background(),
+	}
+
+	msg := &telego.Message{
+		MessageID: 3049,
+		Location: &telego.Location{
+			Latitude:  35.197713,
+			Longitude: 136.885705,
+		},
+		Chat: telego.Chat{
+			ID:   456,
+			Type: "private",
+		},
+		From: &telego.User{
+			ID:        789,
+			FirstName: "User",
+		},
+	}
+
+	err := ch.handleMessage(context.Background(), msg)
+	require.NoError(t, err)
+
+	select {
+	case inbound := <-messageBus.InboundChan():
+		assert.Equal(t, "[User location: lat=35.197713, lng=136.885705]", inbound.Content)
+		assert.Equal(t, "3049", inbound.Context.MessageID)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for location message")
 	}
 }
 
