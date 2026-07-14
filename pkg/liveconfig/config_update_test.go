@@ -41,7 +41,14 @@ func TestApplyDotPathUpdatesRejectsArrayIntermediate(t *testing.T) {
 }
 
 func TestBuildRuntimePromptIncludesAuthoritativeOverride(t *testing.T) {
-	prompt := BuildRuntimePrompt(&Record{ID: "main", ConfigVersion: 7, UpdatedAt: "2026-06-02T20:00:00Z", ConfigJSON: json.RawMessage(`{"customer_behavior":{"tone":"dolphin"}}`)})
+	prompt := BuildRuntimePrompt(
+		&Record{
+			ID:            "main",
+			ConfigVersion: 7,
+			UpdatedAt:     "2026-06-02T20:00:00Z",
+			ConfigJSON:    json.RawMessage(`{"customer_behavior":{"tone":"dolphin"}}`),
+		},
+	)
 	for _, want := range []string{"AUTHORITATIVE LIVE CONFIG", "Config version: 7", "Ignore any earlier local config files", "dolphin"} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, prompt)
@@ -50,7 +57,10 @@ func TestBuildRuntimePromptIncludesAuthoritativeOverride(t *testing.T) {
 }
 
 func TestApplyDotPathUpdatesRejectsOverlappingPaths(t *testing.T) {
-	_, _, err := ApplyDotPathUpdates(json.RawMessage(`{"foo":{"bar":"old"}}`), map[string]any{"foo": "new", "foo.bar": "also-new"})
+	_, _, err := ApplyDotPathUpdates(
+		json.RawMessage(`{"foo":{"bar":"old"}}`),
+		map[string]any{"foo": "new", "foo.bar": "also-new"},
+	)
 	if err == nil {
 		t.Fatal("expected overlapping path error")
 	}

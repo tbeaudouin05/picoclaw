@@ -448,7 +448,11 @@ func (al *AgentLoop) ReloadProviderAndConfig(
 	}
 	newLiveConfigRuntime, liveConfigRuntimeErr := liveconfig.NewRuntime(cfg.LiveConfig)
 	if liveConfigRuntimeErr != nil {
-		logger.ErrorCF("agent", "Failed to reinitialize runtime live config during reload", map[string]any{"error": liveConfigRuntimeErr.Error()})
+		logger.ErrorCF(
+			"agent",
+			"Failed to reinitialize runtime live config during reload",
+			map[string]any{"error": liveConfigRuntimeErr.Error()},
+		)
 		if cfg.LiveConfig.Enabled {
 			newLiveConfigRuntime = liveconfig.NewUnavailableRuntime(cfg.LiveConfig, liveConfigRuntimeErr)
 		}

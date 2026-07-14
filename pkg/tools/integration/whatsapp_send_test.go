@@ -27,10 +27,10 @@ func TestWhatsAppSendTool_Parameters(t *testing.T) {
 	if !ok {
 		t.Fatal("expected properties map")
 	}
-	if _, ok := props["jid"]; !ok {
+	if _, exists := props["jid"]; !exists {
 		t.Error("expected 'jid' property")
 	}
-	if _, ok := props["content"]; !ok {
+	if _, exists := props["content"]; !exists {
 		t.Error("expected 'content' property")
 	}
 	required, ok := params["required"].([]string)
@@ -116,9 +116,11 @@ func TestWhatsAppSendTool_Execute_FullJIDPassthrough(t *testing.T) {
 
 func TestWhatsAppSendTool_Execute_MissingJID(t *testing.T) {
 	tool := NewWhatsAppSendTool()
-	tool.SetSendCallback(func(ctx context.Context, channel, chatID, content, replyToMessageID string, mediaParts []bus.MediaPart) error {
-		return nil
-	})
+	tool.SetSendCallback(
+		func(ctx context.Context, channel, chatID, content, replyToMessageID string, mediaParts []bus.MediaPart) error {
+			return nil
+		},
+	)
 
 	result := tool.Execute(context.Background(), map[string]any{
 		"content": "Hello",
@@ -133,9 +135,11 @@ func TestWhatsAppSendTool_Execute_MissingJID(t *testing.T) {
 
 func TestWhatsAppSendTool_Execute_MissingContent(t *testing.T) {
 	tool := NewWhatsAppSendTool()
-	tool.SetSendCallback(func(ctx context.Context, channel, chatID, content, replyToMessageID string, mediaParts []bus.MediaPart) error {
-		return nil
-	})
+	tool.SetSendCallback(
+		func(ctx context.Context, channel, chatID, content, replyToMessageID string, mediaParts []bus.MediaPart) error {
+			return nil
+		},
+	)
 
 	result := tool.Execute(context.Background(), map[string]any{
 		"jid": "15551234567@s.whatsapp.net",
@@ -167,9 +171,11 @@ func TestWhatsAppSendTool_Execute_MissingCallback(t *testing.T) {
 func TestWhatsAppSendTool_Execute_SendFailure(t *testing.T) {
 	tool := NewWhatsAppSendTool()
 	sendErr := errors.New("connection refused")
-	tool.SetSendCallback(func(ctx context.Context, channel, chatID, content, replyToMessageID string, mediaParts []bus.MediaPart) error {
-		return sendErr
-	})
+	tool.SetSendCallback(
+		func(ctx context.Context, channel, chatID, content, replyToMessageID string, mediaParts []bus.MediaPart) error {
+			return sendErr
+		},
+	)
 
 	result := tool.Execute(context.Background(), map[string]any{
 		"jid":     "15551234567@s.whatsapp.net",

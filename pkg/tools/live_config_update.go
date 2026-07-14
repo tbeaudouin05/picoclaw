@@ -14,7 +14,12 @@ import (
 type LiveConfigStore interface {
 	InitSchema(ctx context.Context) error
 	GetRecord(ctx context.Context, id string) (*liveconfig.Record, error)
-	UpdateRecord(ctx context.Context, id string, expectedVersion int64, configJSON json.RawMessage) (*liveconfig.Record, error)
+	UpdateRecord(
+		ctx context.Context,
+		id string,
+		expectedVersion int64,
+		configJSON json.RawMessage,
+	) (*liveconfig.Record, error)
 }
 
 type LiveConfigInitialRecordStore interface {
@@ -28,7 +33,12 @@ type LiveConfigUpdateTool struct {
 	protectedUpdatePaths []string
 }
 
-func NewLiveConfigUpdateTool(store LiveConfigStore, recordID string, adminChannels []string, protectedUpdatePaths []string) *LiveConfigUpdateTool {
+func NewLiveConfigUpdateTool(
+	store LiveConfigStore,
+	recordID string,
+	adminChannels []string,
+	protectedUpdatePaths []string,
+) *LiveConfigUpdateTool {
 	allowed := make(map[string]struct{}, len(adminChannels))
 	for _, channel := range adminChannels {
 		channel = strings.ToLower(strings.TrimSpace(channel))
@@ -36,23 +46,36 @@ func NewLiveConfigUpdateTool(store LiveConfigStore, recordID string, adminChanne
 			allowed[channel] = struct{}{}
 		}
 	}
-	return &LiveConfigUpdateTool{store: store, recordID: recordID, adminChannels: allowed, protectedUpdatePaths: normalizeDotPaths(protectedUpdatePaths)}
+	return &LiveConfigUpdateTool{
+		store:                store,
+		recordID:             recordID,
+		adminChannels:        allowed,
+		protectedUpdatePaths: normalizeDotPaths(protectedUpdatePaths),
+	}
 }
 
 func (t *LiveConfigUpdateTool) Name() string { return "update_live_config" }
 func (t *LiveConfigUpdateTool) Description() string {
 	return "Update the authoritative live configuration record using flat dot-path updates. Use this for deployment-specific live configuration changes. Do not edit setup files or cached local config copies."
 }
+
 func (t *LiveConfigUpdateTool) Parameters() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"expected_config_version": map[string]any{"type": "integer", "description": "Current config_version to update from. Use 0 to let the tool fetch the current version first."},
-			"updates":                 map[string]any{"type": "object", "description": "Flat dot-path updates, e.g. {\"behavior.tone\": \"friendly, concise...\"}. Nested object form is intentionally not supported."},
+			"expected_config_version": map[string]any{
+				"type":        "integer",
+				"description": "Current config_version to update from. Use 0 to let the tool fetch the current version first.",
+			},
+			"updates": map[string]any{
+				"type":        "object",
+				"description": "Flat dot-path updates, e.g. {\"behavior.tone\": \"friendly, concise...\"}. Nested object form is intentionally not supported.",
+			},
 		},
 		"required": []string{"updates"},
 	}
 }
+
 func (t *LiveConfigUpdateTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
 	if !t.channelAllowed(ToolChannel(ctx)) {
 		return ErrorResult("update_live_config is restricted to configured admin channels")
@@ -66,7 +89,9 @@ func (t *LiveConfigUpdateTool) Execute(ctx context.Context, args map[string]any)
 	}
 	for path, value := range updatesRaw {
 		if _, nested := value.(map[string]any); nested {
-			return ErrorResult(fmt.Sprintf("update %q uses nested object form; use flat dot-path keys such as behavior.tone", path))
+			return ErrorResult(
+				fmt.Sprintf("update %q uses nested object form; use flat dot-path keys such as behavior.tone", path),
+			)
 		}
 	}
 	if err := rejectProtectedDotPathUpdates(updatesRaw, t.protectedUpdatePaths); err != nil {
@@ -81,7 +106,9 @@ func (t *LiveConfigUpdateTool) Execute(ctx context.Context, args map[string]any)
 		if errors.As(err, &notFound) {
 			initialStore, ok := t.store.(LiveConfigInitialRecordStore)
 			if !ok {
-				return ErrorResult(fmt.Sprintf("live config record %q does not exist and this store cannot create it", t.recordID)).WithError(err)
+				return ErrorResult(
+					fmt.Sprintf("live config record %q does not exist and this store cannot create it", t.recordID),
+				).WithError(err)
 			}
 			current, err = initialStore.UpsertInitialRecord(ctx, t.recordID, json.RawMessage(`{}`))
 			if err != nil {
@@ -116,7 +143,13 @@ func (t *LiveConfigUpdateTool) Execute(ctx context.Context, args map[string]any)
 		return ErrorResult(fmt.Sprintf("failed to update live config: %v", err)).WithError(err)
 	}
 	sort.Strings(changed)
-	resp := map[string]any{"status": "ok", "record_id": updated.ID, "config_version": updated.ConfigVersion, "updated_at": updated.UpdatedAt, "changed_paths": changed}
+	resp := map[string]any{
+		"status":         "ok",
+		"record_id":      updated.ID,
+		"config_version": updated.ConfigVersion,
+		"updated_at":     updated.UpdatedAt,
+		"changed_paths":  changed,
+	}
 	data, _ := json.Marshal(resp)
 	return SilentResult(string(data))
 }
@@ -142,7 +175,11 @@ func rejectProtectedDotPathUpdates(updates map[string]any, protectedPaths []stri
 		}
 		for _, protectedPath := range protected {
 			if dotPathIntersects(updatePath, protectedPath) {
-				return fmt.Errorf("update %q is not allowed because it intersects protected config path %q", rawUpdatePath, protectedPath)
+				return fmt.Errorf(
+					"update %q is not allowed because it intersects protected config path %q",
+					rawUpdatePath,
+					protectedPath,
+				)
 			}
 		}
 	}

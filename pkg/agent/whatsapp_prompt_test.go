@@ -78,6 +78,9 @@ func TestBuildDynamicContext_LinkedPhone_NearCurrentSender(t *testing.T) {
 	afterHeader := senderIdx + len("## Current Sender")
 	between := got[afterHeader:phoneIdx]
 	if strings.Contains(between, "##") {
-		t.Errorf("expected phone line within Current Sender section, but found another section header between them: %q", between)
+		t.Errorf(
+			"expected phone line within Current Sender section, but found another section header between them: %q",
+			between,
+		)
 	}
 }

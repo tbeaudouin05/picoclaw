@@ -5,12 +5,12 @@ import "encoding/json"
 // LiveConfig configures an authoritative runtime JSON record loaded from an
 // external live-config store and injected into selected agent prompts.
 type LiveConfig struct {
-	Enabled              bool             `json:"enabled,omitempty" yaml:"-"`
-	RecordID             string           `json:"record_id,omitempty" yaml:"-"`
-	Driver               LiveConfigDriver `json:"driver,omitempty" yaml:"driver,omitempty"`
-	InjectChannels       []string         `json:"inject_channels,omitempty" yaml:"-"`
-	AdminUpdateChannels  []string         `json:"admin_update_channels,omitempty" yaml:"-"`
-	AdminUpdatesEnabled  bool             `json:"admin_updates_enabled,omitempty" yaml:"-"`
+	Enabled              bool             `json:"enabled,omitempty"                yaml:"-"`
+	RecordID             string           `json:"record_id,omitempty"              yaml:"-"`
+	Driver               LiveConfigDriver `json:"driver,omitempty"                 yaml:"driver,omitempty"`
+	InjectChannels       []string         `json:"inject_channels,omitempty"        yaml:"-"`
+	AdminUpdateChannels  []string         `json:"admin_update_channels,omitempty"  yaml:"-"`
+	AdminUpdatesEnabled  bool             `json:"admin_updates_enabled,omitempty"  yaml:"-"`
 	ProtectedUpdatePaths []string         `json:"protected_update_paths,omitempty" yaml:"-"`
 }
 
@@ -22,8 +22,8 @@ type LiveConfigDriver struct {
 
 // LiveConfigTursoDriver configures the Turso HTTP live-config driver.
 type LiveConfigTursoDriver struct {
-	URL       string           `json:"url,omitempty" yaml:"-"`
-	AuthToken SecureString     `json:"-" yaml:"auth_token,omitempty"`
+	URL       string           `json:"url,omitempty"    yaml:"-"`
+	AuthToken SecureString     `json:"-"                yaml:"auth_token,omitempty"`
 	Schema    LiveConfigSchema `json:"schema,omitempty" yaml:"-"`
 }
 
@@ -31,8 +31,8 @@ type LiveConfigTursoDriver struct {
 // optional and default to the canonical live_config/id/config_version/updated_at/
 // config_json shape, but exposing them now keeps future storage variation local.
 type LiveConfigSchema struct {
-	Table         string `json:"table,omitempty" yaml:"-"`
-	IDColumn      string `json:"id_column,omitempty" yaml:"-"`
+	Table         string `json:"table,omitempty"          yaml:"-"`
+	IDColumn      string `json:"id_column,omitempty"      yaml:"-"`
 	VersionColumn string `json:"version_column,omitempty" yaml:"-"`
 	UpdatedColumn string `json:"updated_column,omitempty" yaml:"-"`
 	PayloadColumn string `json:"payload_column,omitempty" yaml:"-"`

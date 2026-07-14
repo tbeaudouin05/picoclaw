@@ -69,7 +69,11 @@ func (s *TursoHTTPStore) Close() error { return nil }
 func (s *TursoHTTPStore) InitSchema(ctx context.Context) error {
 	sql := fmt.Sprintf(
 		"CREATE TABLE IF NOT EXISTS %s (%s TEXT PRIMARY KEY, %s INTEGER NOT NULL DEFAULT 1, %s INTEGER NOT NULL DEFAULT 0, %s TEXT NOT NULL)",
-		s.schema.Table, s.schema.IDColumn, s.schema.VersionColumn, s.schema.UpdatedColumn, s.schema.PayloadColumn,
+		s.schema.Table,
+		s.schema.IDColumn,
+		s.schema.VersionColumn,
+		s.schema.UpdatedColumn,
+		s.schema.PayloadColumn,
 	)
 	_, err := s.execute(ctx, sql)
 	return err
@@ -77,7 +81,15 @@ func (s *TursoHTTPStore) InitSchema(ctx context.Context) error {
 
 func (s *TursoHTTPStore) GetRecord(ctx context.Context, id string) (*Record, error) {
 	id = cleanID(id)
-	sql := fmt.Sprintf("SELECT %s, %s, %s, %s FROM %s WHERE %s = ?", s.schema.IDColumn, s.schema.VersionColumn, s.schema.UpdatedColumn, s.schema.PayloadColumn, s.schema.Table, s.schema.IDColumn)
+	sql := fmt.Sprintf(
+		"SELECT %s, %s, %s, %s FROM %s WHERE %s = ?",
+		s.schema.IDColumn,
+		s.schema.VersionColumn,
+		s.schema.UpdatedColumn,
+		s.schema.PayloadColumn,
+		s.schema.Table,
+		s.schema.IDColumn,
+	)
 	res, err := s.execute(ctx, sql, textArg(id))
 	if err != nil {
 		return nil, err
@@ -101,7 +113,12 @@ func (s *TursoHTTPStore) GetRecord(ctx context.Context, id string) (*Record, err
 	}, nil
 }
 
-func (s *TursoHTTPStore) UpdateRecord(ctx context.Context, id string, expectedVersion int64, configJSON json.RawMessage) (*Record, error) {
+func (s *TursoHTTPStore) UpdateRecord(
+	ctx context.Context,
+	id string,
+	expectedVersion int64,
+	configJSON json.RawMessage,
+) (*Record, error) {
 	id = cleanID(id)
 	configJSON = json.RawMessage(strings.TrimSpace(string(configJSON)))
 	if len(configJSON) == 0 || !json.Valid(configJSON) {
@@ -109,9 +126,22 @@ func (s *TursoHTTPStore) UpdateRecord(ctx context.Context, id string, expectedVe
 	}
 	sql := fmt.Sprintf(
 		"UPDATE %s SET %s = %s + 1, %s = ?, %s = ? WHERE %s = ? AND %s = ?",
-		s.schema.Table, s.schema.VersionColumn, s.schema.VersionColumn, s.schema.UpdatedColumn, s.schema.PayloadColumn, s.schema.IDColumn, s.schema.VersionColumn,
+		s.schema.Table,
+		s.schema.VersionColumn,
+		s.schema.VersionColumn,
+		s.schema.UpdatedColumn,
+		s.schema.PayloadColumn,
+		s.schema.IDColumn,
+		s.schema.VersionColumn,
 	)
-	res, err := s.execute(ctx, sql, intArg(time.Now().UnixMilli()), textArg(string(configJSON)), textArg(id), intArg(expectedVersion))
+	res, err := s.execute(
+		ctx,
+		sql,
+		intArg(time.Now().UnixMilli()),
+		textArg(string(configJSON)),
+		textArg(id),
+		intArg(expectedVersion),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -121,14 +151,23 @@ func (s *TursoHTTPStore) UpdateRecord(ctx context.Context, id string, expectedVe
 	return s.GetRecord(ctx, id)
 }
 
-func (s *TursoHTTPStore) UpsertInitialRecord(ctx context.Context, id string, configJSON json.RawMessage) (*Record, error) {
+func (s *TursoHTTPStore) UpsertInitialRecord(
+	ctx context.Context,
+	id string,
+	configJSON json.RawMessage,
+) (*Record, error) {
 	id = cleanID(id)
 	if len(configJSON) == 0 || !json.Valid(configJSON) {
 		return nil, fmt.Errorf("config_json must be valid JSON")
 	}
 	sql := fmt.Sprintf(
 		"INSERT INTO %s (%s, %s, %s, %s) VALUES (?, 1, ?, ?) ON CONFLICT(%s) DO NOTHING",
-		s.schema.Table, s.schema.IDColumn, s.schema.VersionColumn, s.schema.UpdatedColumn, s.schema.PayloadColumn, s.schema.IDColumn,
+		s.schema.Table,
+		s.schema.IDColumn,
+		s.schema.VersionColumn,
+		s.schema.UpdatedColumn,
+		s.schema.PayloadColumn,
+		s.schema.IDColumn,
 	)
 	_, err := s.execute(ctx, sql, textArg(id), intArg(time.Now().UnixMilli()), textArg(string(configJSON)))
 	if err != nil {
@@ -224,7 +263,9 @@ type pipelineResultResponse struct {
 }
 
 func (s *TursoHTTPStore) execute(ctx context.Context, sql string, args ...sqlArg) (*executeResult, error) {
-	reqBody := pipelineRequest{Requests: []pipelineOp{{Type: "execute", Stmt: &stmt{SQL: sql, Args: args}}, {Type: "close"}}}
+	reqBody := pipelineRequest{
+		Requests: []pipelineOp{{Type: "execute", Stmt: &stmt{SQL: sql, Args: args}}, {Type: "close"}},
+	}
 	body, err := json.Marshal(reqBody)
 	if err != nil {
 		return nil, err

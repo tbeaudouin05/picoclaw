@@ -1354,7 +1354,14 @@ func TestCronTool_AddJob_IsHiddenRejectsNonBool(t *testing.T) {
 func TestCronTool_UpdateJob_TogglesIsHidden(t *testing.T) {
 	tool := newTestCronTool(t)
 	ctx := WithToolContext(context.Background(), "cli", "direct")
-	job, err := tool.cronService.AddJob("job", cron.CronSchedule{Kind: "cron", Expr: "0 8 * * *"}, "message", "cli", "direct", 0)
+	job, err := tool.cronService.AddJob(
+		"job",
+		cron.CronSchedule{Kind: "cron", Expr: "0 8 * * *"},
+		"message",
+		"cli",
+		"direct",
+		0,
+	)
 	if err != nil {
 		t.Fatalf("AddJob() error: %v", err)
 	}
@@ -1480,7 +1487,14 @@ func TestCronTool_AddJob_MaxRuns(t *testing.T) {
 func TestCronTool_UpdateJob_MaxRuns(t *testing.T) {
 	tool := newTestCronTool(t)
 	ctx := WithToolContext(context.Background(), "cli", "direct")
-	job, err := tool.cronService.AddJob("job", cron.CronSchedule{Kind: "cron", Expr: "0 8 * * *"}, "message", "cli", "direct", 0)
+	job, err := tool.cronService.AddJob(
+		"job",
+		cron.CronSchedule{Kind: "cron", Expr: "0 8 * * *"},
+		"message",
+		"cli",
+		"direct",
+		0,
+	)
 	if err != nil {
 		t.Fatalf("AddJob() error: %v", err)
 	}

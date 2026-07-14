@@ -186,7 +186,14 @@ func registerSharedTools(
 		}
 
 		if liveConfigRuntime != nil && liveConfigRuntime.AdminUpdatesEnabled() {
-			agent.Tools.Register(tools.NewLiveConfigUpdateTool(liveConfigRuntime.Store(), liveConfigRuntime.RecordID(), liveConfigRuntime.AdminUpdateChannels(), cfg.LiveConfig.ProtectedUpdatePaths))
+			agent.Tools.Register(
+				tools.NewLiveConfigUpdateTool(
+					liveConfigRuntime.Store(),
+					liveConfigRuntime.RecordID(),
+					liveConfigRuntime.AdminUpdateChannels(),
+					cfg.LiveConfig.ProtectedUpdatePaths,
+				),
+			)
 		}
 
 		if cfg.Tools.IsToolEnabled("message") {

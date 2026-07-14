@@ -12,7 +12,11 @@ import (
 )
 
 // withStubs swaps the command seams for the duration of a test.
-func withStubs(t *testing.T, loader func() (*config.Config, error), runner func(context.Context, *config.Config, SendRequest) error) {
+func withStubs(
+	t *testing.T,
+	loader func() (*config.Config, error),
+	runner func(context.Context, *config.Config, SendRequest) error,
+) {
 	t.Helper()
 	origLoader := configLoader
 	origRunner := sendRunner
@@ -54,7 +58,8 @@ func TestCommandHappyPath(t *testing.T) {
 	if !loaded {
 		t.Error("config loader was not invoked")
 	}
-	if gotReq.Channel != config.ChannelWhatsAppNative || gotReq.To != "12025550100" || gotReq.Text != "your booking is confirmed" {
+	if gotReq.Channel != config.ChannelWhatsAppNative || gotReq.To != "12025550100" ||
+		gotReq.Text != "your booking is confirmed" {
 		t.Errorf("unexpected request passed to runner: %+v", gotReq)
 	}
 	if !strings.Contains(out, "sent:") {
@@ -86,7 +91,7 @@ func TestCommandReadsTextFile(t *testing.T) {
 
 	file := t.TempDir() + "/message.txt"
 	body := "your booking is confirmed from file"
-	if err := os.WriteFile(file, []byte(body), 0600); err != nil {
+	if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := runCommand(t, "--to", "123", "--text-file", file); err != nil {
@@ -123,7 +128,7 @@ func TestCommandRejectsTextAndTextFileBeforeConfigLoad(t *testing.T) {
 	)
 
 	file := t.TempDir() + "/message.txt"
-	if err := os.WriteFile(file, []byte("body"), 0600); err != nil {
+	if err := os.WriteFile(file, []byte("body"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, err := runCommand(t, "--to", "123", "--text", "body", "--text-file", file)

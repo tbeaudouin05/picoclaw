@@ -34,21 +34,21 @@ func init() {
 // Config is the current config structure with version support.
 type Config struct {
 	// Config schema version for migration.
-	Version    int             `json:"version"             yaml:"-"`
-	Isolation  IsolationConfig `json:"isolation,omitempty" yaml:"-"`
-	Agents     AgentsConfig    `json:"agents"              yaml:"-"`
-	Session    SessionConfig   `json:"session,omitempty"   yaml:"-"`
-	Evolution  EvolutionConfig `json:"evolution,omitempty" yaml:"-"`
-	Channels   ChannelsConfig  `json:"channel_list"        yaml:"channel_list"`
-	ModelList  SecureModelList `json:"model_list"          yaml:"model_list"` // New model-centric provider configuration
-	Gateway    GatewayConfig   `json:"gateway"             yaml:"-"`
-	Events     EventsConfig    `json:"events,omitempty"    yaml:"-"`
-	Hooks      HooksConfig     `json:"hooks,omitempty"         yaml:"-"`
-	LiveConfig LiveConfig      `json:"live_config,omitempty"    yaml:"live_config,omitempty"`
-	Tools      ToolsConfig     `json:"tools"                   yaml:",inline"`
-	Heartbeat  HeartbeatConfig `json:"heartbeat"               yaml:"-"`
-	Devices    DevicesConfig   `json:"devices"                 yaml:"-"`
-	Voice      VoiceConfig     `json:"voice"                   yaml:"-"`
+	Version    int             `json:"version"               yaml:"-"`
+	Isolation  IsolationConfig `json:"isolation,omitempty"   yaml:"-"`
+	Agents     AgentsConfig    `json:"agents"                yaml:"-"`
+	Session    SessionConfig   `json:"session,omitempty"     yaml:"-"`
+	Evolution  EvolutionConfig `json:"evolution,omitempty"   yaml:"-"`
+	Channels   ChannelsConfig  `json:"channel_list"          yaml:"channel_list"`
+	ModelList  SecureModelList `json:"model_list"            yaml:"model_list"` // New model-centric provider configuration
+	Gateway    GatewayConfig   `json:"gateway"               yaml:"-"`
+	Events     EventsConfig    `json:"events,omitempty"      yaml:"-"`
+	Hooks      HooksConfig     `json:"hooks,omitempty"       yaml:"-"`
+	LiveConfig LiveConfig      `json:"live_config,omitempty" yaml:"live_config,omitempty"`
+	Tools      ToolsConfig     `json:"tools"                 yaml:",inline"`
+	Heartbeat  HeartbeatConfig `json:"heartbeat"             yaml:"-"`
+	Devices    DevicesConfig   `json:"devices"               yaml:"-"`
+	Voice      VoiceConfig     `json:"voice"                 yaml:"-"`
 	// BuildInfo contains build-time version information
 	BuildInfo BuildInfo `json:"build_info,omitempty" yaml:"-"`
 
@@ -570,7 +570,7 @@ type WhatsAppSettings struct {
 	BridgeURL                  string `json:"bridge_url"                     yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_BRIDGE_URL"`
 	UseNative                  bool   `json:"use_native"                     yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_USE_NATIVE"`
 	SessionStorePath           string `json:"session_store_path"             yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_SESSION_STORE_PATH"`
-	GroupTriggerName           string `json:"group_trigger_name"            yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_GROUP_TRIGGER_NAME"`
+	GroupTriggerName           string `json:"group_trigger_name"             yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_GROUP_TRIGGER_NAME"`
 	RequireTriggerNameInDirect bool   `json:"require_trigger_name_in_direct" yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_REQUIRE_TRIGGER_NAME_IN_DIRECT"`
 	AllowInitialDirectReply    bool   `json:"allow_initial_direct_reply"     yaml:"-" env:"PICOCLAW_CHANNELS_WHATSAPP_ALLOW_INITIAL_DIRECT_REPLY"`
 }
@@ -795,9 +795,9 @@ type DevicesConfig struct {
 }
 
 type VoiceConfig struct {
-	ModelName         string       `json:"model_name,omitempty"         env:"PICOCLAW_VOICE_MODEL_NAME"`
-	TTSModelName      string       `json:"tts_model_name,omitempty"     env:"PICOCLAW_VOICE_TTS_MODEL_NAME"`
-	EchoTranscription bool         `json:"echo_transcription"           env:"PICOCLAW_VOICE_ECHO_TRANSCRIPTION"`
+	ModelName         string       `json:"model_name,omitempty"        env:"PICOCLAW_VOICE_MODEL_NAME"`
+	TTSModelName      string       `json:"tts_model_name,omitempty"    env:"PICOCLAW_VOICE_TTS_MODEL_NAME"`
+	EchoTranscription bool         `json:"echo_transcription"          env:"PICOCLAW_VOICE_ECHO_TRANSCRIPTION"`
 	ElevenLabsAPIKey  SecureString `json:"elevenlabs_api_key,omitzero" env:"PICOCLAW_VOICE_ELEVENLABS_API_KEY"`
 }
 
@@ -1095,7 +1095,7 @@ type CronToolsConfig struct {
 	// MaxConcurrent caps how many cron jobs may execute simultaneously across
 	// the whole scheduler. 0 or negative clamps to 1 (one at a time). Individual
 	// jobs still never overlap with themselves regardless of this setting.
-	MaxConcurrent int `                                    json:"max_concurrent"        env:"PICOCLAW_TOOLS_CRON_MAX_CONCURRENT"`
+	MaxConcurrent int `json:"max_concurrent" env:"PICOCLAW_TOOLS_CRON_MAX_CONCURRENT"`
 	// RemoteCommandAllowlist lets non-internal channels schedule a fixed set of
 	// shell commands without lifting the general restriction on arbitrary
 	// commands. Each entry binds an id and an exact command to one or more

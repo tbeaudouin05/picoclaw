@@ -11,7 +11,11 @@ func ApplyDotPathUpdates(base json.RawMessage, updates map[string]any) (json.Raw
 	return ApplyDotPathChanges(base, updates, nil)
 }
 
-func ApplyDotPathChanges(base json.RawMessage, updates map[string]any, deletes []string) (json.RawMessage, []string, error) {
+func ApplyDotPathChanges(
+	base json.RawMessage,
+	updates map[string]any,
+	deletes []string,
+) (json.RawMessage, []string, error) {
 	if !json.Valid(base) {
 		return nil, nil, fmt.Errorf("base config is not valid JSON")
 	}
