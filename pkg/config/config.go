@@ -57,13 +57,14 @@ type Config struct {
 }
 
 type EvolutionConfig struct {
-	Enabled         bool     `json:"enabled,omitempty"`
-	Mode            string   `json:"mode,omitempty"`
-	StateDir        string   `json:"state_dir,omitempty"`
-	MinTaskCount    int      `json:"min_task_count,omitempty"`
-	MinSuccessRatio float64  `json:"min_success_ratio,omitempty"`
-	ColdPathTrigger string   `json:"cold_path_trigger,omitempty"`
-	ColdPathTimes   []string `json:"cold_path_times,omitempty"`
+	Enabled                  bool     `json:"enabled,omitempty"`
+	Mode                     string   `json:"mode,omitempty"`
+	StateDir                 string   `json:"state_dir,omitempty"`
+	MinTaskCount             int      `json:"min_task_count,omitempty"`
+	MinSuccessRatio          float64  `json:"min_success_ratio,omitempty"`
+	TaskRecordRetentionHours int      `json:"task_record_retention_hours,omitempty"`
+	ColdPathTrigger          string   `json:"cold_path_trigger,omitempty"`
+	ColdPathTimes            []string `json:"cold_path_times,omitempty"`
 	// Deprecated: use MinTaskCount.
 	MinCaseCount int `json:"min_case_count,omitempty"`
 	// Deprecated: use MinSuccessRatio.
@@ -72,21 +73,23 @@ type EvolutionConfig struct {
 
 func (c EvolutionConfig) MarshalJSON() ([]byte, error) {
 	out := struct {
-		Enabled         bool     `json:"enabled,omitempty"`
-		Mode            string   `json:"mode,omitempty"`
-		StateDir        string   `json:"state_dir,omitempty"`
-		MinTaskCount    int      `json:"min_task_count,omitempty"`
-		MinSuccessRatio float64  `json:"min_success_ratio,omitempty"`
-		ColdPathTrigger string   `json:"cold_path_trigger,omitempty"`
-		ColdPathTimes   []string `json:"cold_path_times,omitempty"`
+		Enabled                  bool     `json:"enabled,omitempty"`
+		Mode                     string   `json:"mode,omitempty"`
+		StateDir                 string   `json:"state_dir,omitempty"`
+		MinTaskCount             int      `json:"min_task_count,omitempty"`
+		MinSuccessRatio          float64  `json:"min_success_ratio,omitempty"`
+		TaskRecordRetentionHours int      `json:"task_record_retention_hours,omitempty"`
+		ColdPathTrigger          string   `json:"cold_path_trigger,omitempty"`
+		ColdPathTimes            []string `json:"cold_path_times,omitempty"`
 	}{
-		Enabled:         c.Enabled,
-		Mode:            c.Mode,
-		StateDir:        c.StateDir,
-		MinTaskCount:    c.EffectiveMinTaskCount(),
-		MinSuccessRatio: c.EffectiveMinSuccessRatio(),
-		ColdPathTrigger: strings.TrimSpace(c.ColdPathTrigger),
-		ColdPathTimes:   c.EffectiveColdPathTimes(),
+		Enabled:                  c.Enabled,
+		Mode:                     c.Mode,
+		StateDir:                 c.StateDir,
+		MinTaskCount:             c.EffectiveMinTaskCount(),
+		MinSuccessRatio:          c.EffectiveMinSuccessRatio(),
+		TaskRecordRetentionHours: c.EffectiveTaskRecordRetentionHours(),
+		ColdPathTrigger:          strings.TrimSpace(c.ColdPathTrigger),
+		ColdPathTimes:            c.EffectiveColdPathTimes(),
 	}
 	if !out.Enabled {
 		out.Mode = ""
@@ -158,6 +161,13 @@ func (c EvolutionConfig) EffectiveMinSuccessRatio() float64 {
 		return c.MinSuccessRate
 	}
 	return 0.7
+}
+
+func (c EvolutionConfig) EffectiveTaskRecordRetentionHours() int {
+	if c.TaskRecordRetentionHours > 0 {
+		return c.TaskRecordRetentionHours
+	}
+	return 720
 }
 
 func (c EvolutionConfig) EffectiveColdPathTimes() []string {

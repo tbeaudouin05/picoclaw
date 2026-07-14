@@ -303,11 +303,19 @@ func TestDefaultConfig_EvolutionDefaults(t *testing.T) {
 	assert.Equal(t, "", cfg.Evolution.StateDir)
 	assert.Equal(t, 2, cfg.Evolution.MinTaskCount)
 	assert.Equal(t, 0.7, cfg.Evolution.MinSuccessRatio)
+	assert.Equal(t, 720, cfg.Evolution.TaskRecordRetentionHours)
 	assert.Equal(t, "after_turn", cfg.Evolution.ColdPathTrigger)
 	assert.Equal(t, 2, cfg.Evolution.EffectiveMinTaskCount())
 	assert.Equal(t, 0.7, cfg.Evolution.EffectiveMinSuccessRatio())
+	assert.Equal(t, 720, cfg.Evolution.EffectiveTaskRecordRetentionHours())
 	assert.False(t, cfg.Evolution.RunsColdPathAutomatically())
 	assert.False(t, cfg.Evolution.AutoAppliesDrafts())
+}
+
+func TestEvolutionConfig_EffectiveTaskRecordRetentionHours(t *testing.T) {
+	assert.Equal(t, 720, (EvolutionConfig{}).EffectiveTaskRecordRetentionHours())
+	assert.Equal(t, 48, (EvolutionConfig{TaskRecordRetentionHours: 48}).EffectiveTaskRecordRetentionHours())
+	assert.Equal(t, 720, (EvolutionConfig{TaskRecordRetentionHours: -1}).EffectiveTaskRecordRetentionHours())
 }
 
 func TestEvolutionConfig_EffectiveMode(t *testing.T) {
