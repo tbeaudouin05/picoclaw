@@ -65,6 +65,21 @@ jobs:
       - name: Run go test
         run: go test -tags goolm,stdjson ./...
 
+  whatsapp_native_client_version:
+    name: Native WhatsApp Client Version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Run native WhatsApp client-version regression test
+        run: go test -tags whatsapp_native ./pkg/channels/whatsapp_native -run '^TestWhatsmeowDefaultClientVersionIsNotKnownOutdated$'
+
   integration:
     name: Integration Tests
     runs-on: ubuntu-latest
