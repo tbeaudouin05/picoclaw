@@ -60,6 +60,36 @@ func TestStore_AppendLearningRecordsPersistsCaseAndRule(t *testing.T) {
 	}
 }
 
+func TestStore_RepairOversizedPartialTailPreservesPrecedingRecord(t *testing.T) {
+	root := t.TempDir()
+	paths := evolution.NewPaths(root, "")
+	store := evolution.NewStore(paths)
+	first := evolution.LearningRecord{ID: "first", Kind: evolution.RecordKindTask, CreatedAt: time.Unix(1700000000, 0).UTC()}
+	line, err := json.Marshal(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(paths.RootDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := append(append(line, '\n'), []byte(`{"id":"partial","summary":"`)...)
+	data = append(data, strings.Repeat("x", 2*1024*1024)...)
+	if err := os.WriteFile(paths.TaskRecords, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	second := evolution.LearningRecord{ID: "second", Kind: evolution.RecordKindTask, CreatedAt: time.Unix(1700000100, 0).UTC()}
+	if err := store.AppendTaskRecord(context.Background(), second); err != nil {
+		t.Fatalf("AppendTaskRecord: %v", err)
+	}
+	records, err := store.LoadTaskRecords()
+	if err != nil {
+		t.Fatalf("LoadTaskRecords: %v", err)
+	}
+	if len(records) != 2 || records[0].ID != "first" || records[1].ID != "second" {
+		t.Fatalf("records = %+v, want preserved first record followed by second", records)
+	}
+}
+
 func TestStore_LoadTaskRecordsMergesLegacyWhenSplitFileExists(t *testing.T) {
 	root := t.TempDir()
 	paths := evolution.NewPaths(root, "")
@@ -434,5 +464,37 @@ func TestStore_LoadLearningRecordsIgnoresTruncatedTrailingLine(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "\"broken\"") {
 		t.Fatalf("expected test fixture to include broken trailing line")
+	}
+}
+
+func TestStore_AppendRepairsTruncatedTrailingLine(t *testing.T) {
+	root := t.TempDir()
+	paths := evolution.NewPaths(root, "")
+	store := evolution.NewStore(paths)
+	first := evolution.LearningRecord{ID: "first", Kind: evolution.RecordKindCase, WorkspaceID: "ws", Summary: "first"}
+	second := evolution.LearningRecord{ID: "second", Kind: evolution.RecordKindCase, WorkspaceID: "ws", Summary: "second"}
+	if err := store.AppendTaskRecord(context.Background(), first); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(paths.TaskRecords, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.WriteString(`{"id":"partial"`); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendTaskRecord(context.Background(), second); err != nil {
+		t.Fatalf("append after partial tail: %v", err)
+	}
+	loaded, err := store.LoadTaskRecords()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded) != 2 || loaded[0].ID != "first" || loaded[1].ID != "second" {
+		t.Fatalf("loaded records = %+v, want first and second", loaded)
 	}
 }

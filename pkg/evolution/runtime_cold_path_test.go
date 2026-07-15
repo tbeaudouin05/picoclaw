@@ -1117,8 +1117,8 @@ func TestRuntime_RunColdPathOnce_UsesGeneratorFactoryWorkspaceForFallback(t *tes
 	if len(drafts) != 1 {
 		t.Fatalf("len(drafts) = %d, want 1", len(drafts))
 	}
-	if drafts[0].ChangeKind != evolution.ChangeKindAppend {
-		t.Fatalf("ChangeKind = %q, want %q", drafts[0].ChangeKind, evolution.ChangeKindAppend)
+	if drafts[0].ChangeKind != evolution.ChangeKindReplace {
+		t.Fatalf("ChangeKind = %q, want %q", drafts[0].ChangeKind, evolution.ChangeKindReplace)
 	}
 	if !strings.Contains(drafts[0].BodyOrPatch, "## Learned Evolution") {
 		t.Fatalf("BodyOrPatch = %q, want appended learned evolution section", drafts[0].BodyOrPatch)

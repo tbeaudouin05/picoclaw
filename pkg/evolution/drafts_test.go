@@ -150,7 +150,7 @@ func TestDefaultDraftGenerator_DoesNotInferNumericOnlyTargetFromSummary(t *testi
 	}
 }
 
-func TestDefaultDraftGenerator_UsesAppendWhenExtendingExistingSkill(t *testing.T) {
+func TestDefaultDraftGenerator_UsesCompleteReplacementWhenExtendingExistingSkill(t *testing.T) {
 	workspace := t.TempDir()
 	generator := evolution.NewDefaultDraftGenerator(workspace)
 
@@ -174,11 +174,14 @@ func TestDefaultDraftGenerator_UsesAppendWhenExtendingExistingSkill(t *testing.T
 	if err != nil {
 		t.Fatalf("GenerateDraft: %v", err)
 	}
-	if draft.ChangeKind != evolution.ChangeKindAppend {
-		t.Fatalf("ChangeKind = %q, want append", draft.ChangeKind)
+	if draft.ChangeKind != evolution.ChangeKindReplace {
+		t.Fatalf("ChangeKind = %q, want replace", draft.ChangeKind)
 	}
-	if strings.Contains(draft.BodyOrPatch, "---\nname: weather") {
-		t.Fatalf("BodyOrPatch should contain only appended section, got full document:\n%s", draft.BodyOrPatch)
+	if !strings.Contains(draft.BodyOrPatch, "---\nname: weather") {
+		t.Fatalf("BodyOrPatch should be a complete skill document:\n%s", draft.BodyOrPatch)
+	}
+	if !strings.Contains(draft.BodyOrPatch, "Use city names.") {
+		t.Fatalf("BodyOrPatch lost existing guidance:\n%s", draft.BodyOrPatch)
 	}
 	if !strings.Contains(draft.BodyOrPatch, "## Learned Evolution") {
 		t.Fatalf("BodyOrPatch = %q, want learned evolution section", draft.BodyOrPatch)
@@ -188,6 +191,33 @@ func TestDefaultDraftGenerator_UsesAppendWhenExtendingExistingSkill(t *testing.T
 	}
 	if len(draft.PreferredEntryPath) != 1 || draft.PreferredEntryPath[0] != "weather" {
 		t.Fatalf("PreferredEntryPath = %v, want [weather]", draft.PreferredEntryPath)
+	}
+}
+
+func TestDefaultDraftGenerator_ReplacesPriorLearnedEvolutionSection(t *testing.T) {
+	workspace := t.TempDir()
+	generator := evolution.NewDefaultDraftGenerator(workspace)
+	existingPath := filepath.Join(workspace, "skills", "weather", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(existingPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	existing := "---\nname: weather\ndescription: weather helper\n---\n# Weather\n## Safety\nNever expose credentials.\n\n## Learned Evolution\n- Summary: obsolete pattern\n"
+	if err := os.WriteFile(existingPath, []byte(existing), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	draft, err := generator.GenerateDraft(context.Background(), evolution.LearningRecord{
+		Summary: "prefer native-name lookup", WinningPath: []string{"weather"},
+	}, []skills.SkillInfo{{Name: "weather", Path: existingPath}})
+	if err != nil {
+		t.Fatalf("GenerateDraft: %v", err)
+	}
+	if strings.Count(draft.BodyOrPatch, "## Learned Evolution") != 1 {
+		t.Fatalf("replacement accumulated learned sections:\n%s", draft.BodyOrPatch)
+	}
+	for _, want := range []string{"Never expose credentials.", "prefer native-name lookup"} {
+		if !strings.Contains(draft.BodyOrPatch, want) {
+			t.Fatalf("replacement missing %q:\n%s", want, draft.BodyOrPatch)
+		}
 	}
 }
 
@@ -217,16 +247,16 @@ func TestLLMDraftGenerator_BuildPromptIncludesLateAddedSkillHint(t *testing.T) {
 	}
 
 	prompt := provider.lastMessages[1].Content
-	if !strings.Contains(prompt, "Late-added successful skills: weather") {
+	if !strings.Contains(prompt, `"late_added_skills":`) || !strings.Contains(prompt, `"weather"`) {
 		t.Fatalf("prompt missing late-added skill hint:\n%s", prompt)
 	}
-	if !strings.Contains(prompt, "Final snapshot trigger: context_retry_rebuild") {
+	if !strings.Contains(prompt, `"final_snapshot_trigger": "context_retry_rebuild"`) {
 		t.Fatalf("prompt missing final snapshot trigger:\n%s", prompt)
 	}
-	if !strings.Contains(prompt, "Prefer creating a new combined shortcut skill") {
+	if !strings.Contains(prompt, "prefer a new combined shortcut skill") {
 		t.Fatalf("prompt missing combined skill guidance:\n%s", prompt)
 	}
-	if !strings.Contains(prompt, "Suggested target skill name:") {
+	if !strings.Contains(prompt, `"inferred_target": "weather-native-name-path-shortcut"`) {
 		t.Fatalf("prompt missing suggested target skill name:\n%s", prompt)
 	}
 }

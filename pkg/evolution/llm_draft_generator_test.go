@@ -162,7 +162,7 @@ func TestLLMDraftGenerator_BuildPromptIncludesMatchedSkillContent(t *testing.T) 
 		t.Fatal("expected user prompt")
 	}
 	prompt := provider.lastMessages[1].Content
-	if !strings.Contains(prompt, "Matched skill content excerpts") {
+	if !strings.Contains(prompt, `"existing_skills":`) {
 		t.Fatalf("prompt missing content section:\n%s", prompt)
 	}
 	if !strings.Contains(prompt, "Add 31 to the input") {
@@ -237,11 +237,11 @@ func TestLLMDraftGenerator_BuildPromptIncludesTaskEvidence(t *testing.T) {
 	}
 	prompt := provider.lastMessages[1].Content
 	for _, want := range []string{
-		"Source task evidence",
+		`"tasks":`,
 		"main-turn-6",
 		"调用三一定理计算100",
 		"100 + 31 = 131",
-		"three-one-theorem -> four-two-theorem -> five-three-theorem",
+		`"three-one-theorem"`,
 		"directly usable by a future agent",
 	} {
 		if !strings.Contains(prompt, want) {

@@ -7,5 +7,5 @@ func NewDraftGeneratorForWorkspace(workspace string, provider providers.LLMProvi
 	if provider == nil {
 		return fallback
 	}
-	return NewLLMDraftGenerator(provider, modelID, fallback)
+	return NewLLMDraftGeneratorWithWorkspace(workspace, provider, modelID, fallback)
 }

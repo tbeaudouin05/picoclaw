@@ -61,7 +61,8 @@ func ValidateDraft(draft SkillDraft) []string {
 }
 
 type DefaultDraftGenerator struct {
-	loader *skills.SkillsLoader
+	loader    *skills.SkillsLoader
+	workspace string
 }
 
 func NewDefaultDraftGenerator(workspace string) *DefaultDraftGenerator {
@@ -76,7 +77,8 @@ func NewDefaultDraftGenerator(workspace string) *DefaultDraftGenerator {
 
 	globalSkillsDir := filepath.Join(config.GetHome(), "skills")
 	return &DefaultDraftGenerator{
-		loader: skills.NewSkillsLoader(workspace, globalSkillsDir, builtinSkillsDir),
+		loader:    skills.NewSkillsLoader(workspace, globalSkillsDir, builtinSkillsDir),
+		workspace: workspace,
 	}
 }
 
@@ -100,7 +102,7 @@ func (g *DefaultDraftGenerator) GenerateDraftWithEvidence(
 		target = "learned-skill"
 	}
 
-	_, hasExisting, err := g.loadBaseSkillContent(target, matches)
+	baseSkill, hasExisting, err := g.loadBaseSkillContent(target, matches)
 	if err != nil {
 		return SkillDraft{}, err
 	}
@@ -113,8 +115,8 @@ func (g *DefaultDraftGenerator) GenerateDraftWithEvidence(
 	changeKind := ChangeKindCreate
 	body := g.buildNewSkillBody(target, rule, evidence, matches)
 	if hasExisting {
-		changeKind = ChangeKindAppend
-		body = g.buildAppendBody(rule, evidence, matches)
+		changeKind = ChangeKindReplace
+		body = g.buildReplacementBody(baseSkill, rule, evidence, matches)
 	}
 
 	return SkillDraft{
@@ -390,12 +392,13 @@ func (g *DefaultDraftGenerator) buildNewSkillBody(
 	return buildSkillDocument(target, description, body)
 }
 
-func (g *DefaultDraftGenerator) buildAppendBody(
+func (g *DefaultDraftGenerator) buildReplacementBody(
+	baseSkill string,
 	rule LearningRecord,
 	evidence DraftEvidence,
 	matches []skills.SkillInfo,
 ) string {
-	return strings.Join([]string{
+	learnedSection := strings.Join([]string{
 		"## Learned Evolution",
 		fmt.Sprintf("- Summary: %s", strings.TrimSpace(rule.Summary)),
 		fmt.Sprintf("- Learned pattern: %s", g.learnedPatternLine(rule)),
@@ -407,6 +410,34 @@ func (g *DefaultDraftGenerator) buildAppendBody(
 		synthesizedComponentBreakdown(matches),
 		"",
 	}, "\n")
+
+	// Return a complete replacement document. Remove the prior deterministic
+	// section, if present, so repeated refinements replace learned guidance
+	// instead of accumulating an append-only history.
+	baseSkill = removeMarkdownSection(baseSkill, "Learned Evolution")
+	return strings.TrimRight(baseSkill, "\n") + "\n\n" + learnedSection
+}
+
+func removeMarkdownSection(document, heading string) string {
+	lines := strings.Split(strings.ReplaceAll(document, "\r\n", "\n"), "\n")
+	start := -1
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "## "+heading {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return document
+	}
+	end := len(lines)
+	for i := start + 1; i < len(lines); i++ {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "## ") {
+			end = i
+			break
+		}
+	}
+	return strings.TrimRight(strings.Join(append(lines[:start], lines[end:]...), "\n"), "\n")
 }
 
 func buildSkillDocument(name, description, body string) string {

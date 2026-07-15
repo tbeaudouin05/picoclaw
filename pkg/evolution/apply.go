@@ -51,12 +51,30 @@ func (a *Applier) applyDraftWithRollback(
 	if validateErr := skills.ValidateSkillName(draft.TargetSkillName); validateErr != nil {
 		return nil, validateErr
 	}
+	skillPath := filepath.Join(workspace, "skills", draft.TargetSkillName, "SKILL.md")
+	if draft.ChangeKind == ChangeKindAppend || draft.ChangeKind == ChangeKindMerge {
+		if _, statErr := os.Stat(skillPath); statErr == nil {
+			return nil, fmt.Errorf(
+				"cannot %s existing skill %q: evolution updates require a complete replacement",
+				draft.ChangeKind,
+				draft.TargetSkillName,
+			)
+		} else if !os.IsNotExist(statErr) {
+			return nil, statErr
+		}
+	}
 
 	existingBody, backupPath, hadOriginal, err := a.backupCurrentSkill(workspace, draft.TargetSkillName)
 	if err != nil {
 		return nil, err
 	}
-
+	if hadOriginal && (draft.ChangeKind == ChangeKindAppend || draft.ChangeKind == ChangeKindMerge) {
+		return nil, fmt.Errorf(
+			"cannot %s existing skill %q: evolution updates require a complete replacement",
+			draft.ChangeKind,
+			draft.TargetSkillName,
+		)
+	}
 	renderedBody, err := renderAppliedBody(draft, existingBody, hadOriginal)
 	if err != nil {
 		return nil, err
@@ -69,13 +87,17 @@ func (a *Applier) applyDraftWithRollback(
 	); err != nil {
 		return nil, err
 	}
+	if hadOriginal && draft.ChangeKind == ChangeKindReplace {
+		if err := validateHolisticReplacement(existingBody, renderedBody); err != nil {
+			return nil, fmt.Errorf("unsafe incomplete replacement: %w", err)
+		}
+	}
 
 	skillDir := filepath.Join(workspace, "skills", draft.TargetSkillName)
 	if mkdirErr := os.MkdirAll(skillDir, 0o755); mkdirErr != nil {
 		return nil, mkdirErr
 	}
 
-	skillPath := filepath.Join(skillDir, "SKILL.md")
 	if err := fileutil.WriteFileAtomic(skillPath, []byte(renderedBody), 0o644); err != nil {
 		return nil, err
 	}
@@ -83,6 +105,171 @@ func (a *Applier) applyDraftWithRollback(
 	return func() error {
 		return a.rollbackSkill(skillPath, backupPath, hadOriginal)
 	}, nil
+}
+
+func validateHolisticReplacement(existing, candidate string) error {
+	existingFM, existingMD := splitSkillFrontmatter(existing)
+	candidateFM, candidateMD := splitSkillFrontmatter(candidate)
+	existingFields, err := parseSkillFrontmatterFields(existingFM, true)
+	if err != nil {
+		return fmt.Errorf("existing frontmatter: %w", err)
+	}
+	candidateFields, err := parseSkillFrontmatterFields(candidateFM, true)
+	if err != nil {
+		return fmt.Errorf("candidate frontmatter: %w", err)
+	}
+	for key := range existingFields {
+		if _, ok := candidateFields[key]; !ok {
+			return fmt.Errorf("required frontmatter field %q was removed", key)
+		}
+	}
+	visibleExisting := visibleOperationalMarkdown(existingMD)
+	visibleCandidate := visibleOperationalMarkdown(candidateMD)
+	existingH1 := firstMarkdownHeading(visibleExisting, "# ")
+	candidateH1 := firstMarkdownHeading(visibleCandidate, "# ")
+	if existingH1 != "" && !strings.EqualFold(existingH1, candidateH1) {
+		return fmt.Errorf("root heading %q was not preserved", existingH1)
+	}
+	oldLen, newLen := len(strings.TrimSpace(existingMD)), len(strings.TrimSpace(candidateMD))
+	if oldLen >= 300 && newLen < oldLen*60/100 {
+		return fmt.Errorf("candidate is an obvious minimal replacement (%d bytes versus %d)", newLen, oldLen)
+	}
+	for _, heading := range substantialSectionHeadings(visibleExisting) {
+		if !hasMarkdownHeading(visibleCandidate, heading) {
+			return fmt.Errorf("substantial section %q was removed", heading)
+		}
+	}
+	candidateNorm := normalizeConstraintText(visibleCandidate)
+	for _, constraint := range safetyConstraintLines(visibleExisting) {
+		if !strings.Contains(candidateNorm, normalizeConstraintText(constraint)) {
+			return fmt.Errorf("safety constraint was removed: %q", trimAtReadableBoundary(strings.TrimSpace(constraint), 120))
+		}
+	}
+	return nil
+}
+
+// visibleOperationalMarkdown removes content that is not rendered as operative
+// prose. Safety requirements preserved only in comments or examples do not
+// protect users of the skill and therefore cannot satisfy replacement checks.
+func visibleOperationalMarkdown(md string) string {
+	lines := strings.Split(md, "\n")
+	visible := make([]string, 0, len(lines))
+	inFence := false
+	fenceChar := byte(0)
+	fenceLen := 0
+	inComment := false
+	for _, line := range lines {
+		trimmed := strings.TrimLeft(line, " \t")
+		if !inComment {
+			if char, count := markdownFence(trimmed); count >= 3 {
+				if !inFence {
+					inFence, fenceChar, fenceLen = true, char, count
+					continue
+				}
+				if char == fenceChar && count >= fenceLen {
+					inFence = false
+				}
+				continue
+			}
+		}
+		if inFence {
+			continue
+		}
+		var out strings.Builder
+		for len(line) > 0 {
+			if inComment {
+				end := strings.Index(line, "-->")
+				if end < 0 {
+					line = ""
+					break
+				}
+				line, inComment = line[end+3:], false
+				continue
+			}
+			start := strings.Index(line, "<!--")
+			if start < 0 {
+				out.WriteString(line)
+				break
+			}
+			out.WriteString(line[:start])
+			line, inComment = line[start+4:], true
+		}
+		visible = append(visible, out.String())
+	}
+	return strings.Join(visible, "\n")
+}
+
+func markdownFence(line string) (byte, int) {
+	if line == "" || (line[0] != '`' && line[0] != '~') {
+		return 0, 0
+	}
+	char := line[0]
+	count := 0
+	for count < len(line) && line[count] == char {
+		count++
+	}
+	return char, count
+}
+
+func firstMarkdownHeading(md, prefix string) string {
+	for _, line := range strings.Split(md, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, prefix) && !strings.HasPrefix(line, prefix+"#") {
+			return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		}
+	}
+	return ""
+}
+func hasMarkdownHeading(md, heading string) bool {
+	for _, line := range strings.Split(md, "\n") {
+		if strings.EqualFold(strings.TrimSpace(strings.TrimLeft(line, "#")), heading) && strings.HasPrefix(strings.TrimSpace(line), "##") {
+			return true
+		}
+	}
+	return false
+}
+func substantialSectionHeadings(md string) []string {
+	lines := strings.Split(md, "\n")
+	out := []string{}
+	heading := ""
+	size := 0
+	flush := func() {
+		if heading != "" && size >= 160 {
+			out = append(out, heading)
+		}
+	}
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "## ") {
+			flush()
+			heading = strings.TrimSpace(strings.TrimPrefix(trimmed, "## "))
+			size = 0
+		} else if heading != "" {
+			size += len(trimmed)
+		}
+	}
+	flush()
+	return out
+}
+func safetyConstraintLines(md string) []string {
+	keywords := []string{"must ", "must not", "never ", "do not", "don't ", "only ", "avoid ", "required", "ensure ", "warning", "caution", "safety", "permission", "secret", "credential"}
+	out := []string{}
+	for _, line := range strings.Split(md, "\n") {
+		plain := strings.ToLower(strings.TrimSpace(strings.TrimLeft(line, "-*0123456789. ")))
+		if len(plain) < 12 {
+			continue
+		}
+		for _, word := range keywords {
+			if strings.Contains(plain, word) {
+				out = append(out, plain)
+				break
+			}
+		}
+	}
+	return out
+}
+func normalizeConstraintText(s string) string {
+	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
 }
 
 func (a *Applier) backupCurrentSkill(
@@ -170,7 +357,7 @@ func validateAppliedSkillBody(body, targetSkillName string, allowExtraFrontmatte
 }
 
 func allowsExistingFrontmatterFields(kind ChangeKind, hadOriginal bool) bool {
-	return hadOriginal && (kind == ChangeKindAppend || kind == ChangeKindMerge)
+	return hadOriginal && kind == ChangeKindReplace
 }
 
 func renderAppliedBody(draft SkillDraft, existingBody string, hadOriginal bool) (string, error) {

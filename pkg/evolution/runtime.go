@@ -880,7 +880,7 @@ func (rt *Runtime) normalizeDraftForWorkspace(
 	}
 
 	skillPath := filepath.Join(workspace, "skills", target, "SKILL.md")
-	_, err := os.Stat(skillPath)
+	existingBody, err := os.ReadFile(skillPath)
 	hasExisting := err == nil
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return draft, notes
@@ -894,9 +894,11 @@ func (rt *Runtime) normalizeDraftForWorkspace(
 			buildCombinedSkillAvoidPattern(target, rule),
 		)
 		if hasExisting {
-			draft.ChangeKind = ChangeKindAppend
-			draft.BodyOrPatch = synthesizeCombinedSkillAppendBody(target, draft, rule, matches, evidence)
-			notes = append(notes, "normalized combined shortcut draft to append onto the existing combined skill")
+			draft.ChangeKind = ChangeKindReplace
+			draft.BodyOrPatch = NewDefaultDraftGenerator(workspace).buildReplacementBody(
+				string(existingBody), rule, evidence, matches,
+			)
+			notes = append(notes, "normalized combined shortcut draft to replace the existing combined skill holistically")
 		} else {
 			draft.ChangeKind = ChangeKindCreate
 			draft.BodyOrPatch = synthesizeCombinedSkillDocument(target, draft, rule, matches, evidence)
@@ -918,9 +920,12 @@ func (rt *Runtime) normalizeDraftForWorkspace(
 		return draft, notes
 	}
 
-	if draft.ChangeKind == ChangeKindCreate && !looksLikeSkillDocument(draft.BodyOrPatch) {
-		draft.ChangeKind = ChangeKindAppend
-		notes = append(notes, "normalized change_kind to append because target skill already existed")
+	if draft.ChangeKind != ChangeKindReplace {
+		draft.ChangeKind = ChangeKindReplace
+		draft.BodyOrPatch = NewDefaultDraftGenerator(workspace).buildReplacementBody(
+			string(existingBody), rule, evidence, matches,
+		)
+		notes = append(notes, "normalized existing-skill update to a complete replacement")
 	}
 	return draft, notes
 }

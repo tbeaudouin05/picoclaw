@@ -8,6 +8,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,6 +24,8 @@ import (
 type Store struct {
 	paths Paths
 }
+
+const maxJSONLRecordBytes = 1024 * 1024
 
 func NewStore(paths Paths) *Store {
 	return &Store{paths: paths}
@@ -85,7 +89,7 @@ func (s *Store) appendJSONLRecords(ctx context.Context, path string, records []L
 		return mkdirErr
 	}
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return err
 	}
@@ -94,19 +98,95 @@ func (s *Store) appendJSONLRecords(ctx context.Context, path string, records []L
 			err = closeErr
 		}
 	}()
+	if err := repairJSONLTail(f); err != nil {
+		return err
+	}
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		return err
+	}
 
-	enc := json.NewEncoder(f)
 	for _, record := range records {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
-		if err := enc.Encode(record); err != nil {
+		record = boundedLearningRecord(record)
+		line, marshalErr := json.Marshal(record)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		if len(line)+1 > maxJSONLRecordBytes {
+			return fmt.Errorf("bounded learning record exceeds JSONL line limit")
+		}
+		if _, err := f.Write(append(line, '\n')); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// repairJSONLTail inspects at most one maximum-sized record. A valid final
+// record merely missing its terminator is preserved; an incomplete or
+// oversized tail is discarded back to the last known record boundary.
+func repairJSONLTail(f *os.File) error {
+	info, err := f.Stat()
+	if err != nil || info.Size() == 0 {
+		return err
+	}
+	last := []byte{0}
+	if _, err := f.ReadAt(last, info.Size()-1); err != nil {
+		return err
+	}
+	if last[0] == '\n' {
+		return nil
+	}
+	window := int64(maxJSONLRecordBytes + 1)
+	start := info.Size() - window
+	if start < 0 {
+		start = 0
+	}
+	tail := make([]byte, info.Size()-start)
+	if _, err := f.ReadAt(tail, start); err != nil {
+		return err
+	}
+	boundary := bytes.LastIndexByte(tail, '\n')
+	recordStart := boundary + 1
+	if boundary < 0 && start > 0 {
+		priorBoundary, err := findLastNewlineBefore(f, start)
+		if err != nil {
+			return err
+		}
+		return f.Truncate(priorBoundary + 1)
+	}
+	fragment := bytes.TrimSpace(tail[recordStart:])
+	if len(fragment) <= maxJSONLRecordBytes && json.Valid(fragment) {
+		if _, err := f.WriteAt([]byte{'\n'}, info.Size()); err != nil {
+			return err
+		}
+		return nil
+	}
+	return f.Truncate(start + int64(recordStart))
+}
+
+func findLastNewlineBefore(f *os.File, end int64) (int64, error) {
+	const chunkSize = 64 * 1024
+	buf := make([]byte, chunkSize)
+	for end > 0 {
+		start := end - int64(len(buf))
+		if start < 0 {
+			start = 0
+		}
+		chunk := buf[:end-start]
+		if _, err := f.ReadAt(chunk, start); err != nil {
+			return 0, err
+		}
+		if index := bytes.LastIndexByte(chunk, '\n'); index >= 0 {
+			return start + int64(index), nil
+		}
+		end = start
+	}
+	return -1, nil
 }
 
 func (s *Store) LoadLearningRecords() ([]LearningRecord, error) {
@@ -150,9 +230,9 @@ func (s *Store) loadRecordsFromPath(path string) ([]LearningRecord, error) {
 	if err := decodeJSONLLines(path, func(line []byte) error {
 		var record LearningRecord
 		if err := json.Unmarshal(line, &record); err != nil {
-			return err
+			return nil // A bad evidence record must not disable the cold path.
 		}
-		records = append(records, record)
+		records = append(records, boundedLearningRecord(record))
 		return nil
 	}); err != nil {
 		return nil, err
@@ -343,11 +423,17 @@ func (s *Store) saveJSONLRecordsLocked(path string, records []LearningRecord) er
 	}
 
 	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
 	for _, record := range records {
-		if err := enc.Encode(record); err != nil {
+		record = boundedLearningRecord(record)
+		line, err := json.Marshal(record)
+		if err != nil {
 			return err
 		}
+		if len(line)+1 > maxJSONLRecordBytes {
+			return fmt.Errorf("bounded learning record exceeds JSONL line limit")
+		}
+		buf.Write(line)
+		buf.WriteByte('\n')
 	}
 	return fileutil.WriteFileAtomic(path, buf.Bytes(), 0o644)
 }
@@ -580,29 +666,29 @@ func decodeJSONLLines(path string, decode func(line []byte) error) error {
 	}
 	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	var lines [][]byte
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
-			continue
+	reader := bufio.NewReaderSize(f, maxJSONLRecordBytes+1)
+	for {
+		line, readErr := reader.ReadSlice('\n')
+		oversize := false
+		for errors.Is(readErr, bufio.ErrBufferFull) {
+			oversize = true
+			_, readErr = reader.ReadSlice('\n')
 		}
-		lines = append(lines, append([]byte(nil), line...))
-	}
-	if err := scanner.Err(); err != nil {
-		return err
-	}
-
-	for i, line := range lines {
-		if err := decode(line); err != nil {
-			if i == len(lines)-1 && isInvalidJSON(err) {
-				return nil
+		if !oversize {
+			line = bytes.TrimSpace(line)
+			if len(line) > 0 && len(line) <= maxJSONLRecordBytes {
+				if err := decode(line); err != nil && !isInvalidJSON(err) {
+					return err
+				}
 			}
-			return err
+		}
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
 		}
 	}
-	return nil
 }
 
 func draftKey(workspaceID, id string) string {

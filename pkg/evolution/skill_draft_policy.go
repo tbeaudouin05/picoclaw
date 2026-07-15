@@ -15,6 +15,9 @@ func skillDraftPromptInstructions() []string {
 		"When creating a combined shortcut skill, summarize the functional purpose and result of the provided SKILL.md inputs; do not copy or directly include other skills' instructions.",
 		"Extract only the necessary operations from source skills and evidence, such as formulas, ordered transformations, commands, inputs, outputs, and boundary conditions.",
 		"The operational part of the generated skill must be directly usable by a future agent without reading the original task records or source skills.",
+		"For an existing skill, read and understand the entire skill's purpose, structure, and safety constraints, then return one complete coherent revised SKILL.md using change_kind replace.",
+		"A revision may remove obsolete, redundant, contradictory, irrelevant, or historical instructions and may merge, restructure, or rephrase for concise actionable coverage.",
+		"Preserve every critical safety and domain constraint. Do not propose an update unless it is materially better, has no safeguard loss, contradictions, repetition, or needless history.",
 		"Keep operational instructions separable from audit/provenance notes because the final deployed SKILL.md will be rendered without learning traces.",
 	}
 }

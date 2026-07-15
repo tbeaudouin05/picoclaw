@@ -353,9 +353,10 @@ func TestApplier_AppendDraftPreservesOriginalBody(t *testing.T) {
 		BodyOrPatch:     "\n## Learned Pattern\nPrefer native-name query first.\n",
 	}
 
-	if err := applier.ApplyDraft(context.Background(), workspace, draft); err != nil {
-		t.Fatalf("ApplyDraft: %v", err)
+	if err := applier.ApplyDraft(context.Background(), workspace, draft); err == nil || !strings.Contains(err.Error(), "complete replacement") {
+		t.Fatalf("ApplyDraft error = %v, want complete replacement requirement", err)
 	}
+	return
 
 	got, err := os.ReadFile(skillPath)
 	if err != nil {
@@ -412,9 +413,10 @@ func TestApplier_AppendDraftAllowsExistingExtraFrontmatterFields(t *testing.T) {
 		BodyOrPatch:     "\n## Learned Pattern\nPrefer native-name query first.\n",
 	}
 
-	if err := applier.ApplyDraft(context.Background(), workspace, draft); err != nil {
-		t.Fatalf("ApplyDraft: %v", err)
+	if err := applier.ApplyDraft(context.Background(), workspace, draft); err == nil || !strings.Contains(err.Error(), "complete replacement") {
+		t.Fatalf("ApplyDraft error = %v, want complete replacement requirement", err)
 	}
+	return
 
 	got, err := os.ReadFile(skillPath)
 	if err != nil {
@@ -488,9 +490,10 @@ func TestApplier_AppendDraftDoesNotRewriteExistingLearningTerms(t *testing.T) {
 		BodyOrPatch:     "\n## Learned Pattern\nPrefer native-name query first.\n",
 	}
 
-	if err := applier.ApplyDraft(context.Background(), workspace, draft); err != nil {
-		t.Fatalf("ApplyDraft: %v", err)
+	if err := applier.ApplyDraft(context.Background(), workspace, draft); err == nil || !strings.Contains(err.Error(), "complete replacement") {
+		t.Fatalf("ApplyDraft error = %v, want complete replacement requirement", err)
 	}
+	return
 
 	got, err := os.ReadFile(skillPath)
 	if err != nil {
@@ -538,9 +541,10 @@ func TestApplier_AppendDraftStripsPlainMarkdownTopLevelHeading(t *testing.T) {
 		BodyOrPatch:     "# Weather\n## Procedure\nPrefer native-name query first.\n",
 	}
 
-	if err := applier.ApplyDraft(context.Background(), workspace, draft); err != nil {
-		t.Fatalf("ApplyDraft: %v", err)
+	if err := applier.ApplyDraft(context.Background(), workspace, draft); err == nil || !strings.Contains(err.Error(), "complete replacement") {
+		t.Fatalf("ApplyDraft error = %v, want complete replacement requirement", err)
 	}
+	return
 
 	got, err := os.ReadFile(skillPath)
 	if err != nil {
@@ -555,7 +559,7 @@ func TestApplier_AppendDraftStripsPlainMarkdownTopLevelHeading(t *testing.T) {
 	}
 }
 
-func TestApplier_AppendAndMergeRejectFullDocumentPatchWithMismatchedName(t *testing.T) {
+func TestApplier_RejectsAppendAndMergeForExistingSkill(t *testing.T) {
 	for _, kind := range []evolution.ChangeKind{evolution.ChangeKindAppend, evolution.ChangeKindMerge} {
 		t.Run(string(kind), func(t *testing.T) {
 			workspace := t.TempDir()
@@ -586,8 +590,8 @@ func TestApplier_AppendAndMergeRejectFullDocumentPatchWithMismatchedName(t *test
 			if err == nil {
 				t.Fatal("expected ApplyDraft to fail")
 			}
-			if !strings.Contains(err.Error(), "patch frontmatter name") {
-				t.Fatalf("error = %v, want patch frontmatter name mismatch", err)
+			if !strings.Contains(err.Error(), "evolution updates require a complete replacement") {
+				t.Fatalf("error = %v, want complete replacement requirement", err)
 			}
 			got, readErr := os.ReadFile(skillPath)
 			if readErr != nil {
@@ -627,9 +631,10 @@ func TestApplier_AppendDraftStripsFullSkillDocumentPatch(t *testing.T) {
 		BodyOrPatch:     "---\nname: weather\ndescription: duplicate document\n---\n# Weather\n## Procedure\nPrefer native-name query first.\n",
 	}
 
-	if err := applier.ApplyDraft(context.Background(), workspace, draft); err != nil {
-		t.Fatalf("ApplyDraft: %v", err)
+	if err := applier.ApplyDraft(context.Background(), workspace, draft); err == nil || !strings.Contains(err.Error(), "complete replacement") {
+		t.Fatalf("ApplyDraft error = %v, want complete replacement requirement", err)
 	}
+	return
 
 	got, err := os.ReadFile(skillPath)
 	if err != nil {
@@ -741,9 +746,10 @@ func TestApplier_MergeDraftAddsMergedKnowledgeSection(t *testing.T) {
 		BodyOrPatch:     "Prefer native-name query first.",
 	}
 
-	if err := applier.ApplyDraft(context.Background(), workspace, draft); err != nil {
-		t.Fatalf("ApplyDraft: %v", err)
+	if err := applier.ApplyDraft(context.Background(), workspace, draft); err == nil || !strings.Contains(err.Error(), "complete replacement") {
+		t.Fatalf("ApplyDraft error = %v, want complete replacement requirement", err)
 	}
+	return
 
 	got, err := os.ReadFile(skillPath)
 	if err != nil {
