@@ -21,6 +21,8 @@ import (
 
 var ErrApplyDraftFailed = errors.New("apply draft failed")
 
+const taskRecordAppendDrainTimeout = 5 * time.Second
+
 type RuntimeOptions struct {
 	Config              config.EvolutionConfig
 	Now                 func() time.Time
@@ -113,9 +115,6 @@ func (rt *Runtime) FinalizeTurn(ctx context.Context, input TurnCaseInput) error 
 	if rt == nil || !rt.cfg.Enabled || input.Workspace == "" || shouldSkipLearningRecord(input) {
 		return nil
 	}
-	if len(input.ToolExecutions) < rt.cfg.EffectiveMinToolCallsToRecord() {
-		return nil
-	}
 
 	success := input.Status == "completed"
 	usedSkillNames := buildUsedSkillNames(input)
@@ -140,7 +139,7 @@ func (rt *Runtime) FinalizeTurn(ctx context.Context, input TurnCaseInput) error 
 		ActiveSkillNames:   append([]string(nil), input.ActiveSkillNames...),
 		UsedSkillNames:     append([]string(nil), usedSkillNames...),
 	}
-	if rt.taskRecordEnricher != nil {
+	if rt.taskRecordEnricher != nil && len(input.ToolExecutions) >= rt.cfg.EffectiveMinToolCallsForLLMEnrichment() {
 		if enrichment, err := rt.taskRecordEnricher.Enrich(ctx, record); err == nil {
 			record.Enrichment = enrichment
 		} else {
@@ -157,7 +156,12 @@ func (rt *Runtime) FinalizeTurn(ctx context.Context, input TurnCaseInput) error 
 	writer := rt.writer
 	rt.mu.Unlock()
 
-	if err := writer.AppendCase(ctx, record); err != nil {
+	// Enrichment is optional and may be canceled during bridge shutdown. The
+	// deterministic envelope is required, so it gets an independent bounded
+	// drain context rather than inheriting that cancellation.
+	appendCtx, cancelAppend := context.WithTimeout(context.Background(), taskRecordAppendDrainTimeout)
+	defer cancelAppend()
+	if err := writer.AppendCase(appendCtx, record); err != nil {
 		return err
 	}
 

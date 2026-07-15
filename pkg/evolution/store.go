@@ -33,6 +33,19 @@ func NewStore(paths Paths) *Store {
 
 var storeFileLocks sync.Map
 
+// storeFileLock is a context-aware mutex. Its single token represents an
+// unlocked file, which lets callers abandon lock acquisition when their
+// context expires without creating a goroutine that could later take a lock.
+type storeFileLock struct {
+	token chan struct{}
+}
+
+func newStoreFileLock() *storeFileLock {
+	lock := &storeFileLock{token: make(chan struct{}, 1)}
+	lock.token <- struct{}{}
+	return lock
+}
+
 func (s *Store) AppendLearningRecord(ctx context.Context, record LearningRecord) error {
 	switch record.Kind {
 	case RecordKindPattern, legacyRecordKindRule:
@@ -82,7 +95,10 @@ func (s *Store) appendJSONLRecords(ctx context.Context, path string, records []L
 	default:
 	}
 
-	unlock := lockStoreFile(path)
+	unlock, err := lockStoreFileContext(ctx, path)
+	if err != nil {
+		return err
+	}
 	defer unlock()
 
 	if mkdirErr := os.MkdirAll(filepath.Dir(path), 0o755); mkdirErr != nil {
@@ -701,19 +717,44 @@ func isInvalidJSON(err error) bool {
 }
 
 func lockStoreFile(path string) func() {
+	unlock, err := lockStoreFileContext(context.Background(), path)
+	if err != nil {
+		panic(err)
+	}
+	return unlock
+}
+
+func lockStoreFileContext(ctx context.Context, path string) (func(), error) {
 	for {
-		actual, _ := storeFileLocks.LoadOrStore(path, &sync.Mutex{})
-		mu, ok := actual.(*sync.Mutex)
-		if !ok || mu == nil {
-			// Corrupted entry (wrong type or nil *sync.Mutex).
-			// Atomically swap in a fresh mutex via CompareAndSwap.
+		actual, _ := storeFileLocks.LoadOrStore(path, newStoreFileLock())
+		lock, ok := actual.(*storeFileLock)
+		if !ok || lock == nil {
+			// Corrupted entry (wrong type or nil *storeFileLock).
+			// Atomically swap in a fresh lock via CompareAndSwap.
 			// If CAS fails, another goroutine already replaced it —
 			// just retry the loop to pick up the valid entry.
-			storeFileLocks.CompareAndSwap(path, actual, &sync.Mutex{})
+			storeFileLocks.CompareAndSwap(path, actual, newStoreFileLock())
 			continue
 		}
-		mu.Lock()
-		return mu.Unlock
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-lock.token:
+			// If the context and the token became ready together, prefer the
+			// context result and put the token back before returning.
+			select {
+			case <-ctx.Done():
+				lock.token <- struct{}{}
+				return nil, ctx.Err()
+			default:
+			}
+			return func() { lock.token <- struct{}{} }, nil
+		}
 	}
 }
 

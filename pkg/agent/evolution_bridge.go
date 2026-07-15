@@ -26,6 +26,8 @@ type evolutionBridge struct {
 	closeMu        sync.Mutex
 	closed         bool
 	wg             sync.WaitGroup
+	turnQueue      chan evolution.TurnCaseInput
+	turnQueueMu    sync.RWMutex
 	isCurrent      func(*evolutionBridge) bool
 
 	scheduledMu         sync.Mutex
@@ -33,6 +35,7 @@ type evolutionBridge struct {
 }
 
 const evolutionDirectDeliveryAttr = "evolution_direct_delivery"
+const evolutionTurnQueueCapacity = 64
 
 func newEvolutionBridge(
 	registry *AgentRegistry,
@@ -75,12 +78,15 @@ func newEvolutionBridge(
 	bgCtx, cancel := context.WithCancel(context.Background())
 
 	bridge := &evolutionBridge{
-		cfg:      cfg.Evolution,
-		registry: registry,
-		runtime:  runtime,
-		bgCtx:    bgCtx,
-		cancel:   cancel,
+		cfg:       cfg.Evolution,
+		registry:  registry,
+		runtime:   runtime,
+		bgCtx:     bgCtx,
+		cancel:    cancel,
+		turnQueue: make(chan evolution.TurnCaseInput, evolutionTurnQueueCapacity),
 	}
+	bridge.wg.Add(1)
+	go bridge.runTurnFinalizer()
 	if cfg.Evolution.RunsColdPathAutomatically() {
 		bridge.coldPathRunner = evolution.NewColdPathRunnerWithErrorHandler(runtime, func(err error) {
 			logger.WarnCF("agent", "Cold path run failed", map[string]any{
@@ -112,6 +118,11 @@ func (b *evolutionBridge) Close() error {
 	if b == nil {
 		return nil
 	}
+	// Stop optional work and unblock a producer waiting on bounded queue
+	// capacity before waiting for the runtime-event subscription to drain.
+	if b.cancel != nil {
+		b.cancel()
+	}
 
 	if b.runtimeSub != nil {
 		if err := b.runtimeSub.Close(); err != nil {
@@ -122,15 +133,18 @@ func (b *evolutionBridge) Close() error {
 		<-b.runtimeSub.Done()
 	}
 
-	b.closeMu.Lock()
+	// Cancel optional enrichment first. The worker still drains every turn that
+	// was admitted to the bounded queue, and Runtime uses a separate bounded
+	// context for the required append.
+	b.turnQueueMu.Lock()
 	alreadyClosed := b.closed
 	b.closed = true
-	b.closeMu.Unlock()
+	if !alreadyClosed && b.turnQueue != nil {
+		close(b.turnQueue)
+	}
+	b.turnQueueMu.Unlock()
 	if alreadyClosed {
 		return nil
-	}
-	if b.cancel != nil {
-		b.cancel()
 	}
 	var closeErr error
 	if b.coldPathRunner != nil {
@@ -213,28 +227,38 @@ func (b *evolutionBridge) handleTurnEndAsync(meta EventMeta, payload TurnEndPayl
 	}
 	b.rememberScheduledColdPathWorkspace(input.Workspace)
 
-	b.closeMu.Lock()
-	if b.closed {
-		b.closeMu.Unlock()
+	b.turnQueueMu.RLock()
+	if b.closed || b.turnQueue == nil {
+		b.turnQueueMu.RUnlock()
 		return false
 	}
-	b.wg.Add(1)
-	b.closeMu.Unlock()
-	go func() {
-		defer b.wg.Done()
+	// The queue is intentionally bounded. Once full, event delivery applies
+	// backpressure instead of dropping an eligible terminal turn.
+	select {
+	case b.turnQueue <- input:
+		b.turnQueueMu.RUnlock()
+		return true
+	case <-b.bgCtx.Done():
+		b.turnQueueMu.RUnlock()
+		return false
+	}
+}
+
+func (b *evolutionBridge) runTurnFinalizer() {
+	defer b.wg.Done()
+	for input := range b.turnQueue {
 		if err := b.runtime.FinalizeTurn(b.bgCtx, input); err != nil {
 			logger.WarnCF("agent", "Evolution finalize turn failed", map[string]any{
 				"error":     err.Error(),
 				"turn_id":   input.TurnID,
 				"workspace": input.Workspace,
 			})
-			return
+			continue
 		}
 		if b.coldPathRunner != nil && b.cfg.RunsColdPathAfterTurn() {
 			b.coldPathRunner.Trigger(input.Workspace)
 		}
-	}()
-	return true
+	}
 }
 
 func isEvolutionHeartbeatInput(input evolution.TurnCaseInput) bool {

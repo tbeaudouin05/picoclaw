@@ -28,11 +28,12 @@ func (p *enrichmentProvider) Chat(_ context.Context, messages []providers.Messag
 }
 func (p *enrichmentProvider) GetDefaultModel() string { return "default-model" }
 
-type blockingEnrichmentProvider struct{ release chan struct{} }
+type blockingEnrichmentProvider struct{ started chan struct{} }
 
-func (p *blockingEnrichmentProvider) Chat(context.Context, []providers.Message, []providers.ToolDefinition, string, map[string]any) (*providers.LLMResponse, error) {
-	<-p.release
-	return nil, context.Canceled
+func (p *blockingEnrichmentProvider) Chat(ctx context.Context, _ []providers.Message, _ []providers.ToolDefinition, _ string, _ map[string]any) (*providers.LLMResponse, error) {
+	close(p.started)
+	<-ctx.Done()
+	return nil, ctx.Err()
 }
 func (p *blockingEnrichmentProvider) GetDefaultModel() string { return "unused" }
 
@@ -46,9 +47,10 @@ func TestLLMTaskRecordEnricherRequiresSeparateModel(t *testing.T) {
 	}
 }
 
-func TestRuntimeAdmissionCountsFailedToolAttempts(t *testing.T) {
+func TestRuntimeRecordsBelowEnrichmentThreshold(t *testing.T) {
 	workspace := t.TempDir()
-	rt, err := NewRuntime(RuntimeOptions{Config: config.EvolutionConfig{Enabled: true, MinToolCallsToRecord: 3}})
+	provider := &enrichmentProvider{content: `{}`}
+	rt, err := NewRuntime(RuntimeOptions{Config: config.EvolutionConfig{Enabled: true, MinToolCallsForLLMEnrichment: 3}, TaskRecordEnricher: NewLLMTaskRecordEnricher(provider, "model", time.Second, true)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,15 +59,14 @@ func TestRuntimeAdmissionCountsFailedToolAttempts(t *testing.T) {
 	if err := rt.FinalizeTurn(context.Background(), base); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(NewPaths(workspace, "").TaskRecords); !os.IsNotExist(err) {
-		t.Fatalf("below-threshold turn was persisted: %v", err)
+	if record := loadOnlyTaskRecord(t, workspace); record.AttemptedToolCalls != 2 || record.Enrichment != nil {
+		t.Fatalf("below-threshold deterministic record = %+v", record)
 	}
-	base.ToolExecutions = append(base.ToolExecutions, ToolExecutionRecord{Name: "c", Success: false, ErrorSummary: "failed"})
-	if err := rt.FinalizeTurn(context.Background(), base); err != nil {
-		t.Fatal(err)
+	if len(provider.messages) != 0 {
+		t.Fatal("below-threshold turn should not invoke enrichment")
 	}
 	record := loadOnlyTaskRecord(t, workspace)
-	if record.AttemptedToolCalls != 3 || record.ToolExecutions[2].Success {
+	if record.AttemptedToolCalls != 2 || record.ToolExecutions[0].Success {
 		t.Fatalf("failed attempts not counted: %+v", record)
 	}
 	if record.UserGoal != "raw user" || record.FinalOutput != "raw final" {
@@ -73,7 +74,7 @@ func TestRuntimeAdmissionCountsFailedToolAttempts(t *testing.T) {
 	}
 }
 
-func TestRuntimeAdmissionUsesDefaultMinimumToolCalls(t *testing.T) {
+func TestRuntimeEnrichmentThresholdOnlyGatesEnrichment(t *testing.T) {
 	workspace := t.TempDir()
 	rt, err := NewRuntime(RuntimeOptions{Config: config.EvolutionConfig{Enabled: true}})
 	if err != nil {
@@ -83,19 +84,12 @@ func TestRuntimeAdmissionUsesDefaultMinimumToolCalls(t *testing.T) {
 	if err := rt.FinalizeTurn(context.Background(), input); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(NewPaths(workspace, "").TaskRecords); !os.IsNotExist(err) {
-		t.Fatalf("default threshold should reject two tool calls: %v", err)
-	}
-	input.ToolExecutions = append(input.ToolExecutions, ToolExecutionRecord{Name: "c", Success: true})
-	if err := rt.FinalizeTurn(context.Background(), input); err != nil {
-		t.Fatal(err)
-	}
-	if record := loadOnlyTaskRecord(t, workspace); record.AttemptedToolCalls != 3 {
-		t.Fatalf("AttemptedToolCalls = %d, want 3", record.AttemptedToolCalls)
+	if record := loadOnlyTaskRecord(t, workspace); record.AttemptedToolCalls != 2 {
+		t.Fatalf("AttemptedToolCalls = %d, want 2", record.AttemptedToolCalls)
 	}
 
 	overrideWorkspace := t.TempDir()
-	overrideRuntime, err := NewRuntime(RuntimeOptions{Config: config.EvolutionConfig{Enabled: true, MinToolCallsToRecord: 1}})
+	overrideRuntime, err := NewRuntime(RuntimeOptions{Config: config.EvolutionConfig{Enabled: true, MinToolCallsForLLMEnrichment: 1}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +146,7 @@ func TestRuntimeMalformedEnrichmentPersistsDeterministicFallback(t *testing.T) {
 	workspace := t.TempDir()
 	provider := &enrichmentProvider{content: `{"summary":"not enough fields"}`}
 	rt, err := NewRuntime(RuntimeOptions{
-		Config:             config.EvolutionConfig{Enabled: true, MinToolCallsToRecord: 1},
+		Config:             config.EvolutionConfig{Enabled: true, MinToolCallsForLLMEnrichment: 1},
 		TaskRecordEnricher: NewLLMTaskRecordEnricher(provider, "cheap-model", 0, true),
 	})
 	if err != nil {
@@ -167,12 +161,11 @@ func TestRuntimeMalformedEnrichmentPersistsDeterministicFallback(t *testing.T) {
 	}
 }
 
-func TestRuntimeEnrichmentTimeoutPersistsWhenProviderIgnoresContext(t *testing.T) {
+func TestRuntimeEnrichmentTimeoutIsOwnedByFinalization(t *testing.T) {
 	workspace := t.TempDir()
-	provider := &blockingEnrichmentProvider{release: make(chan struct{})}
-	defer close(provider.release)
+	provider := &blockingEnrichmentProvider{started: make(chan struct{})}
 	rt, err := NewRuntime(RuntimeOptions{
-		Config:             config.EvolutionConfig{Enabled: true, MinToolCallsToRecord: 1},
+		Config:             config.EvolutionConfig{Enabled: true, MinToolCallsForLLMEnrichment: 1},
 		TaskRecordEnricher: NewLLMTaskRecordEnricher(provider, "enrichment-model", 10*time.Millisecond, true),
 	})
 	if err != nil {
@@ -185,6 +178,11 @@ func TestRuntimeEnrichmentTimeoutPersistsWhenProviderIgnoresContext(t *testing.T
 	record := loadOnlyTaskRecord(t, workspace)
 	if record.Enrichment != nil || record.AttemptedToolCalls != 1 || record.TurnStatus != "error" {
 		t.Fatalf("deterministic fallback was not preserved: %+v", record)
+	}
+	select {
+	case <-provider.started:
+	default:
+		t.Fatal("provider was not called")
 	}
 }
 

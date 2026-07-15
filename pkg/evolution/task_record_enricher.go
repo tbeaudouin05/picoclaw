@@ -35,7 +35,7 @@ func NewLLMTaskRecordEnricher(provider providers.LLMProvider, model string, time
 		return nil
 	}
 	if timeout <= 0 {
-		timeout = 5 * time.Second
+		timeout = 30 * time.Second
 	}
 	return &LLMTaskRecordEnricher{provider: provider, model: model, timeout: timeout, enabled: true}
 }
@@ -70,27 +70,15 @@ func (e *LLMTaskRecordEnricher) Enrich(ctx context.Context, record LearningRecor
 	if err != nil {
 		return nil, err
 	}
-	type result struct {
-		response *providers.LLMResponse
-		err      error
-	}
-	resultCh := make(chan result, 1)
-	go func() {
-		resp, err := e.provider.Chat(callCtx, []providers.Message{
-			{Role: "system", Content: enrichmentSystemPrompt},
-			{Role: "user", Content: "Runtime-derived evidence (do not contradict or re-infer these facts):\n" + string(facts)},
-		}, nil, e.model, map[string]any{"temperature": 0.1})
-		resultCh <- result{response: resp, err: err}
-	}()
-	var resp *providers.LLMResponse
-	select {
-	case result := <-resultCh:
-		if result.err != nil {
-			return nil, result.err
-		}
-		resp = result.response
-	case <-callCtx.Done():
-		return nil, callCtx.Err()
+	// Providers must honor callCtx. Calling synchronously keeps provider work
+	// owned by the finalization goroutine; Go cannot safely kill arbitrary
+	// provider code that ignores cancellation.
+	resp, err := e.provider.Chat(callCtx, []providers.Message{
+		{Role: "system", Content: enrichmentSystemPrompt},
+		{Role: "user", Content: "Runtime-derived evidence (do not contradict or re-infer these facts):\n" + string(facts)},
+	}, nil, e.model, map[string]any{"temperature": 0.1})
+	if err != nil {
+		return nil, err
 	}
 	if resp == nil {
 		return nil, errors.New("empty enrichment response")

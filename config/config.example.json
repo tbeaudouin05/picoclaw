@@ -30,10 +30,10 @@
     "min_task_count": 2,
     "min_success_ratio": 0.7,
     "task_record_retention_hours": 720,
-    "min_tool_calls_to_record": 3,
+    "min_tool_calls_for_llm_enrichment": 3,
     "enrichment_enabled": false,
     "enrichment_model": "",
-    "enrichment_timeout_seconds": 5,
+    "enrichment_timeout_seconds": 30,
     "cold_path_trigger": "after_turn",
     "cold_path_times": []
   },

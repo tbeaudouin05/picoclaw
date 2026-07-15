@@ -82,6 +82,10 @@ The `evolution` block controls PicoClaw's self-evolution runtime. When enabled, 
     "min_task_count": 2,
     "min_success_ratio": 0.7,
     "task_record_retention_hours": 720,
+    "enrichment_enabled": false,
+    "enrichment_model": "",
+    "min_tool_calls_for_llm_enrichment": 3,
+    "enrichment_timeout_seconds": 30,
     "cold_path_trigger": "after_turn",
     "cold_path_times": []
   }
@@ -90,12 +94,16 @@ The `evolution` block controls PicoClaw's self-evolution runtime. When enabled, 
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `enabled` | `false` | Enables learning-record capture for completed agent turns. Heartbeat turns are ignored. |
+| `enabled` | `false` | Enables deterministic learning-record capture for every eligible terminal turn, including error and aborted turns. Heartbeat turns are ignored. |
 | `mode` | `observe` | `observe` records data only. `draft` can generate candidate skill drafts. `apply` can apply accepted drafts to workspace skills. |
 | `state_dir` | `""` | Optional directory for evolution state. Leave empty to use the default under the workspace. |
 | `min_task_count` | `2` | Minimum related task records required before a pattern is eligible for draft generation. |
 | `min_success_ratio` | `0.7` | Minimum success ratio for a task cluster. Use a value greater than `0` and up to `1`. |
 | `task_record_retention_hours` | `720` | Retains task records for 30 days by default. Cold-path runs prune older records only when no live pattern, candidate draft, or applied skill depends on them. |
+| `enrichment_enabled` | `false` | Enables optional LLM-derived annotations; it never controls deterministic record capture. |
+| `enrichment_model` | `""` | Required separate model ID for optional LLM enrichment. |
+| `min_tool_calls_for_llm_enrichment` | `3` | Attempt enrichment only at or above this many attempted tool calls. `0` enriches every eligible turn; values are normalized to `0`–`1000`, with invalid negative values falling back to `3`. |
+| `enrichment_timeout_seconds` | `30` | Per-enrichment timeout, normalized to 1–300 seconds (invalid non-positive values fall back to 30). Enrichment is canceled on shutdown; deterministic appends get a separate bounded drain. |
 | `cold_path_trigger` | `after_turn` | Runs draft generation `after_turn`, on a `scheduled` cadence, or disables automatic cold-path runs when set to `manual`. There is no user-facing manual trigger yet. Applies only in `draft` and `apply` modes. |
 | `cold_path_times` | `[]` | Scheduled run times used when `cold_path_trigger` is `scheduled`, written as `HH:MM` strings. |
 

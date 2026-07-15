@@ -480,6 +480,51 @@ export function EvolutionSection({
         />
       </Field>
 
+      <SwitchCardField
+        label="LLM enrichment"
+        hint="Optional; eligible terminal turns are always recorded."
+        layout="setting-row"
+        checked={form.evolutionEnrichmentEnabled}
+        onCheckedChange={(checked) =>
+          onFieldChange("evolutionEnrichmentEnabled", checked)
+        }
+      />
+
+      <Field
+        label="LLM enrichment model"
+        hint="A separate model is required when enrichment is enabled."
+        layout="setting-row"
+      >
+        <Input
+          value={form.evolutionEnrichmentModel}
+          onChange={(e) => onFieldChange("evolutionEnrichmentModel", e.target.value)}
+        />
+      </Field>
+
+      <Field
+        label="Minimum tool calls for LLM enrichment"
+        hint="Only gates optional enrichment; 0 enriches every eligible turn."
+        layout="setting-row"
+      >
+        <Input
+          type="number"
+          min={0}
+          max={1000}
+          value={form.evolutionMinToolCallsForLLMEnrichment}
+          onChange={(e) => onFieldChange("evolutionMinToolCallsForLLMEnrichment", e.target.value)}
+        />
+      </Field>
+
+      <Field label="LLM enrichment timeout (seconds)" hint="Defaults to 30 seconds; values are limited to 1–300 seconds." layout="setting-row">
+        <Input
+          type="number"
+          min={1}
+          max={300}
+          value={form.evolutionEnrichmentTimeoutSeconds}
+          onChange={(e) => onFieldChange("evolutionEnrichmentTimeoutSeconds", e.target.value)}
+        />
+      </Field>
+
       <Field
         label={t("pages.config.evolution_cold_path_trigger")}
         hint={t("pages.config.evolution_cold_path_trigger_hint")}

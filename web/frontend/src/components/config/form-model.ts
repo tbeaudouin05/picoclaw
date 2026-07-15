@@ -38,6 +38,10 @@ export interface CoreConfigForm {
   evolutionStateDir: string
   evolutionMinTaskCount: string
   evolutionMinSuccessRatio: string
+  evolutionEnrichmentEnabled: boolean
+  evolutionEnrichmentModel: string
+  evolutionMinToolCallsForLLMEnrichment: string
+  evolutionEnrichmentTimeoutSeconds: string
   evolutionColdPathTrigger: string
   evolutionColdPathTimesText: string
 }
@@ -157,6 +161,10 @@ export const EMPTY_FORM: CoreConfigForm = {
   evolutionStateDir: "",
   evolutionMinTaskCount: "2",
   evolutionMinSuccessRatio: "0.7",
+  evolutionEnrichmentEnabled: false,
+  evolutionEnrichmentModel: "",
+  evolutionMinToolCallsForLLMEnrichment: "3",
+  evolutionEnrichmentTimeoutSeconds: "30",
   evolutionColdPathTrigger: "after_turn",
   evolutionColdPathTimesText: "",
 }
@@ -431,6 +439,16 @@ export function buildFormFromConfig(config: unknown): CoreConfigForm {
     evolutionMinSuccessRatio: asNumberString(
       evolution.min_success_ratio,
       EMPTY_FORM.evolutionMinSuccessRatio,
+    ),
+    evolutionEnrichmentEnabled: asBool(evolution.enrichment_enabled),
+    evolutionEnrichmentModel: asString(evolution.enrichment_model),
+    evolutionMinToolCallsForLLMEnrichment: asNumberString(
+      evolution.min_tool_calls_for_llm_enrichment,
+      EMPTY_FORM.evolutionMinToolCallsForLLMEnrichment,
+    ),
+    evolutionEnrichmentTimeoutSeconds: asNumberString(
+      evolution.enrichment_timeout_seconds,
+      EMPTY_FORM.evolutionEnrichmentTimeoutSeconds,
     ),
     evolutionColdPathTrigger:
       asString(evolution.cold_path_trigger) ||

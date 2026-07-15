@@ -4,7 +4,9 @@ Agent self-evolution lets PicoClaw learn from completed turns and turn repeated 
 
 ## Flow
 
-The hot path runs at the end of an agent turn. When `evolution.enabled` is true, it records a learning record with the turn summary, success state, used skills, tool executions, and session/workspace metadata. Heartbeat turns are skipped.
+The hot path runs at the end of an agent turn. When `evolution.enabled` is true, it records one bounded deterministic learning record for every eligible terminal turn, with the turn summary, success state, used skills, tool executions, and session/workspace metadata. Heartbeat turns are skipped. Optional LLM enrichment is gated only by `min_tool_calls_for_llm_enrichment` (default 3), never by record capture.
+
+Turn finalization runs through a bounded bridge queue. Full capacity backpressures event delivery rather than dropping a terminal turn. On close, new work is rejected, optional enrichment is canceled, and admitted turns drain their deterministic append with a separate bounded context. Providers must honor their contexts: provider code is called synchronously by the owned finalizer because arbitrary Go code cannot safely be killed.
 
 The cold path groups related task records, checks the configured success threshold, and prepares skill drafts for patterns that have enough evidence. Drafts can target new skills or append/replace/merge existing workspace skills.
 

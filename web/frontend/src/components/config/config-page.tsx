@@ -378,6 +378,16 @@ export function ConfigPage() {
           "Evolution minimum success ratio",
           { min: 0.01, max: 1 },
         )
+        const evolutionMinToolCallsForLLMEnrichment = parseIntField(
+          form.evolutionMinToolCallsForLLMEnrichment,
+          "Evolution LLM enrichment minimum tool calls",
+          { min: 0, max: 1000 },
+        )
+        const evolutionEnrichmentTimeoutSeconds = parseIntField(
+          form.evolutionEnrichmentTimeoutSeconds,
+          "Evolution enrichment timeout",
+          { min: 1, max: 300 },
+        )
         const mcpDiscoveryValidationEnabled =
           form.mcpEnabled && form.mcpDiscoveryEnabled
         const mcpDiscoveryPatch: Record<string, unknown> = {
@@ -607,6 +617,11 @@ export function ConfigPage() {
                 : form.evolutionStateDir.trim(),
             min_task_count: evolutionMinTaskCount,
             min_success_ratio: evolutionMinSuccessRatio,
+            enrichment_enabled: form.evolutionEnrichmentEnabled,
+            enrichment_model: form.evolutionEnrichmentModel.trim(),
+            min_tool_calls_for_llm_enrichment:
+              evolutionMinToolCallsForLLMEnrichment,
+            enrichment_timeout_seconds: evolutionEnrichmentTimeoutSeconds,
             cold_path_trigger: form.evolutionColdPathTrigger,
             cold_path_times: parseMultilineList(
               form.evolutionColdPathTimesText,

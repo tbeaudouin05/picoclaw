@@ -304,14 +304,14 @@ func TestDefaultConfig_EvolutionDefaults(t *testing.T) {
 	assert.Equal(t, 2, cfg.Evolution.MinTaskCount)
 	assert.Equal(t, 0.7, cfg.Evolution.MinSuccessRatio)
 	assert.Equal(t, 720, cfg.Evolution.TaskRecordRetentionHours)
-	assert.Equal(t, 3, cfg.Evolution.MinToolCallsToRecord)
+	assert.Equal(t, 3, cfg.Evolution.MinToolCallsForLLMEnrichment)
 	assert.False(t, cfg.Evolution.EnrichmentEnabled)
-	assert.Equal(t, 5, cfg.Evolution.EnrichmentTimeoutSeconds)
+	assert.Equal(t, 30, cfg.Evolution.EnrichmentTimeoutSeconds)
 	assert.Equal(t, "after_turn", cfg.Evolution.ColdPathTrigger)
 	assert.Equal(t, 2, cfg.Evolution.EffectiveMinTaskCount())
 	assert.Equal(t, 0.7, cfg.Evolution.EffectiveMinSuccessRatio())
 	assert.Equal(t, 720, cfg.Evolution.EffectiveTaskRecordRetentionHours())
-	assert.Equal(t, 3, cfg.Evolution.EffectiveMinToolCallsToRecord())
+	assert.Equal(t, 3, cfg.Evolution.EffectiveMinToolCallsForLLMEnrichment())
 	assert.False(t, cfg.Evolution.RunsColdPathAutomatically())
 	assert.False(t, cfg.Evolution.AutoAppliesDrafts())
 }
@@ -322,13 +322,27 @@ func TestEvolutionConfig_EffectiveTaskRecordRetentionHours(t *testing.T) {
 	assert.Equal(t, 720, (EvolutionConfig{TaskRecordRetentionHours: -1}).EffectiveTaskRecordRetentionHours())
 }
 
-func TestEvolutionConfig_OmittedMinToolCallsDefaultsToThree(t *testing.T) {
+func TestEvolutionConfig_EnrichmentThresholdNormalization(t *testing.T) {
 	var cfg EvolutionConfig
 	if err := json.Unmarshal([]byte(`{"enabled":true}`), &cfg); err != nil {
 		t.Fatal(err)
 	}
-	assert.Equal(t, 3, cfg.MinToolCallsToRecord)
-	assert.Equal(t, 3, cfg.EffectiveMinToolCallsToRecord())
+	assert.Equal(t, 3, cfg.MinToolCallsForLLMEnrichment)
+	assert.Equal(t, 3, cfg.EffectiveMinToolCallsForLLMEnrichment())
+	if err := json.Unmarshal([]byte(`{"min_tool_calls_for_llm_enrichment":0}`), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	assert.Equal(t, 0, cfg.EffectiveMinToolCallsForLLMEnrichment())
+	if err := json.Unmarshal([]byte(`{"min_tool_calls_for_llm_enrichment":-1,"enrichment_timeout_seconds":999}`), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	assert.Equal(t, 3, cfg.EffectiveMinToolCallsForLLMEnrichment())
+	assert.Equal(t, 300, cfg.EffectiveEnrichmentTimeoutSeconds())
+	encoded, err := json.Marshal(EvolutionConfig{MinToolCallsForLLMEnrichment: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assert.Contains(t, string(encoded), `"min_tool_calls_for_llm_enrichment":0`)
 }
 
 func TestEvolutionConfig_EffectiveMode(t *testing.T) {

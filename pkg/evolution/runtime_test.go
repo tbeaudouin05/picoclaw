@@ -90,7 +90,7 @@ func TestRuntime_FinalizeTurnWritesRecordWithOverride(t *testing.T) {
 			Enabled:              true,
 			Mode:                 "observe",
 			StateDir:             override,
-			MinToolCallsToRecord: 1,
+			MinToolCallsForLLMEnrichment: 1,
 		},
 		Now: func() time.Time { return now },
 	})
@@ -208,7 +208,7 @@ func TestRuntime_FinalizeTurnGeneratesUniqueTaskRecordIDsAcrossRestartedTurnSequ
 	workspace := t.TempDir()
 	createdAt := time.Unix(1700000000, 0).UTC()
 	rt, err := evolution.NewRuntime(evolution.RuntimeOptions{
-		Config: config.EvolutionConfig{Enabled: true, Mode: "observe", MinToolCallsToRecord: 1},
+		Config: config.EvolutionConfig{Enabled: true, Mode: "observe", MinToolCallsForLLMEnrichment: 1},
 		Now: func() time.Time {
 			createdAt = createdAt.Add(time.Second)
 			return createdAt
@@ -282,7 +282,7 @@ func TestRuntime_FinalizeTurnSharedStateKeepsSkillProfilesScoped(t *testing.T) {
 			Enabled:              true,
 			Mode:                 "observe",
 			StateDir:             sharedState,
-			MinToolCallsToRecord: 1,
+			MinToolCallsForLLMEnrichment: 1,
 		},
 		Now: func() time.Time { return now.Add(time.Minute) },
 	})
@@ -347,7 +347,7 @@ func TestRuntime_FinalizeTurnWritesPotentiallyLearnableSignal(t *testing.T) {
 	now := time.Unix(1700003000, 0).UTC()
 
 	rt, err := evolution.NewRuntime(evolution.RuntimeOptions{
-		Config: config.EvolutionConfig{Enabled: true, Mode: "observe", MinToolCallsToRecord: 1},
+		Config: config.EvolutionConfig{Enabled: true, Mode: "observe", MinToolCallsForLLMEnrichment: 1},
 		Now:    func() time.Time { return now },
 	})
 	if err != nil {
@@ -466,7 +466,7 @@ func TestRuntime_FinalizeTurnUsesSkillNamesFromToolExecutions(t *testing.T) {
 func TestRuntime_FinalizeTurnPreservesRawChineseOutput(t *testing.T) {
 	workspace := t.TempDir()
 	rt, err := evolution.NewRuntime(evolution.RuntimeOptions{
-		Config: config.EvolutionConfig{Enabled: true, Mode: "apply", MinToolCallsToRecord: 1},
+		Config: config.EvolutionConfig{Enabled: true, Mode: "apply", MinToolCallsForLLMEnrichment: 1},
 	})
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
@@ -519,7 +519,7 @@ func TestRuntime_FinalizeTurnPrefersExplicitAttemptTrail(t *testing.T) {
 	now := time.Unix(1700003500, 0).UTC()
 
 	rt, err := evolution.NewRuntime(evolution.RuntimeOptions{
-		Config: config.EvolutionConfig{Enabled: true, Mode: "observe", MinToolCallsToRecord: 1},
+		Config: config.EvolutionConfig{Enabled: true, Mode: "observe", MinToolCallsForLLMEnrichment: 1},
 		Now:    func() time.Time { return now },
 	})
 	if err != nil {
@@ -585,7 +585,7 @@ func TestRuntime_FinalizeTurnUpdatesSkillProfileUsage(t *testing.T) {
 		Config: config.EvolutionConfig{
 			Enabled:              true,
 			Mode:                 "observe",
-			MinToolCallsToRecord: 1,
+			MinToolCallsForLLMEnrichment: 1,
 		},
 		Now: func() time.Time { return now },
 	})
@@ -659,7 +659,7 @@ func assertFinalizeTurnReactivatesSkill(
 	}
 
 	rt, err := evolution.NewRuntime(evolution.RuntimeOptions{
-		Config: config.EvolutionConfig{Enabled: true, Mode: "observe", MinToolCallsToRecord: 1},
+		Config: config.EvolutionConfig{Enabled: true, Mode: "observe", MinToolCallsForLLMEnrichment: 1},
 		Now:    func() time.Time { return now },
 		Store:  store,
 	})

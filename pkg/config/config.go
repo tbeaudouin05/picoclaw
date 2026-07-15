@@ -57,61 +57,76 @@ type Config struct {
 }
 
 type EvolutionConfig struct {
-	Enabled                  bool     `json:"enabled,omitempty"`
-	Mode                     string   `json:"mode,omitempty"`
-	StateDir                 string   `json:"state_dir,omitempty"`
-	MinTaskCount             int      `json:"min_task_count,omitempty"`
-	MinSuccessRatio          float64  `json:"min_success_ratio,omitempty"`
-	TaskRecordRetentionHours int      `json:"task_record_retention_hours,omitempty"`
-	MinToolCallsToRecord     int      `json:"min_tool_calls_to_record,omitempty"`
-	EnrichmentEnabled        bool     `json:"enrichment_enabled,omitempty"`
-	EnrichmentModel          string   `json:"enrichment_model,omitempty"`
-	EnrichmentTimeoutSeconds int      `json:"enrichment_timeout_seconds,omitempty"`
-	ColdPathTrigger          string   `json:"cold_path_trigger,omitempty"`
-	ColdPathTimes            []string `json:"cold_path_times,omitempty"`
+	Enabled                      bool     `json:"enabled,omitempty"`
+	Mode                         string   `json:"mode,omitempty"`
+	StateDir                     string   `json:"state_dir,omitempty"`
+	MinTaskCount                 int      `json:"min_task_count,omitempty"`
+	MinSuccessRatio              float64  `json:"min_success_ratio,omitempty"`
+	TaskRecordRetentionHours     int      `json:"task_record_retention_hours,omitempty"`
+	MinToolCallsForLLMEnrichment int      `json:"min_tool_calls_for_llm_enrichment,omitempty"`
+	EnrichmentEnabled            bool     `json:"enrichment_enabled,omitempty"`
+	EnrichmentModel              string   `json:"enrichment_model,omitempty"`
+	EnrichmentTimeoutSeconds     int      `json:"enrichment_timeout_seconds,omitempty"`
+	ColdPathTrigger              string   `json:"cold_path_trigger,omitempty"`
+	ColdPathTimes                []string `json:"cold_path_times,omitempty"`
 	// Deprecated: use MinTaskCount.
 	MinCaseCount int `json:"min_case_count,omitempty"`
 	// Deprecated: use MinSuccessRatio.
 	MinSuccessRate float64 `json:"min_success_rate,omitempty"`
 }
 
+const (
+	defaultMinToolCallsForLLMEnrichment = 3
+	maxMinToolCallsForLLMEnrichment     = 1000
+	defaultEnrichmentTimeoutSeconds     = 30
+	maxEnrichmentTimeoutSeconds         = 300
+)
+
 func (c *EvolutionConfig) UnmarshalJSON(data []byte) error {
 	type plain EvolutionConfig
-	value := plain{MinToolCallsToRecord: 3}
-	if err := json.Unmarshal(data, &value); err != nil {
+	var raw struct {
+		*plain
+		MinToolCallsForLLMEnrichment *int `json:"min_tool_calls_for_llm_enrichment"`
+	}
+	raw.plain = (*plain)(c)
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
 	}
-	*c = EvolutionConfig(value)
+	if raw.MinToolCallsForLLMEnrichment == nil {
+		c.MinToolCallsForLLMEnrichment = defaultMinToolCallsForLLMEnrichment
+		return nil
+	}
+	c.MinToolCallsForLLMEnrichment = normalizeMinToolCallsForLLMEnrichment(*raw.MinToolCallsForLLMEnrichment)
 	return nil
 }
 
 func (c EvolutionConfig) MarshalJSON() ([]byte, error) {
 	out := struct {
-		Enabled                  bool     `json:"enabled,omitempty"`
-		Mode                     string   `json:"mode,omitempty"`
-		StateDir                 string   `json:"state_dir,omitempty"`
-		MinTaskCount             int      `json:"min_task_count,omitempty"`
-		MinSuccessRatio          float64  `json:"min_success_ratio,omitempty"`
-		TaskRecordRetentionHours int      `json:"task_record_retention_hours,omitempty"`
-		MinToolCallsToRecord     int      `json:"min_tool_calls_to_record,omitempty"`
-		EnrichmentEnabled        bool     `json:"enrichment_enabled,omitempty"`
-		EnrichmentModel          string   `json:"enrichment_model,omitempty"`
-		EnrichmentTimeoutSeconds int      `json:"enrichment_timeout_seconds,omitempty"`
-		ColdPathTrigger          string   `json:"cold_path_trigger,omitempty"`
-		ColdPathTimes            []string `json:"cold_path_times,omitempty"`
+		Enabled                      bool     `json:"enabled,omitempty"`
+		Mode                         string   `json:"mode,omitempty"`
+		StateDir                     string   `json:"state_dir,omitempty"`
+		MinTaskCount                 int      `json:"min_task_count,omitempty"`
+		MinSuccessRatio              float64  `json:"min_success_ratio,omitempty"`
+		TaskRecordRetentionHours     int      `json:"task_record_retention_hours,omitempty"`
+		MinToolCallsForLLMEnrichment int      `json:"min_tool_calls_for_llm_enrichment"`
+		EnrichmentEnabled            bool     `json:"enrichment_enabled,omitempty"`
+		EnrichmentModel              string   `json:"enrichment_model,omitempty"`
+		EnrichmentTimeoutSeconds     int      `json:"enrichment_timeout_seconds,omitempty"`
+		ColdPathTrigger              string   `json:"cold_path_trigger,omitempty"`
+		ColdPathTimes                []string `json:"cold_path_times,omitempty"`
 	}{
-		Enabled:                  c.Enabled,
-		Mode:                     c.Mode,
-		StateDir:                 c.StateDir,
-		MinTaskCount:             c.EffectiveMinTaskCount(),
-		MinSuccessRatio:          c.EffectiveMinSuccessRatio(),
-		TaskRecordRetentionHours: c.EffectiveTaskRecordRetentionHours(),
-		MinToolCallsToRecord:     c.EffectiveMinToolCallsToRecord(),
-		EnrichmentEnabled:        c.EnrichmentEnabled,
-		EnrichmentModel:          strings.TrimSpace(c.EnrichmentModel),
-		EnrichmentTimeoutSeconds: c.EffectiveEnrichmentTimeoutSeconds(),
-		ColdPathTrigger:          strings.TrimSpace(c.ColdPathTrigger),
-		ColdPathTimes:            c.EffectiveColdPathTimes(),
+		Enabled:                      c.Enabled,
+		Mode:                         c.Mode,
+		StateDir:                     c.StateDir,
+		MinTaskCount:                 c.EffectiveMinTaskCount(),
+		MinSuccessRatio:              c.EffectiveMinSuccessRatio(),
+		TaskRecordRetentionHours:     c.EffectiveTaskRecordRetentionHours(),
+		MinToolCallsForLLMEnrichment: c.EffectiveMinToolCallsForLLMEnrichment(),
+		EnrichmentEnabled:            c.EnrichmentEnabled,
+		EnrichmentModel:              strings.TrimSpace(c.EnrichmentModel),
+		EnrichmentTimeoutSeconds:     c.EffectiveEnrichmentTimeoutSeconds(),
+		ColdPathTrigger:              strings.TrimSpace(c.ColdPathTrigger),
+		ColdPathTimes:                c.EffectiveColdPathTimes(),
 	}
 	if !out.Enabled {
 		out.Mode = ""
@@ -192,18 +207,28 @@ func (c EvolutionConfig) EffectiveTaskRecordRetentionHours() int {
 	return 720
 }
 
-func (c EvolutionConfig) EffectiveMinToolCallsToRecord() int {
-	if c.MinToolCallsToRecord > 0 {
-		return c.MinToolCallsToRecord
-	}
-	return 3
+func (c EvolutionConfig) EffectiveMinToolCallsForLLMEnrichment() int {
+	return normalizeMinToolCallsForLLMEnrichment(c.MinToolCallsForLLMEnrichment)
 }
 
 func (c EvolutionConfig) EffectiveEnrichmentTimeoutSeconds() int {
-	if c.EnrichmentTimeoutSeconds > 0 {
-		return c.EnrichmentTimeoutSeconds
+	if c.EnrichmentTimeoutSeconds <= 0 {
+		return defaultEnrichmentTimeoutSeconds
 	}
-	return 5
+	if c.EnrichmentTimeoutSeconds > maxEnrichmentTimeoutSeconds {
+		return maxEnrichmentTimeoutSeconds
+	}
+	return c.EnrichmentTimeoutSeconds
+}
+
+func normalizeMinToolCallsForLLMEnrichment(value int) int {
+	if value < 0 {
+		return defaultMinToolCallsForLLMEnrichment
+	}
+	if value > maxMinToolCallsForLLMEnrichment {
+		return maxMinToolCallsForLLMEnrichment
+	}
+	return value
 }
 
 func (c EvolutionConfig) EffectiveColdPathTimes() []string {

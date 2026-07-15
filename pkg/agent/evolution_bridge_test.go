@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1305,6 +1306,140 @@ type blockingRuntimeObserver struct {
 	once    sync.Once
 	started chan struct{}
 	release chan struct{}
+}
+
+type shutdownEnrichmentProvider struct {
+	started     chan struct{}
+	startedOnce sync.Once
+}
+
+func (p *shutdownEnrichmentProvider) Chat(ctx context.Context, _ []providers.Message, _ []providers.ToolDefinition, _ string, _ map[string]any) (*providers.LLMResponse, error) {
+	p.startedOnce.Do(func() { close(p.started) })
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (p *shutdownEnrichmentProvider) GetDefaultModel() string { return "default" }
+
+func TestEvolutionBridge_CloseCancelsEnrichmentAndDrainsRecord(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Evolution = config.EvolutionConfig{
+		Enabled:                      true,
+		Mode:                         "observe",
+		EnrichmentEnabled:            true,
+		EnrichmentModel:              "enrichment-model",
+		MinToolCallsForLLMEnrichment: 0,
+	}
+	provider := &shutdownEnrichmentProvider{started: make(chan struct{})}
+	bridge, err := newEvolutionBridge(nil, cfg, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bridge.handleTurnEndAsync(EventMeta{TurnID: "shutdown", SessionKey: "session"}, TurnEndPayload{Status: TurnEndStatusCompleted, Workspace: workspace, UserMessage: "persist", FinalContent: "done"}) {
+		t.Fatal("turn was not admitted")
+	}
+	select {
+	case <-provider.started:
+	case <-time.After(time.Second):
+		t.Fatal("enrichment did not start")
+	}
+	if err := bridge.Close(); err != nil {
+		t.Fatal(err)
+	}
+	record := waitForEvolutionRecord(t, filepath.Join(workspace, "state", "evolution", "task-records.jsonl"))
+	if got := record["summary"]; got != "persist" {
+		t.Fatalf("summary = %v, want persist", got)
+	}
+}
+
+func TestEvolutionBridge_CloseUnblocksBlockedProducerAndDrainsBoundedQueue(t *testing.T) {
+	workspace := t.TempDir()
+	cfg := config.DefaultConfig()
+	cfg.Evolution = config.EvolutionConfig{
+		Enabled:                      true,
+		Mode:                         "observe",
+		EnrichmentEnabled:            true,
+		EnrichmentModel:              "enrichment-model",
+		MinToolCallsForLLMEnrichment: 0,
+	}
+	provider := &shutdownEnrichmentProvider{started: make(chan struct{})}
+	bridge, err := newEvolutionBridge(nil, cfg, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	admit := func(turnID string) bool {
+		return bridge.handleTurnEndAsync(EventMeta{TurnID: turnID, SessionKey: "session"}, TurnEndPayload{
+			Status: TurnEndStatusCompleted, Workspace: workspace, UserMessage: turnID, FinalContent: "done",
+		})
+	}
+	if !admit("turn-0") {
+		t.Fatal("first turn was not admitted")
+	}
+	select {
+	case <-provider.started:
+	case <-time.After(time.Second):
+		t.Fatal("enrichment did not start")
+	}
+	for i := 1; i <= evolutionTurnQueueCapacity; i++ {
+		if !admit("turn-" + strconv.Itoa(i)) {
+			t.Fatalf("turn-%d was not admitted", i)
+		}
+	}
+
+	producerStarted := make(chan struct{})
+	producerResult := make(chan bool, 1)
+	go func() {
+		close(producerStarted)
+		producerResult <- admit("turn-blocked")
+	}()
+	<-producerStarted
+	select {
+	case result := <-producerResult:
+		t.Fatalf("producer returned before Close despite a saturated queue: %v", result)
+	default:
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- bridge.Close() }()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close deadlocked with a producer blocked on queue admission")
+	}
+	select {
+	case admitted := <-producerResult:
+		if admitted {
+			t.Fatal("producer was admitted after Close began")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not unblock the blocked producer")
+	}
+
+	records, err := evolution.NewStore(evolution.NewPaths(workspace, "")).LoadTaskRecords()
+	if err != nil {
+		t.Fatalf("LoadTaskRecords: %v", err)
+	}
+	if len(records) != evolutionTurnQueueCapacity+1 {
+		t.Fatalf("drained record count = %d, want %d", len(records), evolutionTurnQueueCapacity+1)
+	}
+	seen := make(map[string]bool, len(records))
+	for _, record := range records {
+		seen[record.Summary] = true
+	}
+	for i := 0; i <= evolutionTurnQueueCapacity; i++ {
+		turnID := "turn-" + strconv.Itoa(i)
+		if !seen[turnID] {
+			t.Errorf("admitted turn %q was not drained", turnID)
+		}
+	}
+	if seen["turn-blocked"] {
+		t.Error("turn-blocked was persisted although it was not admitted")
+	}
 }
 
 func (o *blockingRuntimeObserver) OnRuntimeEvent(ctx context.Context, _ runtimeevents.Event) error {
