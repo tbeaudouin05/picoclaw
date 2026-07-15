@@ -78,9 +78,15 @@ func TestEvolutionBridge_ObserveWritesCaseRecord(t *testing.T) {
 		t.Fatalf("status = %v, want %q", got, "new")
 	}
 
-	for _, field := range []string{"tool_kinds", "tool_executions", "initial_skill_names", "active_skill_names", "attempt_trail", "source"} {
+	if got := record["attempted_tool_calls"]; got != float64(1) {
+		t.Fatalf("attempted_tool_calls = %#v, want 1", got)
+	}
+	if got, ok := record["tool_executions"].([]any); !ok || len(got) != 1 {
+		t.Fatalf("tool_executions should retain the runtime attempt: %#v", record["tool_executions"])
+	}
+	for _, field := range []string{"initial_skill_names", "attempt_trail", "source"} {
 		if _, exists := record[field]; exists {
-			t.Fatalf("%s should not be persisted in slim task record: %#v", field, record[field])
+			t.Fatalf("%s should not be persisted: %#v", field, record[field])
 		}
 	}
 }

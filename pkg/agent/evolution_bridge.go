@@ -46,6 +46,12 @@ func newEvolutionBridge(
 	modelID := resolvedEvolutionModelID(cfg, provider)
 	runtime, err := evolution.NewRuntime(evolution.RuntimeOptions{
 		Config: cfg.Evolution,
+		TaskRecordEnricher: evolution.NewLLMTaskRecordEnricher(
+			provider,
+			cfg.Evolution.EnrichmentModel,
+			time.Duration(cfg.Evolution.EffectiveEnrichmentTimeoutSeconds())*time.Second,
+			cfg.Evolution.EnrichmentEnabled,
+		),
 		PatternClusterer: evolution.NewLLMPatternClusterer(
 			provider,
 			modelID,

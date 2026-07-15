@@ -87,9 +87,10 @@ func TestRuntime_FinalizeTurnWritesRecordWithOverride(t *testing.T) {
 
 	rt, err := evolution.NewRuntime(evolution.RuntimeOptions{
 		Config: config.EvolutionConfig{
-			Enabled:  true,
-			Mode:     "observe",
-			StateDir: override,
+			Enabled:              true,
+			Mode:                 "observe",
+			StateDir:             override,
+			MinToolCallsToRecord: 1,
 		},
 		Now: func() time.Time { return now },
 	})
@@ -172,8 +173,8 @@ func TestRuntime_FinalizeTurnWritesRecordWithOverride(t *testing.T) {
 	if len(first.UsedSkillNames) != 0 {
 		t.Fatalf("first UsedSkillNames = %v, want empty", first.UsedSkillNames)
 	}
-	if len(first.ToolKinds) != 0 || len(first.ToolExecutions) != 0 || first.Source != nil || first.AttemptTrail != nil {
-		t.Fatalf("first record should be slimmed: %+v", first)
+	if len(first.ToolKinds) != 2 || len(first.ToolExecutions) != 2 || first.AttemptedToolCalls != 2 || first.Source != nil || first.AttemptTrail != nil {
+		t.Fatalf("first record should retain deterministic tool facts: %+v", first)
 	}
 	if first.TaskHash != "" || len(first.Signals) != 0 {
 		t.Fatalf("first record should not persist task_hash/signals: %+v", first)
@@ -195,8 +196,8 @@ func TestRuntime_FinalizeTurnWritesRecordWithOverride(t *testing.T) {
 	if second.Success == nil || *second.Success {
 		t.Fatalf("second Success = %v, want false", second.Success)
 	}
-	if len(second.ToolExecutions) != 0 || second.Source != nil || second.AttemptTrail != nil {
-		t.Fatalf("second record should be slimmed: %+v", second)
+	if len(second.ToolExecutions) != 1 || second.AttemptedToolCalls != 1 || second.ToolExecutions[0].Success || second.Source != nil || second.AttemptTrail != nil {
+		t.Fatalf("second record should retain failed tool attempt: %+v", second)
 	}
 	if second.TaskHash != "" || len(second.Signals) != 0 {
 		t.Fatalf("second record should not persist task_hash/signals: %+v", second)
@@ -207,7 +208,7 @@ func TestRuntime_FinalizeTurnGeneratesUniqueTaskRecordIDsAcrossRestartedTurnSequ
 	workspace := t.TempDir()
 	createdAt := time.Unix(1700000000, 0).UTC()
 	rt, err := evolution.NewRuntime(evolution.RuntimeOptions{
-		Config: config.EvolutionConfig{Enabled: true, Mode: "observe"},
+		Config: config.EvolutionConfig{Enabled: true, Mode: "observe", MinToolCallsToRecord: 1},
 		Now: func() time.Time {
 			createdAt = createdAt.Add(time.Second)
 			return createdAt
@@ -225,6 +226,9 @@ func TestRuntime_FinalizeTurnGeneratesUniqueTaskRecordIDsAcrossRestartedTurnSequ
 		Status:       "completed",
 		UserMessage:  "summarize release notes",
 		FinalContent: "done",
+		ToolExecutions: []evolution.ToolExecutionRecord{
+			{Name: "exec", Success: true},
+		},
 	}
 	if finalizeErr := rt.FinalizeTurn(context.Background(), input); finalizeErr != nil {
 		t.Fatalf("FinalizeTurn first: %v", finalizeErr)
@@ -275,9 +279,10 @@ func TestRuntime_FinalizeTurnSharedStateKeepsSkillProfilesScoped(t *testing.T) {
 
 	rt, err := evolution.NewRuntime(evolution.RuntimeOptions{
 		Config: config.EvolutionConfig{
-			Enabled:  true,
-			Mode:     "observe",
-			StateDir: sharedState,
+			Enabled:              true,
+			Mode:                 "observe",
+			StateDir:             sharedState,
+			MinToolCallsToRecord: 1,
 		},
 		Now: func() time.Time { return now.Add(time.Minute) },
 	})
@@ -291,6 +296,7 @@ func TestRuntime_FinalizeTurnSharedStateKeepsSkillProfilesScoped(t *testing.T) {
 		SessionKey:       "session-a",
 		Status:           "completed",
 		ActiveSkillNames: []string{"weather"},
+		ToolExecutions:   []evolution.ToolExecutionRecord{{Name: "exec", Success: true}},
 	}); finalizeErr != nil {
 		t.Fatalf("FinalizeTurn(workspaceA): %v", finalizeErr)
 	}
@@ -301,6 +307,7 @@ func TestRuntime_FinalizeTurnSharedStateKeepsSkillProfilesScoped(t *testing.T) {
 		SessionKey:       "session-b",
 		Status:           "completed",
 		ActiveSkillNames: []string{"weather"},
+		ToolExecutions:   []evolution.ToolExecutionRecord{{Name: "exec", Success: true}},
 	}); finalizeErr != nil {
 		t.Fatalf("FinalizeTurn(workspaceB): %v", finalizeErr)
 	}
@@ -340,7 +347,7 @@ func TestRuntime_FinalizeTurnWritesPotentiallyLearnableSignal(t *testing.T) {
 	now := time.Unix(1700003000, 0).UTC()
 
 	rt, err := evolution.NewRuntime(evolution.RuntimeOptions{
-		Config: config.EvolutionConfig{Enabled: true, Mode: "observe"},
+		Config: config.EvolutionConfig{Enabled: true, Mode: "observe", MinToolCallsToRecord: 1},
 		Now:    func() time.Time { return now },
 	})
 	if err != nil {
@@ -356,6 +363,7 @@ func TestRuntime_FinalizeTurnWritesPotentiallyLearnableSignal(t *testing.T) {
 		ToolKinds:        []string{"web", "bash"},
 		ActiveSkillNames: []string{"geocode", "weather"},
 		FinalContent:     "weather workflow completed",
+		ToolExecutions:   []evolution.ToolExecutionRecord{{Name: "exec", Success: true}},
 		FinalSuccessfulPath: []string{
 			"weather",
 		},
@@ -455,10 +463,10 @@ func TestRuntime_FinalizeTurnUsesSkillNamesFromToolExecutions(t *testing.T) {
 	}
 }
 
-func TestRuntime_FinalizeTurnPreservesUTF8WhenTruncatingChineseOutput(t *testing.T) {
+func TestRuntime_FinalizeTurnPreservesRawChineseOutput(t *testing.T) {
 	workspace := t.TempDir()
 	rt, err := evolution.NewRuntime(evolution.RuntimeOptions{
-		Config: config.EvolutionConfig{Enabled: true, Mode: "apply"},
+		Config: config.EvolutionConfig{Enabled: true, Mode: "apply", MinToolCallsToRecord: 1},
 	})
 	if err != nil {
 		t.Fatalf("NewRuntime: %v", err)
@@ -473,6 +481,9 @@ func TestRuntime_FinalizeTurnPreservesUTF8WhenTruncatingChineseOutput(t *testing
 		Status:       "completed",
 		UserMessage:  "请处理这段中文输出",
 		FinalContent: longChinese,
+		ToolExecutions: []evolution.ToolExecutionRecord{
+			{Name: "exec", Success: true},
+		},
 	}); finalizeErr != nil {
 		t.Fatalf("FinalizeTurn: %v", finalizeErr)
 	}
@@ -498,8 +509,8 @@ func TestRuntime_FinalizeTurnPreservesUTF8WhenTruncatingChineseOutput(t *testing
 	if strings.ContainsRune(record.FinalOutput, '\uFFFD') {
 		t.Fatalf("FinalOutput contains replacement rune: %q", record.FinalOutput)
 	}
-	if !strings.HasSuffix(record.FinalOutput, "...") {
-		t.Fatalf("FinalOutput = %q, want truncated suffix ...", record.FinalOutput)
+	if record.FinalOutput != longChinese {
+		t.Fatalf("FinalOutput was not preserved verbatim")
 	}
 }
 
@@ -508,7 +519,7 @@ func TestRuntime_FinalizeTurnPrefersExplicitAttemptTrail(t *testing.T) {
 	now := time.Unix(1700003500, 0).UTC()
 
 	rt, err := evolution.NewRuntime(evolution.RuntimeOptions{
-		Config: config.EvolutionConfig{Enabled: true, Mode: "observe"},
+		Config: config.EvolutionConfig{Enabled: true, Mode: "observe", MinToolCallsToRecord: 1},
 		Now:    func() time.Time { return now },
 	})
 	if err != nil {
@@ -525,6 +536,7 @@ func TestRuntime_FinalizeTurnPrefersExplicitAttemptTrail(t *testing.T) {
 		ActiveSkillNames:    []string{"weather"},
 		AttemptedSkillNames: []string{"geocode", "weather"},
 		FinalSuccessfulPath: []string{"geocode", "weather"},
+		ToolExecutions:      []evolution.ToolExecutionRecord{{Name: "exec", Success: true}},
 		SkillContextSnapshots: []evolution.SkillContextSnapshot{
 			{Sequence: 1, Trigger: "initial_build", SkillNames: []string{"weather"}},
 			{Sequence: 2, Trigger: "context_retry_rebuild", SkillNames: []string{"geocode", "weather"}},
@@ -571,8 +583,9 @@ func TestRuntime_FinalizeTurnUpdatesSkillProfileUsage(t *testing.T) {
 
 	rt, err := evolution.NewRuntime(evolution.RuntimeOptions{
 		Config: config.EvolutionConfig{
-			Enabled: true,
-			Mode:    "observe",
+			Enabled:              true,
+			Mode:                 "observe",
+			MinToolCallsToRecord: 1,
 		},
 		Now: func() time.Time { return now },
 	})
@@ -587,6 +600,7 @@ func TestRuntime_FinalizeTurnUpdatesSkillProfileUsage(t *testing.T) {
 		AgentID:          "agent-1",
 		Status:           "completed",
 		ActiveSkillNames: []string{"skill-a", "skill-a"},
+		ToolExecutions:   []evolution.ToolExecutionRecord{{Name: "exec", Success: true}},
 	}); finalizeErr != nil {
 		t.Fatalf("FinalizeTurn: %v", finalizeErr)
 	}
@@ -645,7 +659,7 @@ func assertFinalizeTurnReactivatesSkill(
 	}
 
 	rt, err := evolution.NewRuntime(evolution.RuntimeOptions{
-		Config: config.EvolutionConfig{Enabled: true, Mode: "observe"},
+		Config: config.EvolutionConfig{Enabled: true, Mode: "observe", MinToolCallsToRecord: 1},
 		Now:    func() time.Time { return now },
 		Store:  store,
 	})
@@ -658,6 +672,7 @@ func assertFinalizeTurnReactivatesSkill(
 		TurnID:           "turn-" + skillName,
 		Status:           "completed",
 		ActiveSkillNames: []string{skillName},
+		ToolExecutions:   []evolution.ToolExecutionRecord{{Name: "exec", Success: true}},
 	}); finalizeErr != nil {
 		t.Fatalf("FinalizeTurn: %v", finalizeErr)
 	}

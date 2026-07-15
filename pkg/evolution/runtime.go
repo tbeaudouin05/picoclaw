@@ -34,6 +34,7 @@ type RuntimeOptions struct {
 	SuccessJudgeFactory func(workspace string) SuccessJudge
 	Applier             *Applier
 	ApplierFactory      func(workspace string) *Applier
+	TaskRecordEnricher  TaskRecordEnricher
 }
 
 type Runtime struct {
@@ -51,6 +52,7 @@ type Runtime struct {
 	successJudgeFactory func(workspace string) SuccessJudge
 	applier             *Applier
 	applierFactory      func(workspace string) *Applier
+	taskRecordEnricher  TaskRecordEnricher
 }
 
 type TurnCaseInput struct {
@@ -103,11 +105,15 @@ func NewRuntime(opts RuntimeOptions) (*Runtime, error) {
 		successJudgeFactory: opts.SuccessJudgeFactory,
 		applier:             opts.Applier,
 		applierFactory:      opts.ApplierFactory,
+		taskRecordEnricher:  opts.TaskRecordEnricher,
 	}, nil
 }
 
 func (rt *Runtime) FinalizeTurn(ctx context.Context, input TurnCaseInput) error {
 	if rt == nil || !rt.cfg.Enabled || input.Workspace == "" || shouldSkipLearningRecord(input) {
+		return nil
+	}
+	if len(input.ToolExecutions) < rt.cfg.EffectiveMinToolCallsToRecord() {
 		return nil
 	}
 
@@ -117,16 +123,29 @@ func (rt *Runtime) FinalizeTurn(ctx context.Context, input TurnCaseInput) error 
 	createdAt := rt.now()
 
 	record := LearningRecord{
-		ID:             buildTaskRecordID(input, createdAt),
-		Kind:           RecordKindTask,
-		WorkspaceID:    workspaceID,
-		CreatedAt:      createdAt,
-		SessionKey:     input.SessionKey,
-		Summary:        buildRecordSummary(input),
-		FinalOutput:    summarizeText(input.FinalContent, 1200),
-		Status:         RecordStatus("new"),
-		Success:        &success,
-		UsedSkillNames: append([]string(nil), usedSkillNames...),
+		ID:                 buildTaskRecordID(input, createdAt),
+		Kind:               RecordKindTask,
+		WorkspaceID:        workspaceID,
+		CreatedAt:          createdAt,
+		SessionKey:         input.SessionKey,
+		Summary:            buildRecordSummary(input),
+		UserGoal:           input.UserMessage,
+		FinalOutput:        input.FinalContent,
+		Status:             RecordStatus("new"),
+		TurnStatus:         input.Status,
+		Success:            &success,
+		AttemptedToolCalls: len(input.ToolExecutions),
+		ToolKinds:          uniqueTrimmedNames(input.ToolKinds),
+		ToolExecutions:     append([]ToolExecutionRecord(nil), input.ToolExecutions...),
+		ActiveSkillNames:   append([]string(nil), input.ActiveSkillNames...),
+		UsedSkillNames:     append([]string(nil), usedSkillNames...),
+	}
+	if rt.taskRecordEnricher != nil {
+		if enrichment, err := rt.taskRecordEnricher.Enrich(ctx, record); err == nil {
+			record.Enrichment = enrichment
+		} else {
+			logger.WarnCF("evolution", "Task record enrichment failed; using deterministic record", map[string]any{"error": err.Error(), "turn_id": input.TurnID})
+		}
 	}
 
 	paths := NewPaths(input.Workspace, rt.cfg.StateDir)

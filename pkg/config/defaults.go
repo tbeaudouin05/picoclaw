@@ -53,6 +53,8 @@ func DefaultConfig() *Config {
 			MinTaskCount:             2,
 			MinSuccessRatio:          0.7,
 			TaskRecordRetentionHours: 720,
+			MinToolCallsToRecord:     3,
+			EnrichmentTimeoutSeconds: 5,
 			ColdPathTrigger:          "after_turn",
 		},
 		Channels: defaultChannels(),

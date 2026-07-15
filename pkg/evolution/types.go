@@ -69,6 +69,22 @@ type ToolExecutionRecord struct {
 	SkillNames   []string `json:"skill_names,omitempty"`
 }
 
+type EvidenceAssessment struct {
+	Text       string  `json:"text"`
+	Confidence float64 `json:"confidence"`
+	Evidence   string  `json:"evidence"`
+}
+
+type TaskRecordEnrichment struct {
+	Summary             string               `json:"summary"`
+	TaskType            string               `json:"task_type"`
+	OutcomeOrBlocker    string               `json:"outcome_or_blocker"`
+	TopFrictionsErrors  []EvidenceAssessment `json:"top_frictions_errors"`
+	ProcessImprovements []EvidenceAssessment `json:"process_improvements"`
+	ReusableKnowledge   []EvidenceAssessment `json:"reusable_knowledge"`
+	LearningValue       EvidenceAssessment   `json:"learning_value"`
+}
+
 type LearningRecord struct {
 	ID                   string                `json:"id"`
 	Kind                 RecordKind            `json:"kind"`
@@ -82,7 +98,9 @@ type LearningRecord struct {
 	FinalOutput          string                `json:"final_output,omitempty"`
 	Source               map[string]any        `json:"source,omitempty"`
 	Status               RecordStatus          `json:"status"`
+	TurnStatus           string                `json:"turn_status,omitempty"`
 	Success              *bool                 `json:"success,omitempty"`
+	AttemptedToolCalls   int                   `json:"attempted_tool_calls"`
 	ToolKinds            []string              `json:"tool_kinds,omitempty"`
 	ToolExecutions       []ToolExecutionRecord `json:"tool_executions,omitempty"`
 	InitialSkillNames    []string              `json:"initial_skill_names,omitempty"`
@@ -103,6 +121,7 @@ type LearningRecord struct {
 	LateAddedSkills      []string              `json:"late_added_skills,omitempty"`
 	FinalSnapshotTrigger string                `json:"final_snapshot_trigger,omitempty"`
 	MatchedSkillNames    []string              `json:"matched_skill_names,omitempty"`
+	Enrichment           *TaskRecordEnrichment `json:"enrichment,omitempty"`
 }
 
 type SkillDraft struct {

@@ -63,12 +63,26 @@ type EvolutionConfig struct {
 	MinTaskCount             int      `json:"min_task_count,omitempty"`
 	MinSuccessRatio          float64  `json:"min_success_ratio,omitempty"`
 	TaskRecordRetentionHours int      `json:"task_record_retention_hours,omitempty"`
+	MinToolCallsToRecord     int      `json:"min_tool_calls_to_record,omitempty"`
+	EnrichmentEnabled        bool     `json:"enrichment_enabled,omitempty"`
+	EnrichmentModel          string   `json:"enrichment_model,omitempty"`
+	EnrichmentTimeoutSeconds int      `json:"enrichment_timeout_seconds,omitempty"`
 	ColdPathTrigger          string   `json:"cold_path_trigger,omitempty"`
 	ColdPathTimes            []string `json:"cold_path_times,omitempty"`
 	// Deprecated: use MinTaskCount.
 	MinCaseCount int `json:"min_case_count,omitempty"`
 	// Deprecated: use MinSuccessRatio.
 	MinSuccessRate float64 `json:"min_success_rate,omitempty"`
+}
+
+func (c *EvolutionConfig) UnmarshalJSON(data []byte) error {
+	type plain EvolutionConfig
+	value := plain{MinToolCallsToRecord: 3}
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*c = EvolutionConfig(value)
+	return nil
 }
 
 func (c EvolutionConfig) MarshalJSON() ([]byte, error) {
@@ -79,6 +93,10 @@ func (c EvolutionConfig) MarshalJSON() ([]byte, error) {
 		MinTaskCount             int      `json:"min_task_count,omitempty"`
 		MinSuccessRatio          float64  `json:"min_success_ratio,omitempty"`
 		TaskRecordRetentionHours int      `json:"task_record_retention_hours,omitempty"`
+		MinToolCallsToRecord     int      `json:"min_tool_calls_to_record,omitempty"`
+		EnrichmentEnabled        bool     `json:"enrichment_enabled,omitempty"`
+		EnrichmentModel          string   `json:"enrichment_model,omitempty"`
+		EnrichmentTimeoutSeconds int      `json:"enrichment_timeout_seconds,omitempty"`
 		ColdPathTrigger          string   `json:"cold_path_trigger,omitempty"`
 		ColdPathTimes            []string `json:"cold_path_times,omitempty"`
 	}{
@@ -88,6 +106,10 @@ func (c EvolutionConfig) MarshalJSON() ([]byte, error) {
 		MinTaskCount:             c.EffectiveMinTaskCount(),
 		MinSuccessRatio:          c.EffectiveMinSuccessRatio(),
 		TaskRecordRetentionHours: c.EffectiveTaskRecordRetentionHours(),
+		MinToolCallsToRecord:     c.EffectiveMinToolCallsToRecord(),
+		EnrichmentEnabled:        c.EnrichmentEnabled,
+		EnrichmentModel:          strings.TrimSpace(c.EnrichmentModel),
+		EnrichmentTimeoutSeconds: c.EffectiveEnrichmentTimeoutSeconds(),
 		ColdPathTrigger:          strings.TrimSpace(c.ColdPathTrigger),
 		ColdPathTimes:            c.EffectiveColdPathTimes(),
 	}
@@ -168,6 +190,20 @@ func (c EvolutionConfig) EffectiveTaskRecordRetentionHours() int {
 		return c.TaskRecordRetentionHours
 	}
 	return 720
+}
+
+func (c EvolutionConfig) EffectiveMinToolCallsToRecord() int {
+	if c.MinToolCallsToRecord > 0 {
+		return c.MinToolCallsToRecord
+	}
+	return 3
+}
+
+func (c EvolutionConfig) EffectiveEnrichmentTimeoutSeconds() int {
+	if c.EnrichmentTimeoutSeconds > 0 {
+		return c.EnrichmentTimeoutSeconds
+	}
+	return 5
 }
 
 func (c EvolutionConfig) EffectiveColdPathTimes() []string {
