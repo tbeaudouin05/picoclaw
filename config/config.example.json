@@ -125,6 +125,7 @@
         "base_url": "",
         "proxy": "",
         "use_markdown_v2": false,
+        "TELEGRAM_START_MESSAGE": "Hello! I am PicoClaw 🦞",
         "streaming": {
           "enabled": true
         }

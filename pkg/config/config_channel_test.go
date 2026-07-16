@@ -249,6 +249,46 @@ func TestInitChannelList_TelegramStreamingEnvCompatibility(t *testing.T) {
 	assert.Equal(t, 0, picoCfg.Streaming.MinGrowthChars)
 }
 
+func TestInitChannelList_TelegramStartMessageJSONParsing(t *testing.T) {
+	jsonData := `{
+		"enabled": true,
+		"type": "telegram",
+		"settings": {
+			"token": "[NOT_HERE]",
+			"TELEGRAM_START_MESSAGE": "Hello from JSON config!"
+		}
+	}`
+
+	var ch Channel
+	require.NoError(t, json.Unmarshal([]byte(jsonData), &ch))
+
+	var cfg TelegramSettings
+	require.NoError(t, ch.Decode(&cfg))
+	assert.Equal(t, "Hello from JSON config!", cfg.StartMessage)
+}
+
+func TestInitChannelList_TelegramStartMessageEnvParsing(t *testing.T) {
+	t.Setenv("PICOCLAW_CHANNELS_TELEGRAM_START_MESSAGE", "Welcome to the bot!")
+
+	channels := ChannelsConfig{
+		"telegram": {
+			Type:     ChannelTelegram,
+			Enabled:  true,
+			Settings: RawNode(`{"token":"telegram-token"}`),
+		},
+	}
+	if err := InitChannelList(channels); err != nil {
+		t.Fatalf("InitChannelList() error = %v", err)
+	}
+
+	tgDecoded, err := channels["telegram"].GetDecoded()
+	if err != nil {
+		t.Fatalf("telegram GetDecoded() error = %v", err)
+	}
+	tgCfg := tgDecoded.(*TelegramSettings)
+	assert.Equal(t, "Welcome to the bot!", tgCfg.StartMessage)
+}
+
 func TestInitChannelList_RejectsNegativeStreamingDeliveryValues(t *testing.T) {
 	tests := []struct {
 		name        string

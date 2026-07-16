@@ -663,6 +663,7 @@ type TelegramSettings struct {
 	Streaming         StreamingConfig `json:"streaming,omitzero"   yaml:"-"`
 	UseMarkdownV2     bool            `json:"use_markdown_v2"      yaml:"-"               env:"PICOCLAW_CHANNELS_TELEGRAM_USE_MARKDOWN_V2"`
 	MediaGroupDelayMS int             `json:"media_group_delay_ms" yaml:"-"               env:"PICOCLAW_CHANNELS_TELEGRAM_MEDIA_GROUP_DELAY_MS"`
+	StartMessage      string          `json:"TELEGRAM_START_MESSAGE" yaml:"-"               env:"PICOCLAW_CHANNELS_TELEGRAM_START_MESSAGE"`
 }
 
 type FeishuSettings struct {

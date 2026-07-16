@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/sipeed/picoclaw/pkg/config"
 )
 
 func findDefinitionByName(t *testing.T, defs []Definition, name string) Definition {
@@ -380,6 +382,123 @@ func TestBuiltinBtwCommand_MissingQuestion(t *testing.T) {
 	}
 	if reply != "Usage: /btw <question>" {
 		t.Fatalf("/btw reply=%q, want usage message", reply)
+	}
+}
+
+func makeTelegramChannel(startMsg string) *config.Channel {
+	bc := &config.Channel{}
+	bc.SetName("telegram")
+	settings := &config.TelegramSettings{StartMessage: startMsg}
+	_ = bc.Decode(settings)
+	return bc
+}
+
+func TestStartCommand_DefaultGreeting_NilRuntime(t *testing.T) {
+	got := resolveStartMessage("telegram", nil)
+	if got != defaultStartMessage {
+		t.Fatalf("resolveStartMessage(nil rt)=%q, want %q", got, defaultStartMessage)
+	}
+}
+
+func TestStartCommand_DefaultGreeting_NoConfig(t *testing.T) {
+	got := resolveStartMessage("telegram", &Runtime{})
+	if got != defaultStartMessage {
+		t.Fatalf("resolveStartMessage(no config)=%q, want %q", got, defaultStartMessage)
+	}
+}
+
+func TestStartCommand_DefaultGreeting_EmptyChannel(t *testing.T) {
+	cfg := &config.Config{Channels: config.ChannelsConfig{}}
+	got := resolveStartMessage("", &Runtime{Config: cfg})
+	if got != defaultStartMessage {
+		t.Fatalf("resolveStartMessage(empty channel)=%q, want %q", got, defaultStartMessage)
+	}
+}
+
+func TestStartCommand_CustomMessage(t *testing.T) {
+	const custom = "Bonjour! Je suis PicoClaw 🦞"
+	cfg := &config.Config{
+		Channels: config.ChannelsConfig{
+			"telegram": makeTelegramChannel(custom),
+		},
+	}
+	got := resolveStartMessage("telegram", &Runtime{Config: cfg})
+	if got != custom {
+		t.Fatalf("resolveStartMessage(custom)=%q, want %q", got, custom)
+	}
+}
+
+func TestStartCommand_BlankMessageFallsBack(t *testing.T) {
+	for _, blank := range []string{"", "   "} {
+		cfg := &config.Config{
+			Channels: config.ChannelsConfig{
+				"telegram": makeTelegramChannel(blank),
+			},
+		}
+		got := resolveStartMessage("telegram", &Runtime{Config: cfg})
+		if got != defaultStartMessage {
+			t.Fatalf("resolveStartMessage(blank=%q)=%q, want default", blank, got)
+		}
+	}
+}
+
+func TestStartCommand_UnknownChannelFallsBack(t *testing.T) {
+	cfg := &config.Config{
+		Channels: config.ChannelsConfig{
+			"telegram": makeTelegramChannel("Custom"),
+		},
+	}
+	got := resolveStartMessage("other_channel", &Runtime{Config: cfg})
+	if got != defaultStartMessage {
+		t.Fatalf("resolveStartMessage(unknown channel)=%q, want %q", got, defaultStartMessage)
+	}
+}
+
+func TestStartCommand_ExecutorReturnsCustomMessage(t *testing.T) {
+	const custom = "Welcome to my bot!"
+	cfg := &config.Config{
+		Channels: config.ChannelsConfig{
+			"telegram": makeTelegramChannel(custom),
+		},
+	}
+	defs := BuiltinDefinitions()
+	ex := NewExecutor(NewRegistry(defs), &Runtime{Config: cfg})
+
+	var reply string
+	res := ex.Execute(context.Background(), Request{
+		Channel: "telegram",
+		Text:    "/start",
+		Reply: func(text string) error {
+			reply = text
+			return nil
+		},
+	})
+	if res.Outcome != OutcomeHandled {
+		t.Fatalf("/start outcome=%v, want=%v", res.Outcome, OutcomeHandled)
+	}
+	if reply != custom {
+		t.Fatalf("/start reply=%q, want %q", reply, custom)
+	}
+}
+
+func TestStartCommand_ExecutorDefaultWhenNoConfig(t *testing.T) {
+	defs := BuiltinDefinitions()
+	ex := NewExecutor(NewRegistry(defs), nil)
+
+	var reply string
+	res := ex.Execute(context.Background(), Request{
+		Channel: "telegram",
+		Text:    "/start",
+		Reply: func(text string) error {
+			reply = text
+			return nil
+		},
+	})
+	if res.Outcome != OutcomeHandled {
+		t.Fatalf("/start outcome=%v, want=%v", res.Outcome, OutcomeHandled)
+	}
+	if reply != defaultStartMessage {
+		t.Fatalf("/start reply=%q, want %q", reply, defaultStartMessage)
 	}
 }
 
