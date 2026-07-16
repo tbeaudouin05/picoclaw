@@ -2,11 +2,12 @@ package evolution
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -15,16 +16,103 @@ import (
 	"github.com/sipeed/picoclaw/pkg/skills"
 )
 
-// DraftApplySafetyError marks a draft rejection that stems from the candidate's
-// own structure or apply-time safety validation — the class of failure a model
-// can plausibly repair when handed the exact reason and the immutable target.
-// It is the ONLY classification eligible for bounded feedback-aware
-// regeneration. Filesystem, backup, rollback, profile, context, name/path and
-// security-scan failures are deliberately excluded and stay non-retryable.
+// applyOwnershipVersions tracks, per target SKILL.md path, a monotonically
+// increasing version stamped on each SUCCESSFUL evolution-owned apply. It gives
+// a rollback closure a durable in-process identity for the write it owns, so it
+// can detect that a NEWER evolution-owned apply successfully wrote the same
+// target after it — even when that newer apply wrote byte-identical content, in
+// which case the on-disk body still equals what this apply wrote and the
+// writtenBody comparison alone cannot tell the two writes apart.
 //
-// The wrapped reason preserves the original human-readable message (including
-// the "unsafe incomplete replacement" prefix) so logs and existing substring
-// expectations remain compatible.
+// Access to a given path's counter is serialized by the per-target file lock
+// that both the apply (when stamping) and the rollback (when reading) hold, so
+// the stamp and the later read are ordered with respect to each other. The
+// atomic value additionally guards against torn reads across the different
+// paths that share this sync.Map. Only successful writes stamp a version, and
+// applies never consult ownership — it gates rollback only — so a failed or
+// refused operation never blocks an ordinary future apply.
+var applyOwnershipVersions sync.Map // path -> *atomic.Uint64
+
+// stampApplyOwnership records a new successful apply of path and returns the
+// version identifying this apply's ownership. Must be called under the
+// per-target lock, immediately after the write lands.
+func stampApplyOwnership(path string) uint64 {
+	actual, _ := applyOwnershipVersions.LoadOrStore(path, new(atomic.Uint64))
+	return actual.(*atomic.Uint64).Add(1)
+}
+
+// currentApplyOwnership returns the version of the most recent successful apply
+// of path, or 0 if none has been recorded. Must be called under the per-target
+// lock.
+func currentApplyOwnership(path string) uint64 {
+	actual, ok := applyOwnershipVersions.Load(path)
+	if !ok {
+		return 0
+	}
+	return actual.(*atomic.Uint64).Load()
+}
+
+// canonicalTargetIdentity derives one stable identity for the actual file behind
+// a skill's textual path, collapsing workspace aliases — e.g. two workspace roots
+// where one is a symlink to the other — that resolve to the same physical
+// SKILL.md onto a single lock/ownership key. Without this, aliases produce
+// distinct textual paths and therefore separate per-target locks and ownership
+// counters, allowing a concurrent stale-check/write on the same file and letting
+// a stale rollback through one alias clobber a newer same-byte apply made through
+// another.
+//
+// Because a create's target does not exist yet, it must NOT simply EvalSymlinks
+// the (possibly absent) SKILL.md. Instead it resolves symlinks on the nearest
+// EXISTING ancestor and re-joins the validated, not-yet-existing suffix, so an
+// absent target and an aliased workspace directory both canonicalize robustly.
+//
+// The result is used ONLY as an in-process map key for locking and ownership.
+// Every filesystem operation keeps using the caller's user-facing skillPath, so
+// workspace/path containment and every other security semantic are unchanged. On
+// any resolution error it falls back to the cleaned textual path, preserving the
+// prior behavior rather than failing the apply.
+func canonicalTargetIdentity(skillPath string) string {
+	if resolved, err := resolveAgainstExistingAncestor(skillPath); err == nil {
+		return resolved
+	}
+	return filepath.Clean(skillPath)
+}
+
+// resolveAgainstExistingAncestor resolves symlinks on the nearest existing
+// ancestor of path and re-appends the remaining (not-yet-existing) suffix. It
+// handles an absent leaf — the common create case — without resolving the leaf
+// itself, while still following an aliased/symlinked ancestor directory to its
+// physical location.
+func resolveAgainstExistingAncestor(path string) (string, error) {
+	cleaned := filepath.Clean(path)
+	for current := cleaned; ; current = filepath.Dir(current) {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			suffix, relErr := filepath.Rel(current, cleaned)
+			if relErr != nil {
+				return "", relErr
+			}
+			if suffix == "." {
+				return filepath.Clean(resolved), nil
+			}
+			return filepath.Clean(filepath.Join(resolved, suffix)), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		if filepath.Dir(current) == current {
+			return "", os.ErrNotExist
+		}
+	}
+}
+
+// DraftApplySafetyError marks a draft rejection that stems from the candidate's
+// own structure or apply-time validation (frontmatter/heading shape,
+// name/description, a dropped required frontmatter field, or a stale-replacement
+// conflict). It preserves the original human-readable message (including the
+// "unsafe incomplete replacement" prefix) so logs and existing substring
+// expectations remain compatible. A genuine apply-safety failure keeps the
+// existing quarantine-on-apply-failure behavior; it is not retried.
 type DraftApplySafetyError struct {
 	Stage  string
 	reason error
@@ -44,13 +132,6 @@ func (e *DraftApplySafetyError) Unwrap() error {
 	return e.reason
 }
 
-// IsRetryableDraftFailure reports whether err (anywhere in its chain) is a typed
-// draft apply-safety rejection eligible for exactly one regeneration attempt.
-func IsRetryableDraftFailure(err error) bool {
-	var safety *DraftApplySafetyError
-	return errors.As(err, &safety)
-}
-
 type Applier struct {
 	paths Paths
 	now   func() time.Time
@@ -66,8 +147,45 @@ func NewApplier(paths Paths, now func() time.Time) *Applier {
 	}
 }
 
+// observedTargetState is the exact target state a replacement review observed:
+// whether an expected-state guard applies at all, whether the target existed on
+// disk at review time, and, if it existed, its exact body. It replaces the
+// earlier empty-string sentinel, which conflated three distinct cases — an
+// absent target, an existing-but-empty target, and no guard at all — into "".
+// The zero value (guard == false) means no expected-state guard applies.
+//
+// versionGuard/version additionally capture the canonical target's ownership
+// version (see applyOwnershipVersions) at review time, using the SAME canonical
+// identity as apply locking. The body/existence fields alone cannot tell two
+// evolution-owned writes apart when the later one wrote byte-identical content:
+// the on-disk body still equals what the review observed, so a stale reviewed
+// replacement would pass the body comparison and overwrite the newer
+// evolution-owned result. When versionGuard is set, apply additionally rejects
+// the replacement if the current ownership version differs from version, even
+// when the bytes match. versionGuard is opt-in so a caller that supplies only an
+// existence/body guard (and the unreviewed direct ApplyDraft path, which
+// supplies the zero value) keeps its existing semantics; version 0 is a real,
+// enforced value meaning "no evolution-owned write had happened at review time".
+type observedTargetState struct {
+	guard        bool   // an expected-state guard applies (a review observed the target)
+	existed      bool   // the target existed on disk when the review observed it
+	body         string // exact on-disk body when observed (meaningful only if existed)
+	versionGuard bool   // an ownership-version guard applies (version was captured)
+	version      uint64 // canonical ownership version observed at review time
+}
+
+// ApplyDraft writes a draft through the direct, UNREVIEWED path: it supplies no
+// observed target state (the zero observedTargetState, guard == false), so it
+// never runs the mandatory proactive replacement review. Because a complete
+// replacement of an existing on-disk skill requires that reviewer — reachable
+// only through the reviewed internal path, which passes an explicit
+// observedTargetState (guard == true) — this path cannot replace a skill that
+// already exists: applyDraftWithRollback refuses a guard-less ChangeKindReplace
+// whose target is present. Create and the append/merge rejections are unchanged,
+// and a replace whose target is absent still follows the create-like
+// replace-nonexistent handling in renderAppliedBody.
 func (a *Applier) ApplyDraft(ctx context.Context, workspace string, draft SkillDraft) error {
-	rollback, err := a.applyDraftWithRollback(ctx, workspace, draft)
+	rollback, err := a.applyDraftWithRollback(ctx, workspace, draft, observedTargetState{})
 	if err != nil {
 		return err
 	}
@@ -75,10 +193,30 @@ func (a *Applier) ApplyDraft(ctx context.Context, workspace string, draft SkillD
 	return nil
 }
 
+// applyDraftWithRollback writes the draft, returning a rollback closure. When
+// expected.guard is set it carries the EXACT target state a prior step (the
+// replacement review) observed: whether the target existed and, if so, its exact
+// body. Before writing, the current on-disk state must still match it. This is
+// the conflict guard for Gap 3: it refuses to overwrite an edit that landed after
+// the review, so a refinement is never applied on top of a target that has since
+// changed underneath it — including a target that was absent at review but has
+// since been created, or one whose (possibly empty) body has changed.
+//
+// A per-target lock (keyed on the exact SKILL.md path) serializes the whole
+// check → backup → write section here, and the returned rollback closure
+// re-acquires the same lock, so restore is serialized too. This makes the guard
+// sound against every OTHER evolution-owned apply of the same skill, which is the
+// only writer that cooperates on the lock. It does NOT promise atomicity against
+// an arbitrary external filesystem writer (e.g. a hand editor): POSIX rename
+// cannot provide compare-and-swap for replacing an existing pathname, so a
+// non-cooperating writer racing the final rename cannot be excluded. The lock is
+// scoped to this deterministic apply only — it is never held across the LLM
+// review, which runs earlier in reviewReplacementDraft.
 func (a *Applier) applyDraftWithRollback(
 	ctx context.Context,
 	workspace string,
 	draft SkillDraft,
+	expected observedTargetState,
 ) (func() error, error) {
 	select {
 	case <-ctx.Done():
@@ -89,6 +227,20 @@ func (a *Applier) applyDraftWithRollback(
 		return nil, validateErr
 	}
 	skillPath := filepath.Join(workspace, "skills", draft.TargetSkillName, "SKILL.md")
+	// Lock and stamp ownership on one canonical identity for the actual target so
+	// distinct workspace aliases (e.g. a symlinked workspace root) that resolve to
+	// the same physical SKILL.md share a single lock and ownership counter.
+	// Filesystem operations below keep using the user-facing skillPath.
+	lockKey := canonicalTargetIdentity(skillPath)
+
+	// Serialize the check-then-write section for this specific skill so an
+	// intervening edit cannot slip between the stale comparison and the rename.
+	unlock, lockErr := lockStoreFileContext(ctx, lockKey)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer unlock()
+
 	if draft.ChangeKind == ChangeKindAppend || draft.ChangeKind == ChangeKindMerge {
 		if _, statErr := os.Stat(skillPath); statErr == nil {
 			return nil, fmt.Errorf(
@@ -105,12 +257,70 @@ func (a *Applier) applyDraftWithRollback(
 	if err != nil {
 		return nil, err
 	}
+	// Gap 3 conflict guard: re-verify, under the per-target lock, the exact target
+	// state the review observed. Fail closed before any write on any drift —
+	// absent-at-review but now present (absent->created), present-at-review but now
+	// gone, or a changed body (including an empty body that changed) — rather than
+	// overwrite the intervening edit with a refinement based on a stale target.
+	if expected.guard {
+		var drifted bool
+		if expected.existed {
+			drifted = !hadOriginal || existingBody != expected.body
+		} else {
+			drifted = hadOriginal
+		}
+		if drifted {
+			return nil, &DraftApplySafetyError{
+				Stage: "stale_replacement",
+				reason: fmt.Errorf(
+					"target skill %q changed on disk after review; refusing to overwrite the intervening edit",
+					draft.TargetSkillName,
+				),
+			}
+		}
+		// Ownership-version guard: the body/existence comparison above cannot
+		// detect a later evolution-owned apply that wrote byte-identical content
+		// after the review — the on-disk body still equals what the review
+		// observed. Reject when the canonical ownership version has advanced past
+		// the version captured at review time, so a stale reviewed replacement
+		// cannot overwrite that newer evolution-owned result. The version is read
+		// under this per-target lock (keyed on the same canonical identity as the
+		// stamp), so the comparison is sound against every other cooperating apply
+		// of the same physical target. Version 0 is enforced normally: it means no
+		// evolution-owned write had happened when the review observed the target.
+		if expected.versionGuard && currentApplyOwnership(lockKey) != expected.version {
+			return nil, &DraftApplySafetyError{
+				Stage: "stale_replacement",
+				reason: fmt.Errorf(
+					"target skill %q was written by a newer evolution apply after review (byte-identical content); refusing to overwrite the newer result",
+					draft.TargetSkillName,
+				),
+			}
+		}
+	}
 	if hadOriginal && (draft.ChangeKind == ChangeKindAppend || draft.ChangeKind == ChangeKindMerge) {
 		return nil, fmt.Errorf(
 			"cannot %s existing skill %q: evolution updates require a complete replacement",
 			draft.ChangeKind,
 			draft.TargetSkillName,
 		)
+	}
+	// An unreviewed direct apply (the exported ApplyDraft path) carries no
+	// observed target state (expected.guard == false). It must never replace an
+	// existing skill: a complete replacement of an on-disk skill requires the
+	// mandatory proactive reviewer, reachable only through the reviewed internal
+	// path, which supplies an explicit observedTargetState (guard == true). The
+	// check reads hadOriginal captured under the per-target lock, so it cannot
+	// race a file created after an out-of-lock stat. An absent target falls
+	// through to renderAppliedBody's create-like replace-nonexistent handling.
+	if !expected.guard && draft.ChangeKind == ChangeKindReplace && hadOriginal {
+		return nil, &DraftApplySafetyError{
+			Stage: "unreviewed_replacement",
+			reason: fmt.Errorf(
+				"cannot replace existing skill %q without the mandatory replacement review",
+				draft.TargetSkillName,
+			),
+		}
 	}
 	renderedBody, err := renderAppliedBody(draft, existingBody, hadOriginal)
 	if err != nil {
@@ -141,15 +351,38 @@ func (a *Applier) applyDraftWithRollback(
 	if err := fileutil.WriteFileAtomic(skillPath, []byte(renderedBody), 0o644); err != nil {
 		return nil, err
 	}
+	// Stamp ownership under the still-held per-target lock, atomically with the
+	// write landing, so this operation records the version any later apply must
+	// exceed to take ownership away from it. Keyed on the canonical identity so
+	// applies through different aliases contend on the same counter.
+	ownedVersion := stampApplyOwnership(lockKey)
 
 	return func() error {
-		return a.rollbackSkill(skillPath, backupPath, hadOriginal)
+		// Restore under the same per-target lock so a rollback is serialized
+		// against any concurrent apply of this skill.
+		rollbackUnlock, rollbackLockErr := lockStoreFileContext(context.Background(), lockKey)
+		if rollbackLockErr != nil {
+			return rollbackLockErr
+		}
+		defer rollbackUnlock()
+		return a.rollbackSkill(lockKey, skillPath, backupPath, hadOriginal, renderedBody, ownedVersion)
 	}, nil
 }
 
+// validateHolisticReplacement enforces the only deterministic hard gate that
+// survives a complete replacement of an existing skill: every required
+// frontmatter field present in the old document must still be present in the
+// candidate. It deliberately applies NO natural-language safety-wording
+// heuristic and NO structural-diff heuristic (no literal root heading, minimum
+// body size, named section, or safety-constraint-line comparison). Preserving
+// still-relevant safety boundaries and invariants across a replacement is the
+// job of the mandatory proactive reviewer, whose refined output is trusted after
+// the deterministic schema/type, name/path, frontmatter, and secret-scan gates
+// pass. This gate only guards the machine-checkable frontmatter contract; the
+// secret scan runs separately in ReviewDraft.
 func validateHolisticReplacement(existing, candidate string) error {
-	existingFM, existingMD := splitSkillFrontmatter(existing)
-	candidateFM, candidateMD := splitSkillFrontmatter(candidate)
+	existingFM, _ := splitSkillFrontmatter(existing)
+	candidateFM, _ := splitSkillFrontmatter(candidate)
 	existingFields, err := parseSkillFrontmatterFields(existingFM, true)
 	if err != nil {
 		return fmt.Errorf("existing frontmatter: %w", err)
@@ -163,153 +396,7 @@ func validateHolisticReplacement(existing, candidate string) error {
 			return fmt.Errorf("required frontmatter field %q was removed", key)
 		}
 	}
-	visibleExisting := visibleOperationalMarkdown(existingMD)
-	visibleCandidate := visibleOperationalMarkdown(candidateMD)
-	existingH1 := firstMarkdownHeading(visibleExisting, "# ")
-	candidateH1 := firstMarkdownHeading(visibleCandidate, "# ")
-	if existingH1 != "" && !strings.EqualFold(existingH1, candidateH1) {
-		return fmt.Errorf("root heading %q was not preserved", existingH1)
-	}
-	oldLen, newLen := len(strings.TrimSpace(existingMD)), len(strings.TrimSpace(candidateMD))
-	if oldLen >= 300 && newLen < oldLen*60/100 {
-		return fmt.Errorf("candidate is an obvious minimal replacement (%d bytes versus %d)", newLen, oldLen)
-	}
-	for _, heading := range substantialSectionHeadings(visibleExisting) {
-		if !hasMarkdownHeading(visibleCandidate, heading) {
-			return fmt.Errorf("substantial section %q was removed", heading)
-		}
-	}
-	candidateNorm := normalizeConstraintText(visibleCandidate)
-	for _, constraint := range safetyConstraintLines(visibleExisting) {
-		if !strings.Contains(candidateNorm, normalizeConstraintText(constraint)) {
-			return fmt.Errorf("safety constraint was removed: %q", trimAtReadableBoundary(strings.TrimSpace(constraint), 120))
-		}
-	}
 	return nil
-}
-
-// visibleOperationalMarkdown removes content that is not rendered as operative
-// prose. Safety requirements preserved only in comments or examples do not
-// protect users of the skill and therefore cannot satisfy replacement checks.
-func visibleOperationalMarkdown(md string) string {
-	lines := strings.Split(md, "\n")
-	visible := make([]string, 0, len(lines))
-	inFence := false
-	fenceChar := byte(0)
-	fenceLen := 0
-	inComment := false
-	for _, line := range lines {
-		trimmed := strings.TrimLeft(line, " \t")
-		if !inComment {
-			if char, count := markdownFence(trimmed); count >= 3 {
-				if !inFence {
-					inFence, fenceChar, fenceLen = true, char, count
-					continue
-				}
-				if char == fenceChar && count >= fenceLen {
-					inFence = false
-				}
-				continue
-			}
-		}
-		if inFence {
-			continue
-		}
-		var out strings.Builder
-		for len(line) > 0 {
-			if inComment {
-				end := strings.Index(line, "-->")
-				if end < 0 {
-					line = ""
-					break
-				}
-				line, inComment = line[end+3:], false
-				continue
-			}
-			start := strings.Index(line, "<!--")
-			if start < 0 {
-				out.WriteString(line)
-				break
-			}
-			out.WriteString(line[:start])
-			line, inComment = line[start+4:], true
-		}
-		visible = append(visible, out.String())
-	}
-	return strings.Join(visible, "\n")
-}
-
-func markdownFence(line string) (byte, int) {
-	if line == "" || (line[0] != '`' && line[0] != '~') {
-		return 0, 0
-	}
-	char := line[0]
-	count := 0
-	for count < len(line) && line[count] == char {
-		count++
-	}
-	return char, count
-}
-
-func firstMarkdownHeading(md, prefix string) string {
-	for _, line := range strings.Split(md, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, prefix) && !strings.HasPrefix(line, prefix+"#") {
-			return strings.TrimSpace(strings.TrimPrefix(line, prefix))
-		}
-	}
-	return ""
-}
-func hasMarkdownHeading(md, heading string) bool {
-	for _, line := range strings.Split(md, "\n") {
-		if strings.EqualFold(strings.TrimSpace(strings.TrimLeft(line, "#")), heading) && strings.HasPrefix(strings.TrimSpace(line), "##") {
-			return true
-		}
-	}
-	return false
-}
-func substantialSectionHeadings(md string) []string {
-	lines := strings.Split(md, "\n")
-	out := []string{}
-	heading := ""
-	size := 0
-	flush := func() {
-		if heading != "" && size >= 160 {
-			out = append(out, heading)
-		}
-	}
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "## ") {
-			flush()
-			heading = strings.TrimSpace(strings.TrimPrefix(trimmed, "## "))
-			size = 0
-		} else if heading != "" {
-			size += len(trimmed)
-		}
-	}
-	flush()
-	return out
-}
-func safetyConstraintLines(md string) []string {
-	keywords := []string{"must ", "must not", "never ", "do not", "don't ", "only ", "avoid ", "required", "ensure ", "warning", "caution", "safety", "permission", "secret", "credential"}
-	out := []string{}
-	for _, line := range strings.Split(md, "\n") {
-		plain := strings.ToLower(strings.TrimSpace(strings.TrimLeft(line, "-*0123456789. ")))
-		if len(plain) < 12 {
-			continue
-		}
-		for _, word := range keywords {
-			if strings.Contains(plain, word) {
-				out = append(out, plain)
-				break
-			}
-		}
-	}
-	return out
-}
-func normalizeConstraintText(s string) string {
-	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
 }
 
 func (a *Applier) backupCurrentSkill(
@@ -345,7 +432,50 @@ func (a *Applier) backupCurrentSkill(
 	return string(data), backupPath, true, nil
 }
 
-func (a *Applier) rollbackSkill(skillPath, backupPath string, hadOriginal bool) error {
+// rollbackSkill undoes this operation's write, but only if this operation still
+// owns the target and the on-disk body is still byte-for-byte the body this
+// apply wrote (writtenBody). Reading and the restore/delete happen under the
+// caller-held per-target lock, so both checks are a sound compare-and-swap
+// against every OTHER evolution-owned apply of the same skill.
+//
+// The ownedVersion guard is the primary check: if a later cooperating apply
+// stamped a higher version after we wrote and before rollback runs, it now owns
+// the target and we fail closed — even if that newer apply wrote byte-identical
+// content, so the writtenBody comparison below would otherwise pass and let us
+// clobber it. The writtenBody comparison still catches a non-cooperating
+// external writer (e.g. a hand editor) that changed the file without stamping a
+// version.
+//
+// ownershipKey is the canonical target identity used for the ownership check;
+// skillPath is the caller's user-facing path used for the actual filesystem
+// read/restore/delete. They differ only when the target was reached through a
+// workspace alias, and both refer to the same physical file.
+func (a *Applier) rollbackSkill(ownershipKey, skillPath, backupPath string, hadOriginal bool, writtenBody string, ownedVersion uint64) error {
+	if currentApplyOwnership(ownershipKey) != ownedVersion {
+		return fmt.Errorf(
+			"refusing to roll back skill %q: a newer evolution apply owns the target after this apply wrote it",
+			filepath.Base(filepath.Dir(skillPath)),
+		)
+	}
+	current, err := os.ReadFile(skillPath)
+	if os.IsNotExist(err) {
+		// We wrote a body here; its absence means a later writer removed or
+		// replaced the target. Do not resurrect it from a stale backup.
+		return fmt.Errorf(
+			"refusing to roll back skill %q: target was removed after this apply wrote it",
+			filepath.Base(filepath.Dir(skillPath)),
+		)
+	}
+	if err != nil {
+		return err
+	}
+	if string(current) != writtenBody {
+		return fmt.Errorf(
+			"refusing to roll back skill %q: target changed on disk after this apply wrote it",
+			filepath.Base(filepath.Dir(skillPath)),
+		)
+	}
+
 	if hadOriginal {
 		data, err := os.ReadFile(backupPath)
 		if err != nil {
@@ -374,9 +504,6 @@ func validateAppliedSkillBody(body, targetSkillName string, allowExtraFrontmatte
 	body = strings.TrimSpace(body)
 	if !strings.HasPrefix(body, "---\n") {
 		return fmt.Errorf("skill frontmatter is required")
-	}
-	if !strings.Contains(body, "\n# ") {
-		return fmt.Errorf("skill heading is required")
 	}
 	frontmatter, _ := splitSkillFrontmatter(body)
 	fields, err := parseSkillFrontmatterFields(frontmatter, allowExtraFrontmatterFields)

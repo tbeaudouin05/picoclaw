@@ -487,7 +487,7 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) (err e
 			}
 			continue
 		}
-		updatedDraft, applyErr := rt.applyCandidateDraftWithRetry(
+		updatedDraft, applyErr := rt.applyReviewedCandidateDraft(
 			ctx, workspace, store, applier, generator, rule, matches, evidence, draft, runID,
 		)
 		if applyErr != nil {
@@ -569,7 +569,7 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) (err e
 		})
 		if mode == "apply" && applier != nil && draft.Status == DraftStatusCandidate {
 			var err error
-			draft, err = rt.applyCandidateDraftWithRetry(
+			draft, err = rt.applyReviewedCandidateDraft(
 				ctx, workspace, store, applier, generator, rule, matches, evidence, draft, runID,
 			)
 			if err != nil {
@@ -1510,6 +1510,7 @@ func (rt *Runtime) applyCandidateDraft(
 	applier *Applier,
 	draft SkillDraft,
 	runID string,
+	expected observedTargetState,
 ) (SkillDraft, error) {
 	logger.InfoCF("evolution", "Applying skill draft", map[string]any{
 		"workspace":    workspace,
@@ -1518,7 +1519,7 @@ func (rt *Runtime) applyCandidateDraft(
 		"change_kind":  string(draft.ChangeKind),
 		"run_id":       runID,
 	})
-	rollbackApply, err := applier.applyDraftWithRollback(ctx, workspace, draft)
+	rollbackApply, err := applier.applyDraftWithRollback(ctx, workspace, draft, expected)
 	if err != nil {
 		logger.WarnCF("evolution", "Skill draft apply failed", map[string]any{
 			"workspace":    workspace,
@@ -1640,22 +1641,23 @@ func enforceLineageConstraints(draft *SkillDraft, c draftLineageConstraints) str
 	return ""
 }
 
-func draftSafetyReason(err error) string {
-	var safety *DraftApplySafetyError
-	if errors.As(err, &safety) {
-		return safety.Error()
-	}
-	return err.Error()
-}
-
-// applyCandidateDraftWithRetry applies a candidate draft and, only for a typed
-// draft validation / apply-safety rejection that a regenerator can plausibly
-// repair, performs exactly one bounded feedback-aware regeneration and a single
-// full revalidation+apply. Every other failure class (context, provider,
-// filesystem/write/backup/rollback/profile/save, name/path, security scan,
-// unsupported generator) keeps the existing single-attempt behavior. There is
-// no recursion: at most one regeneration and one extra apply per call.
-func (rt *Runtime) applyCandidateDraftWithRetry(
+// applyReviewedCandidateDraft applies a candidate draft after, for a complete
+// replacement of an existing on-disk skill, running exactly ONE proactive
+// criteria-based old-vs-candidate review pass before apply. The reviewer output
+// is authoritative: it is applied once the deterministic schema/type, name/path,
+// required-frontmatter, and secret-scan gates pass. There is no structural-diff
+// heuristic, no natural-language safety-wording heuristic, and no second review
+// or apply retry.
+//
+// The reviewer must be usable. A mandatory review that CANNOT run (no reviewer
+// capability, an unconfigured provider/model, a provider error, a nil/empty or
+// malformed response, or an invalid reviewed draft) fails the apply CLOSED before
+// any write rather than silently applying the unreviewed candidate. A
+// caller-driven cancellation/deadline is surfaced as the context error (recorded
+// as canceled) with no write. Any other change kind, or a replacement whose
+// target is absent on disk, applies the candidate directly through the
+// deterministic gates.
+func (rt *Runtime) applyReviewedCandidateDraft(
 	ctx context.Context,
 	workspace string,
 	store *Store,
@@ -1667,105 +1669,226 @@ func (rt *Runtime) applyCandidateDraftWithRetry(
 	draft SkillDraft,
 	runID string,
 ) (SkillDraft, error) {
-	updated, applyErr := rt.applyCandidateDraft(ctx, workspace, store, applier, draft, runID)
-	if applyErr == nil {
-		return updated, nil
+	finalDraft, expected, reviewErr := rt.reviewReplacementDraft(
+		ctx, workspace, generator, rule, matches, evidence, draft, runID,
+	)
+	if reviewErr != nil {
+		// A cancellation/deadline is propagated unchanged so the run is recorded
+		// as canceled, not as a quarantined apply failure. Every other cause is a
+		// mandatory-review-unavailable pre-apply failure that writes nothing.
+		if errors.Is(reviewErr, context.Canceled) || errors.Is(reviewErr, context.DeadlineExceeded) {
+			return draft, reviewErr
+		}
+		return rt.failReviewUnavailable(store, workspace, draft, reviewErr, runID)
+	}
+	return rt.applyCandidateDraft(ctx, workspace, store, applier, finalDraft, runID, expected)
+}
+
+// failReviewUnavailable fails an existing-skill replacement closed before apply
+// when its mandatory proactive review could not run. It records the same
+// rollback-audit and quarantine bookkeeping a pre-write apply rejection would,
+// so an unreviewed replacement is never written to disk, and returns
+// ErrApplyDraftFailed so the cold path treats it as a normal apply failure.
+func (rt *Runtime) failReviewUnavailable(
+	store *Store,
+	workspace string,
+	draft SkillDraft,
+	cause error,
+	runID string,
+) (SkillDraft, error) {
+	logger.WarnCF("evolution", "Refusing to apply unreviewed skill replacement", map[string]any{
+		"workspace":    workspace,
+		"draft_id":     draft.ID,
+		"target_skill": draft.TargetSkillName,
+		"error":        cause.Error(),
+		"run_id":       runID,
+	})
+	draft.Status = DraftStatusQuarantined
+	draft.ScanFindings = appendUniqueStrings(draft.ScanFindings, fmt.Sprintf("apply blocked: %v", cause))
+	if auditErr := rt.recordRollbackAudit(store, draft, cause); auditErr != nil {
+		draft.ScanFindings = appendUniqueStrings(draft.ScanFindings, fmt.Sprintf("rollback audit failed: %v", auditErr))
+		if saveErr := store.SaveDrafts([]SkillDraft{draft}); saveErr != nil {
+			return draft, errorsJoin(fmt.Errorf("%w: %v", ErrApplyDraftFailed, cause), auditErr, saveErr)
+		}
+		return draft, errorsJoin(fmt.Errorf("%w: %v", ErrApplyDraftFailed, cause), auditErr)
+	}
+	if saveErr := store.SaveDrafts([]SkillDraft{draft}); saveErr != nil {
+		return draft, errorsJoin(fmt.Errorf("%w: %v", ErrApplyDraftFailed, cause), saveErr)
+	}
+	return draft, fmt.Errorf("%w: %v", ErrApplyDraftFailed, cause)
+}
+
+// reviewReplacementDraft runs the single proactive replacement review for a
+// complete replacement of an existing on-disk skill. It returns the draft to
+// apply, the exact target state the review observed (existence plus, if present,
+// the exact body, plus the canonical ownership version — so apply can detect an
+// intervening edit, Gap 3, AND a later evolution-owned apply that wrote
+// byte-identical content, which the body comparison alone cannot catch), and an
+// error whenever the MANDATORY review could not produce a usable, valid reviewed
+// draft.
+//
+// The observed target state is explicit rather than an empty-string sentinel, so
+// an absent target, an existing-but-empty target, and "no guard applies" stay
+// distinct: apply can fail closed on an absent->created or an empty->changed
+// race, not only on a nonempty body that changed.
+//
+// Under the trust-the-reviewer model the reviewer's output is authoritative once
+// it passes the deterministic gates; there is no fallback to the unreviewed
+// candidate. Outcomes:
+//   - not a replacement, or the target name is empty → (draft, {}, nil): no guard
+//     applies and no review is required; apply the candidate directly.
+//   - the replacement target is absent on disk (os.IsNotExist) → (draft,
+//     {guard,absent}, nil): no review is possible, but apply must still fail closed
+//     if the target is created before the write.
+//   - the target cannot be read for any OTHER reason → (draft, {}, err): the
+//     observed state cannot be established, so the caller fails the apply CLOSED
+//     before the review rather than guessing.
+//   - the review cannot run or does not yield a usable draft (no reviewer
+//     capability, provider/config failure, provider error, nil/empty/malformed
+//     response, invalid reviewed draft, lineage drift, or a reviewed body that
+//     fails the deterministic schema/secret/frontmatter gates) → (draft, {}, err):
+//     the caller fails the apply CLOSED and writes nothing.
+//   - cancellation/deadline → (draft, {}, ctxErr): the caller records the run as
+//     canceled and writes nothing.
+//   - the reviewer produced a valid, gated refinement → (refined, {guard,exists,
+//     oldBody}, nil).
+//
+// It issues exactly one reviewer call and never loops.
+func (rt *Runtime) reviewReplacementDraft(
+	ctx context.Context,
+	workspace string,
+	generator DraftGenerator,
+	rule LearningRecord,
+	matches []skills.SkillInfo,
+	evidence DraftEvidence,
+	draft SkillDraft,
+	runID string,
+) (SkillDraft, observedTargetState, error) {
+	if draft.ChangeKind != ChangeKindReplace {
+		return draft, observedTargetState{}, nil
+	}
+	target := strings.TrimSpace(draft.TargetSkillName)
+	if target == "" {
+		return draft, observedTargetState{}, nil
+	}
+	skillPath := filepath.Join(workspace, "skills", target, "SKILL.md")
+	// Capture the canonical ownership version BEFORE reading the body, using the
+	// SAME canonical identity apply locks and stamps on. Reading the version first
+	// makes the guard fail closed against a race: an evolution-owned apply that
+	// lands between this read and the eventual guarded apply (including one that
+	// writes byte-identical content) stamps a version strictly higher than the one
+	// captured here, so apply detects the supersession even though no lock is held
+	// across the review. (If the version were read after the body, a same-byte
+	// write interleaved between the two reads could be missed.) The lock is not
+	// held during review, so this is the tightest guarantee the current model
+	// permits; the eventual apply re-reads the version under the per-target lock.
+	reviewedVersion := currentApplyOwnership(canonicalTargetIdentity(skillPath))
+	oldBody, err := os.ReadFile(skillPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			// Only os.IsNotExist may mean observed-absent. Any other read error
+			// (permissions, I/O, a path that is not a regular file) means the
+			// observed state cannot be established, so fail closed before review
+			// rather than treat it as an absent target.
+			return draft, observedTargetState{}, fmt.Errorf(
+				"%w: cannot read replacement target %q: %v", ErrReplacementReviewUnavailable, target, err)
+		}
+		// The target is absent on disk, so there is nothing to review; apply
+		// resolves the replace-nonexistent semantics. Record the observed-absent
+		// guard (with the captured version) so apply fails closed if the target is
+		// created — or otherwise written by a newer evolution apply — before the
+		// write.
+		return draft, observedTargetState{guard: true, existed: false, versionGuard: true, version: reviewedVersion}, nil
+	}
+	observed := observedTargetState{guard: true, existed: true, body: string(oldBody), versionGuard: true, version: reviewedVersion}
+	// From here the draft is a complete replacement of an existing skill, so the
+	// proactive review is MANDATORY and its output is applied as the full,
+	// complete document. If either the exact old document or the rendered
+	// candidate exceeds the reviewer's per-document capacity, the prompt bounder
+	// would silently truncate it, so the reviewer would judge only part of a
+	// document whose output is nonetheless written as a complete replacement.
+	// That is not a real review of what gets applied: fail closed before any
+	// provider call or write, via the existing review-unavailable path.
+	candidateDocument := renderDeployableSkillBody(draft.BodyOrPatch)
+	if exceedsReplacementReviewCapacity(string(oldBody)) {
+		return draft, observedTargetState{}, fmt.Errorf(
+			"%w: %w: old document is %d bytes (reviewer capacity %d)",
+			ErrReplacementReviewUnavailable, errReplacementDocumentTooLarge,
+			len(oldBody), maxReplacementReviewBodyBytes)
+	}
+	if exceedsReplacementReviewCapacity(candidateDocument) {
+		return draft, observedTargetState{}, fmt.Errorf(
+			"%w: %w: candidate document is %d bytes (reviewer capacity %d)",
+			ErrReplacementReviewUnavailable, errReplacementDocumentTooLarge,
+			len(candidateDocument), maxReplacementReviewBodyBytes)
+	}
+	// On cancellation, fail closed with the context error before calling the
+	// reviewer so nothing is ever written.
+	select {
+	case <-ctx.Done():
+		return draft, observedTargetState{}, ctx.Err()
+	default:
 	}
 
-	regenerator, ok := draftRegeneratorFrom(generator)
-	if !ok || !IsRetryableDraftFailure(applyErr) {
-		return updated, applyErr
+	reviewer, ok := replacementReviewerFrom(generator)
+	if !ok {
+		return draft, observedTargetState{}, fmt.Errorf("%w: generator does not support replacement review", ErrReplacementReviewUnavailable)
 	}
 
 	constraints := lineageConstraintsFromDraft(workspace, draft)
-	reason := draftSafetyReason(applyErr)
-	skillPath := filepath.Join(workspace, "skills", constraints.target, "SKILL.md")
-	currentBody, readErr := os.ReadFile(skillPath)
-	targetExists := readErr == nil
-
-	logger.InfoCF("evolution", "Regenerating skill draft after apply-safety rejection", map[string]any{
-		"workspace":     workspace,
-		"draft_id":      draft.ID,
-		"target_skill":  constraints.target,
-		"retry_attempt": 1,
-		"reason":        reason,
-		"run_id":        runID,
+	reviewed, reviewErr := reviewer.ReviewReplacement(ctx, ReplacementReviewRequest{
+		Rule:              rule,
+		Matches:           matches,
+		Evidence:          evidence,
+		CandidateDraft:    draft,
+		WorkspaceID:       workspace,
+		TargetSkillName:   target,
+		OldDocument:       string(oldBody),
+		CandidateDocument: candidateDocument,
 	})
+	if reviewErr != nil {
+		// The mandatory review did not produce a usable result. Cancellation is
+		// surfaced verbatim; everything else fails closed. Never silently apply
+		// the unreviewed candidate.
+		return draft, observedTargetState{}, reviewErr
+	}
 
-	regenerated, regenErr := regenerator.RegenerateDraft(ctx, DraftRegenerationRequest{
-		Rule:             rule,
-		Matches:          matches,
-		Evidence:         evidence,
-		OriginalDraft:    draft,
-		FailureReason:    reason,
-		AttemptNumber:    1,
-		WorkspaceID:      constraints.workspaceID,
-		TargetSkillName:  constraints.target,
-		ChangeKind:       constraints.changeKind,
-		TargetExists:     targetExists,
-		CurrentSkillBody: string(currentBody),
+	// Preserve immutable identity/metadata; the reviewer may only change content.
+	// A drifted reviewed draft is an invalid reviewer output, so fail closed
+	// rather than applying the unreviewed candidate.
+	if violation := enforceLineageConstraints(&reviewed, constraints); violation != "" {
+		return draft, observedTargetState{}, fmt.Errorf("%w: reviewer changed draft lineage: %s", ErrReplacementReviewUnavailable, violation)
+	}
+	reviewed.CreatedAt = draft.CreatedAt
+	reviewed.MatchedSkillRefs = draft.MatchedSkillRefs
+
+	// Run the deterministic draft review (schema/type + secret scan) on the
+	// reviewed body. A hard-gate failure means the reviewer output is unusable, so
+	// fail closed.
+	review := ReviewDraft(reviewed)
+	if review.Status != DraftStatusCandidate {
+		return draft, observedTargetState{}, fmt.Errorf("%w: reviewer output failed deterministic gates: %s", ErrReplacementReviewUnavailable, strings.Join(review.Findings, "; "))
+	}
+
+	// Retain the deterministic required-frontmatter-field preservation gate
+	// against the exact old body. The reviewer may rename, reorganize, rephrase,
+	// or drop sections and safety wording freely — that judgment is trusted — but
+	// it must not drop a required frontmatter field.
+	if err := validateHolisticReplacement(string(oldBody), renderDeployableSkillBody(reviewed.BodyOrPatch)); err != nil {
+		return draft, observedTargetState{}, fmt.Errorf("%w: reviewer output failed frontmatter preservation: %v", ErrReplacementReviewUnavailable, err)
+	}
+	reviewed.Status = DraftStatusCandidate
+	reviewed.ScanFindings = nil
+	reviewed.ReviewNotes = appendUniqueStrings(draft.ReviewNotes,
+		"refined by one proactive old-vs-candidate replacement review before apply")
+
+	logger.InfoCF("evolution", "Refined replacement draft with one proactive review", map[string]any{
+		"workspace":    workspace,
+		"draft_id":     reviewed.ID,
+		"target_skill": target,
+		"run_id":       runID,
 	})
-	if regenErr != nil {
-		return rt.annotateQuarantinedDraft(store, updated, applyErr,
-			fmt.Sprintf("regeneration failed, retaining original rejection: %v", regenErr))
-	}
-
-	if violation := enforceLineageConstraints(&regenerated, constraints); violation != "" {
-		return rt.annotateQuarantinedDraft(store, updated, applyErr,
-			"regenerated draft rejected before apply: "+violation)
-	}
-
-	final := rt.finalizeDraft(workspace, rule, matches, evidence, regenerated)
-	if violation := enforceLineageConstraints(&final, constraints); violation != "" {
-		return rt.annotateQuarantinedDraft(store, updated, applyErr,
-			"regenerated draft rejected after normalization: "+violation)
-	}
-	if final.Status != DraftStatusCandidate {
-		return rt.annotateQuarantinedDraft(store, updated, applyErr,
-			"regenerated draft rejected by review: "+strings.Join(final.ScanFindings, "; "))
-	}
-
-	final.ReviewNotes = appendUniqueStrings(final.ReviewNotes,
-		fmt.Sprintf("regenerated once after apply-safety rejection: %s", reason))
-
-	retried, retryErr := rt.applyCandidateDraft(ctx, workspace, store, applier, final, runID)
-	if retryErr != nil {
-		// One retry only — no recursion. The retried draft is already quarantined
-		// and saved with its own reason; also record the first-attempt reason so
-		// the quarantined draft carries both.
-		retried.ScanFindings = appendUniqueStrings(retried.ScanFindings,
-			fmt.Sprintf("first apply attempt failed before regeneration: %s", reason))
-		if saveErr := store.SaveDrafts([]SkillDraft{retried}); saveErr != nil {
-			return retried, errorsJoin(retryErr, saveErr)
-		}
-		return retried, retryErr
-	}
-
-	logger.InfoCF("evolution", "Applied regenerated skill draft successfully", map[string]any{
-		"workspace":     workspace,
-		"draft_id":      retried.ID,
-		"target_skill":  retried.TargetSkillName,
-		"retry_attempt": 1,
-		"run_id":        runID,
-	})
-	return retried, nil
-}
-
-// annotateQuarantinedDraft records an additional finding on an already-quarantined
-// draft and re-persists it, returning the original (prefix-compatible) apply
-// error joined with any save failure.
-func (rt *Runtime) annotateQuarantinedDraft(
-	store *Store,
-	draft SkillDraft,
-	applyErr error,
-	finding string,
-) (SkillDraft, error) {
-	draft.Status = DraftStatusQuarantined
-	draft.ScanFindings = appendUniqueStrings(draft.ScanFindings, finding)
-	if saveErr := store.SaveDrafts([]SkillDraft{draft}); saveErr != nil {
-		return draft, errorsJoin(applyErr, saveErr)
-	}
-	return draft, applyErr
+	return reviewed, observed, nil
 }
 
 func (rt *Runtime) recordRollbackAudit(store *Store, draft SkillDraft, applyErr error) error {

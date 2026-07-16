@@ -2,6 +2,7 @@ package evolution
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,19 @@ import (
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/skills"
 )
+
+// ErrReplacementReviewUnavailable marks a mandatory replacement review that did
+// not yield a usable, valid reviewed draft: the reviewer capability or its
+// provider/model is absent, the provider call errored, it returned a nil/empty
+// or malformed response, or the reviewed draft failed validation, drifted from
+// the immutable lineage, or failed the deterministic schema/secret/frontmatter
+// gates. A complete replacement of an existing on-disk SKILL.md must be reviewed
+// exactly once before apply; whenever the review is unusable the cold path fails
+// the apply CLOSED (a normal pre-apply rejection) and writes nothing rather than
+// silently applying the unreviewed candidate. A caller-driven
+// cancellation/deadline is surfaced as the context error instead, so the run is
+// recorded as canceled.
+var ErrReplacementReviewUnavailable = errors.New("replacement review unavailable")
 
 type DraftGenerator interface {
 	GenerateDraft(ctx context.Context, rule LearningRecord, matches []skills.SkillInfo) (SkillDraft, error)
@@ -24,39 +38,42 @@ type EvidenceAwareDraftGenerator interface {
 	) (SkillDraft, error)
 }
 
-// DraftRegenerator is an optional capability: a generator that can produce a
-// single corrected draft after its previous output was rejected by typed draft
-// validation or apply-safety checks. Implementing it opts a generator into the
-// cold path's one bounded feedback-aware retry. Generators that do not
-// implement it retain the existing no-retry behavior.
-type DraftRegenerator interface {
-	RegenerateDraft(ctx context.Context, req DraftRegenerationRequest) (SkillDraft, error)
+// ReplacementReviewer is an optional capability: a generator that can run one
+// proactive, criteria-based old-vs-candidate review pass over a complete
+// replacement of an existing skill before it is applied. Implementing it opts a
+// generator into exactly one refinement call ahead of apply. The pass is
+// proactive — it never depends on, or waits for, a structural rejection, and it
+// is never issued a second time for the same draft.
+//
+// A generator that cannot review a mandatory replacement (it does not implement
+// this interface, or its provider/model is unconfigured) must surface
+// ErrReplacementReviewUnavailable so the cold path fails the apply closed
+// instead of silently applying an unreviewed replacement.
+type ReplacementReviewer interface {
+	ReviewReplacement(ctx context.Context, req ReplacementReviewRequest) (SkillDraft, error)
 }
 
-// DraftRegenerationRequest carries the exact rejection reason plus the immutable
-// target/change constraints captured before the first apply attempt. The
-// regenerator must return a corrected draft that honors these constraints; the
+// ReplacementReviewRequest carries the exact old and candidate documents plus
+// the immutable target identity so the reviewer refines the candidate against
+// explicit safety/quality criteria without changing what is being modified. The
 // cold path rejects (never normalizes away) a result that changes the
 // lineage/target/change-kind.
-type DraftRegenerationRequest struct {
-	Rule             LearningRecord
-	Matches          []skills.SkillInfo
-	Evidence         DraftEvidence
-	OriginalDraft    SkillDraft
-	FailureReason    string
-	AttemptNumber    int
-	WorkspaceID      string
-	TargetSkillName  string
-	ChangeKind       ChangeKind
-	TargetExists     bool
-	CurrentSkillBody string
+type ReplacementReviewRequest struct {
+	Rule              LearningRecord
+	Matches           []skills.SkillInfo
+	Evidence          DraftEvidence
+	CandidateDraft    SkillDraft
+	WorkspaceID       string
+	TargetSkillName   string
+	OldDocument       string
+	CandidateDocument string
 }
 
-// draftRegeneratorFrom returns the generator's regeneration capability when it
-// supports the optional interface.
-func draftRegeneratorFrom(generator DraftGenerator) (DraftRegenerator, bool) {
-	regenerator, ok := generator.(DraftRegenerator)
-	return regenerator, ok && regenerator != nil
+// replacementReviewerFrom returns the generator's proactive replacement-review
+// capability when it supports the optional interface.
+func replacementReviewerFrom(generator DraftGenerator) (ReplacementReviewer, bool) {
+	reviewer, ok := generator.(ReplacementReviewer)
+	return reviewer, ok && reviewer != nil
 }
 
 type DraftEvidence struct {
