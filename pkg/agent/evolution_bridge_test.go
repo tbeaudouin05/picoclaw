@@ -729,7 +729,7 @@ func TestEvolutionBridge_DraftModeKeepsCandidateDraft(t *testing.T) {
 	assertProfileNotExists(t, tmpDir, "weather")
 }
 
-func TestEvolutionBridge_ApplyModeAutomaticallyRunsColdPathAndAppliesMergeDraft(t *testing.T) {
+func TestEvolutionBridge_ApplyModeAutomaticallyRunsColdPathAndAppliesMergeDraftAsReplacement(t *testing.T) {
 	tmpDir := t.TempDir()
 	seedReadyRule(t, tmpDir)
 
@@ -766,16 +766,36 @@ func TestEvolutionBridge_ApplyModeAutomaticallyRunsColdPathAndAppliesMergeDraft(
 	if drafts[0].Status != evolution.DraftStatusAccepted {
 		t.Fatalf("draft status = %q, want %q", drafts[0].Status, evolution.DraftStatusAccepted)
 	}
+	// The source safety model no longer applies partial merge/append patches to
+	// an existing skill; a merge draft is normalized into a complete holistic
+	// replacement before it is applied.
+	if drafts[0].ChangeKind != evolution.ChangeKindReplace {
+		t.Fatalf("draft change_kind = %q, want %q", drafts[0].ChangeKind, evolution.ChangeKindReplace)
+	}
 
-	merged := waitForSkillBody(t, skillPath)
-	if !strings.Contains(merged, "Use city names.") {
-		t.Fatalf("merged skill lost original content:\n%s", merged)
+	applied := waitForSkillBody(t, skillPath)
+	if !strings.Contains(applied, "Use city names.") {
+		t.Fatalf("replacement dropped original content:\n%s", applied)
 	}
-	if !strings.Contains(merged, "## Merged Knowledge") {
-		t.Fatalf("merged skill missing merged section:\n%s", merged)
+	// The obsolete merge-draft path appended a "## Merged Knowledge" section and
+	// spliced in the raw patch verbatim; replacement semantics must not do that.
+	if strings.Contains(applied, "## Merged Knowledge") {
+		t.Fatalf("replacement should not emit a merged section:\n%s", applied)
 	}
-	if !strings.Contains(merged, "Prefer native-name query first.") {
-		t.Fatalf("merged skill missing learned knowledge:\n%s", merged)
+	if strings.Contains(applied, "Prefer native-name query first.") {
+		t.Fatalf("replacement should not splice the raw patch verbatim:\n%s", applied)
+	}
+	// The learned knowledge is folded into the holistic replacement as a
+	// deployable usage section keyed off the learned rule summary, with the
+	// internal learning-trace headings stripped.
+	if !strings.Contains(applied, "## Usage Notes") {
+		t.Fatalf("replacement missing deployable usage section:\n%s", applied)
+	}
+	if !strings.Contains(applied, "weather native-name path") {
+		t.Fatalf("replacement missing learned rule summary:\n%s", applied)
+	}
+	if strings.Contains(applied, "## Learned Evolution") {
+		t.Fatalf("deployed skill should not expose learning traces:\n%s", applied)
 	}
 
 	profile := waitForProfile(t, tmpDir, "weather")
