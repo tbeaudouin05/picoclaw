@@ -59,6 +59,7 @@ type WhatsAppNativeChannel struct {
 	aiToggle     aiToggleStore                            // per-chat AI auto-response toggle; non-nil after Start
 	cmdDedupe    cmdDedupeStore                           // deduplicates toggle command confirmations on redelivery; non-nil after Start
 	lidLookupFn  func(types.JID) (string, string, string) // test hook; defaults to lookupPNForLID(client, lid)
+	sendTextFn   func(chatID, text string) error          // test hook; nil sends via the live client
 	mu           sync.Mutex
 	runCtx       context.Context
 	runCancel    context.CancelFunc
@@ -481,7 +482,21 @@ func (c *WhatsAppNativeChannel) handleIncoming(evt *events.Message) {
 	}
 	// Drop outgoing messages: group echoes and DMs sent from the linked account to others.
 	// Self-chat (Chat.User == Sender.User) is kept so the account owner can interact with the agent.
+	//
+	// Before dropping an outgoing DM to a customer, recognize the owner-only admin
+	// AI toggle commands ("/ai on-admin", "/ai off-admin"). These let the linked
+	// account owner pause/resume AI replies for a specific customer conversation
+	// from that conversation itself. They are honored only for direct (non-group)
+	// chats and never forwarded to the agent. Group echoes are still dropped and
+	// the admin command is not supported in groups.
 	if evt.Info.IsFromMe && evt.Info.Chat.User != evt.Info.Sender.User {
+		// Admin toggle is only meaningful for direct user chats (phone-number or LID).
+		// Groups, newsletters, broadcasts, and all other non-user servers are dropped
+		// without attempting command parsing.
+		server := evt.Info.Chat.Server
+		if server == types.DefaultUserServer || server == types.HiddenUserServer {
+			c.tryHandleAdminAIToggle(evt)
+		}
 		return
 	}
 	senderID := evt.Info.Sender.String()
@@ -653,6 +668,139 @@ func (c *WhatsAppNativeChannel) handleIncoming(evt *events.Message) {
 	}
 
 	c.HandleInboundContext(c.runCtx, chatID, content, mediaPaths, inboundCtx, allowedSender)
+}
+
+// tryHandleAdminAIToggle applies an owner-only admin AI toggle command sent from
+// the linked account into a direct customer chat. It returns true when evt was an
+// admin toggle command (and was handled). The caller has already verified that evt
+// is an outgoing (IsFromMe) message in a non-self, non-group chat.
+//
+// The message is never forwarded to the agent regardless of the return value; the
+// return value exists for clarity and testing.
+func (c *WhatsAppNativeChannel) tryHandleAdminAIToggle(evt *events.Message) bool {
+	if c.aiToggle == nil {
+		return false
+	}
+
+	content := evt.Message.GetConversation()
+	if content == "" && evt.Message.ExtendedTextMessage != nil {
+		content = evt.Message.ExtendedTextMessage.GetText()
+	}
+	content = utils.SanitizeMessageContent(content)
+
+	enable, isCmd := parseAdminAIToggleCommand(content)
+	if !isCmd {
+		return false
+	}
+
+	// Resolve the target customer chat to the same normalized (phone-number)
+	// JID that inbound messages from that customer resolve to, so the toggle
+	// applies to the identity used elsewhere. For a LID (HiddenUserServer) chat
+	// this must resolve to a phone-number JID; if it cannot, the command is not
+	// applied at all — no state write, no dedupe mark, and no confirmation — so a
+	// redelivery can retry once resolution becomes possible.
+	chatID, resolved := c.normalizeAdminTargetChatID(evt)
+	if !resolved {
+		logger.WarnCF("whatsapp", "admin ai_toggle target LID unresolved; skipping without state/dedupe/confirmation", map[string]any{
+			"chat": evt.Info.Chat.String(),
+		})
+		return true
+	}
+	messageID := evt.Info.ID
+
+	// Check dedupe before mutating state so a redelivered command is silently
+	// skipped without re-applying state or re-sending the confirmation.
+	if c.cmdDedupe != nil {
+		seen, dedupeErr := c.cmdDedupe.isSeen(chatID, messageID)
+		if dedupeErr != nil {
+			logger.WarnCF("whatsapp", "admin ai_toggle cmd_dedupe check failed", map[string]any{"err": dedupeErr.Error()})
+		} else if seen {
+			return true
+		}
+	}
+
+	// Mutate state first. State application is idempotent, so a redelivery after a
+	// failed confirmation send may re-apply it harmlessly.
+	if err := c.aiToggle.setEnabled(chatID, enable); err != nil {
+		logger.WarnCF("whatsapp", "admin ai_toggle set failed", map[string]any{"err": err.Error()})
+		c.sendChatText(chatID, "Failed to update AI toggle state. Please try again.")
+		return true
+	}
+
+	// Send the confirmation before recording dedupe: the command is only recorded
+	// as processed once the confirmation has actually been sent successfully. If
+	// the send fails (e.g. disconnected), leave it unrecorded so a redelivery
+	// retries the confirmation.
+	if err := c.sendChatText(chatID, adminToggleConfirmation(enable)); err != nil {
+		logger.WarnCF("whatsapp", "admin ai_toggle confirmation send failed; leaving unrecorded for retry", map[string]any{"err": err.Error()})
+		return true
+	}
+	if c.cmdDedupe != nil {
+		if err := c.cmdDedupe.markSeen(chatID, messageID); err != nil {
+			logger.WarnCF("whatsapp", "admin ai_toggle cmd_dedupe mark failed", map[string]any{"err": err.Error()})
+		}
+	}
+	return true
+}
+
+// normalizeAdminTargetChatID returns the customer chat JID for an admin toggle
+// command, normalizing a LID chat to its phone-number JID. This mirrors the
+// inbound LID->PN normalization so the toggle key matches the identity used when
+// the customer later sends messages. It prefers RecipientAlt (when it is already
+// a phone JID) before falling back to a LID lookup, analogous to the inbound
+// SenderAlt-then-lookup ordering.
+//
+// It returns (chatID, true) for a non-LID chat, or for a LID chat that resolves
+// to a phone-number JID via a valid DefaultUserServer RecipientAlt or a
+// successful lookup. It returns ("", false) when a LID chat cannot be resolved
+// to a phone-number JID; callers must not persist, dedupe, or confirm in that
+// case, since a LID JID is not a stable outbound target.
+func (c *WhatsAppNativeChannel) normalizeAdminTargetChatID(evt *events.Message) (string, bool) {
+	chatJID := evt.Info.Chat
+	if chatJID.Server != types.HiddenUserServer {
+		return chatJID.String(), true
+	}
+	if evt.Info.RecipientAlt.Server == types.DefaultUserServer && !evt.Info.RecipientAlt.IsEmpty() {
+		return evt.Info.RecipientAlt.String(), true
+	}
+	lookupFn := c.lidLookupFn
+	if lookupFn == nil {
+		lookupFn = func(lid types.JID) (string, string, string) {
+			return lookupPNForLID(c.client, lid)
+		}
+	}
+	if pnJID, status, _ := lookupFn(chatJID); status == "found" && pnJID != "" {
+		return pnJID, true
+	}
+	return "", false
+}
+
+// sendChatText sends a plain text message into chatID via the live client. The
+// sendTextFn test hook, when set, replaces the live send so confirmations can be
+// observed in tests. It returns a non-nil error when the message could not be
+// sent (client absent/disconnected, unparseable target, or send failure) so
+// callers can decide whether to record the command as processed.
+func (c *WhatsAppNativeChannel) sendChatText(chatID, text string) error {
+	if c.sendTextFn != nil {
+		return c.sendTextFn(chatID, text)
+	}
+	c.mu.Lock()
+	client := c.client
+	c.mu.Unlock()
+	if client == nil || !client.IsConnected() {
+		return errors.New("whatsapp client not connected")
+	}
+	to, err := parseJID(chatID)
+	if err != nil {
+		logger.WarnCF("whatsapp", "admin ai_toggle confirmation target parse failed", map[string]any{"err": err.Error()})
+		return err
+	}
+	waMsg := &waE2E.Message{Conversation: proto.String(text)}
+	if _, err := client.SendMessage(c.runCtx, to, waMsg); err != nil {
+		logger.WarnCF("whatsapp", "admin ai_toggle confirmation send failed", map[string]any{"err": err.Error()})
+		return err
+	}
+	return nil
 }
 
 func (c *WhatsAppNativeChannel) buildInboundDiagnosticFields(evt *events.Message) map[string]any {

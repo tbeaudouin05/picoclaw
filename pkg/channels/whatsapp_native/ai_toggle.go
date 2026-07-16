@@ -87,6 +87,29 @@ func parseAIToggleCommand(content string) (enable bool, ok bool) {
 	return false, false
 }
 
+// parseAdminAIToggleCommand returns (enabled, true) when content is the owner-only
+// admin toggle "/ai on-admin" or "/ai off-admin" (case-insensitive, leading/trailing
+// whitespace ignored). These variants are only honored for owner-sent (IsFromMe)
+// messages in a non-self direct customer chat; the caller enforces that gate.
+func parseAdminAIToggleCommand(content string) (enable bool, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(content)) {
+	case "/ai on-admin":
+		return true, true
+	case "/ai off-admin":
+		return false, true
+	}
+	return false, false
+}
+
+// adminToggleConfirmation returns the exact confirmation text sent into the
+// customer chat after an admin toggle command is applied.
+func adminToggleConfirmation(enable bool) string {
+	if enable {
+		return "AI replies resumed."
+	}
+	return "AI replies paused — a human will continue this conversation."
+}
+
 // cmdDedupeStore prevents duplicate processing of toggle commands on redelivery.
 // Keys are (chat JID, message ID) pairs.
 //
