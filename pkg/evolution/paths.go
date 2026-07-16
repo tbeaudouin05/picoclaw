@@ -12,6 +12,7 @@ type Paths struct {
 	TaskRecords     string
 	PatternRecords  string
 	SkillDrafts     string
+	RunLedger       string
 	ProfilesDir     string
 	BackupsDir      string
 }
@@ -29,6 +30,7 @@ func NewPaths(workspace, override string) Paths {
 		TaskRecords:     filepath.Join(root, "task-records.jsonl"),
 		PatternRecords:  filepath.Join(root, "pattern-records.jsonl"),
 		SkillDrafts:     filepath.Join(root, "skill-drafts.json"),
+		RunLedger:       filepath.Join(root, "run-ledger.jsonl"),
 		ProfilesDir:     filepath.Join(root, "profiles"),
 		BackupsDir:      filepath.Join(root, "backups"),
 	}

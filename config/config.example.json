@@ -30,6 +30,7 @@
     "min_task_count": 2,
     "min_success_ratio": 0.7,
     "task_record_retention_hours": 720,
+    "run_ledger_retention_hours": 120,
     "min_tool_calls_for_llm_enrichment": 3,
     "enrichment_enabled": false,
     "enrichment_model": "",

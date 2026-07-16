@@ -63,6 +63,7 @@ type EvolutionConfig struct {
 	MinTaskCount                 int      `json:"min_task_count,omitempty"`
 	MinSuccessRatio              float64  `json:"min_success_ratio,omitempty"`
 	TaskRecordRetentionHours     int      `json:"task_record_retention_hours,omitempty"`
+	RunLedgerRetentionHours      int      `json:"run_ledger_retention_hours,omitempty"`
 	MinToolCallsForLLMEnrichment int      `json:"min_tool_calls_for_llm_enrichment,omitempty"`
 	EnrichmentEnabled            bool     `json:"enrichment_enabled,omitempty"`
 	EnrichmentModel              string   `json:"enrichment_model,omitempty"`
@@ -108,6 +109,7 @@ func (c EvolutionConfig) MarshalJSON() ([]byte, error) {
 		MinTaskCount                 int      `json:"min_task_count,omitempty"`
 		MinSuccessRatio              float64  `json:"min_success_ratio,omitempty"`
 		TaskRecordRetentionHours     int      `json:"task_record_retention_hours,omitempty"`
+		RunLedgerRetentionHours      int      `json:"run_ledger_retention_hours,omitempty"`
 		MinToolCallsForLLMEnrichment int      `json:"min_tool_calls_for_llm_enrichment"`
 		EnrichmentEnabled            bool     `json:"enrichment_enabled,omitempty"`
 		EnrichmentModel              string   `json:"enrichment_model,omitempty"`
@@ -121,6 +123,7 @@ func (c EvolutionConfig) MarshalJSON() ([]byte, error) {
 		MinTaskCount:                 c.EffectiveMinTaskCount(),
 		MinSuccessRatio:              c.EffectiveMinSuccessRatio(),
 		TaskRecordRetentionHours:     c.EffectiveTaskRecordRetentionHours(),
+		RunLedgerRetentionHours:      c.EffectiveRunLedgerRetentionHours(),
 		MinToolCallsForLLMEnrichment: c.EffectiveMinToolCallsForLLMEnrichment(),
 		EnrichmentEnabled:            c.EnrichmentEnabled,
 		EnrichmentModel:              strings.TrimSpace(c.EnrichmentModel),
@@ -205,6 +208,13 @@ func (c EvolutionConfig) EffectiveTaskRecordRetentionHours() int {
 		return c.TaskRecordRetentionHours
 	}
 	return 720
+}
+
+func (c EvolutionConfig) EffectiveRunLedgerRetentionHours() int {
+	if c.RunLedgerRetentionHours > 0 {
+		return c.RunLedgerRetentionHours
+	}
+	return 120
 }
 
 func (c EvolutionConfig) EffectiveMinToolCallsForLLMEnrichment() int {

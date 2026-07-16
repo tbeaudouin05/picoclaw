@@ -304,6 +304,7 @@ func TestDefaultConfig_EvolutionDefaults(t *testing.T) {
 	assert.Equal(t, 2, cfg.Evolution.MinTaskCount)
 	assert.Equal(t, 0.7, cfg.Evolution.MinSuccessRatio)
 	assert.Equal(t, 720, cfg.Evolution.TaskRecordRetentionHours)
+	assert.Equal(t, 120, cfg.Evolution.RunLedgerRetentionHours)
 	assert.Equal(t, 3, cfg.Evolution.MinToolCallsForLLMEnrichment)
 	assert.False(t, cfg.Evolution.EnrichmentEnabled)
 	assert.Equal(t, 30, cfg.Evolution.EnrichmentTimeoutSeconds)
@@ -311,6 +312,7 @@ func TestDefaultConfig_EvolutionDefaults(t *testing.T) {
 	assert.Equal(t, 2, cfg.Evolution.EffectiveMinTaskCount())
 	assert.Equal(t, 0.7, cfg.Evolution.EffectiveMinSuccessRatio())
 	assert.Equal(t, 720, cfg.Evolution.EffectiveTaskRecordRetentionHours())
+	assert.Equal(t, 120, cfg.Evolution.EffectiveRunLedgerRetentionHours())
 	assert.Equal(t, 3, cfg.Evolution.EffectiveMinToolCallsForLLMEnrichment())
 	assert.False(t, cfg.Evolution.RunsColdPathAutomatically())
 	assert.False(t, cfg.Evolution.AutoAppliesDrafts())
@@ -320,6 +322,12 @@ func TestEvolutionConfig_EffectiveTaskRecordRetentionHours(t *testing.T) {
 	assert.Equal(t, 720, (EvolutionConfig{}).EffectiveTaskRecordRetentionHours())
 	assert.Equal(t, 48, (EvolutionConfig{TaskRecordRetentionHours: 48}).EffectiveTaskRecordRetentionHours())
 	assert.Equal(t, 720, (EvolutionConfig{TaskRecordRetentionHours: -1}).EffectiveTaskRecordRetentionHours())
+}
+
+func TestEvolutionConfig_EffectiveRunLedgerRetentionHours(t *testing.T) {
+	assert.Equal(t, 120, (EvolutionConfig{}).EffectiveRunLedgerRetentionHours())
+	assert.Equal(t, 72, (EvolutionConfig{RunLedgerRetentionHours: 72}).EffectiveRunLedgerRetentionHours())
+	assert.Equal(t, 120, (EvolutionConfig{RunLedgerRetentionHours: -1}).EffectiveRunLedgerRetentionHours())
 }
 
 func TestEvolutionConfig_EnrichmentThresholdNormalization(t *testing.T) {

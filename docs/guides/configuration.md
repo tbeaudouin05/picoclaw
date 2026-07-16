@@ -82,6 +82,7 @@ The `evolution` block controls PicoClaw's self-evolution runtime. When enabled, 
     "min_task_count": 2,
     "min_success_ratio": 0.7,
     "task_record_retention_hours": 720,
+    "run_ledger_retention_hours": 120,
     "enrichment_enabled": false,
     "enrichment_model": "",
     "min_tool_calls_for_llm_enrichment": 3,
@@ -100,6 +101,7 @@ The `evolution` block controls PicoClaw's self-evolution runtime. When enabled, 
 | `min_task_count` | `2` | Minimum related task records required before a pattern is eligible for draft generation. |
 | `min_success_ratio` | `0.7` | Minimum success ratio for a task cluster. Use a value greater than `0` and up to `1`. |
 | `task_record_retention_hours` | `720` | Retains task records for 30 days by default. Cold-path runs prune older records only when no live pattern, candidate draft, or applied skill depends on them. |
+| `run_ledger_retention_hours` | `120` | Retains the cold-path run ledger (`run-ledger.jsonl`) for 5 days by default. Each meaningful `draft`/`apply` run appends one durable outcome entry; runs perform bounded cleanup of that workspace's entries older than this window. A hard cap of 1000 newest entries is also enforced **per workspace**, so under a shared `state_dir` a noisy workspace can never evict another workspace's entries within their retention window. |
 | `enrichment_enabled` | `false` | Enables optional LLM-derived annotations; it never controls deterministic record capture. |
 | `enrichment_model` | `""` | Required separate model ID for optional LLM enrichment. |
 | `min_tool_calls_for_llm_enrichment` | `3` | Attempt enrichment only at or above this many attempted tool calls. `0` enriches every eligible turn; values are normalized to `0`–`1000`, with invalid negative values falling back to `3`. |

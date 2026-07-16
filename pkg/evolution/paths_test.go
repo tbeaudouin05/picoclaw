@@ -26,6 +26,9 @@ func TestNewPaths_DefaultRoot(t *testing.T) {
 	if paths.SkillDrafts != filepath.Join(wantRoot, "skill-drafts.json") {
 		t.Fatalf("SkillDrafts = %q", paths.SkillDrafts)
 	}
+	if paths.RunLedger != filepath.Join(wantRoot, "run-ledger.jsonl") {
+		t.Fatalf("RunLedger = %q", paths.RunLedger)
+	}
 	if paths.ProfilesDir != filepath.Join(wantRoot, "profiles") {
 		t.Fatalf("ProfilesDir = %q", paths.ProfilesDir)
 	}
@@ -54,6 +57,9 @@ func TestNewPaths_UsesOverride(t *testing.T) {
 	}
 	if paths.SkillDrafts != filepath.Join(override, "skill-drafts.json") {
 		t.Fatalf("SkillDrafts = %q", paths.SkillDrafts)
+	}
+	if paths.RunLedger != filepath.Join(override, "run-ledger.jsonl") {
+		t.Fatalf("RunLedger = %q", paths.RunLedger)
 	}
 	if paths.ProfilesDir != filepath.Join(override, "profiles") {
 		t.Fatalf("ProfilesDir = %q", paths.ProfilesDir)

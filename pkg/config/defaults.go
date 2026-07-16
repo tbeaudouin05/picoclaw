@@ -53,6 +53,7 @@ func DefaultConfig() *Config {
 			MinTaskCount:                 2,
 			MinSuccessRatio:              0.7,
 			TaskRecordRetentionHours:     720,
+			RunLedgerRetentionHours:      120,
 			MinToolCallsForLLMEnrichment: 3,
 			EnrichmentTimeoutSeconds:     30,
 			ColdPathTrigger:              "after_turn",

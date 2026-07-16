@@ -260,7 +260,7 @@ func uniqueTrimmedNames(values []string) []string {
 	return out
 }
 
-func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) error {
+func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) (err error) {
 	if rt == nil || !rt.cfg.Enabled || workspace == "" {
 		return nil
 	}
@@ -283,6 +283,15 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) error 
 	})
 
 	store := rt.storeForWorkspace(workspace)
+
+	// Durably record the outcome of this meaningful (draft/apply) run and perform
+	// bounded ledger cleanup. Recording is best-effort and never alters the result.
+	startedAt := rt.now()
+	var outcome coldPathRunOutcome
+	defer func() {
+		rt.recordColdPathRun(store, workspace, mode, runID, startedAt, outcome, err)
+	}()
+
 	taskRecords, err := store.LoadTaskRecords()
 	if err != nil {
 		return err
@@ -301,6 +310,8 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) error 
 			return err
 		}
 	}
+	outcome.prunedTaskCount = prunedCount
+	outcome.taskRecordCount = len(taskRecords)
 	logger.DebugCF("evolution", "Loaded evolution records", map[string]any{
 		"workspace":     workspace,
 		"task_count":    len(taskRecords),
@@ -326,6 +337,7 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) error 
 			recordsForOrganizer,
 		)
 		admittedCount = countTaskLearningRecords(recordsForOrganizer)
+		outcome.admittedTaskCount = admittedCount
 		logger.DebugCF("evolution", "Admitted task records for cold path", map[string]any{
 			"workspace":       workspace,
 			"admitted_tasks":  admittedCount,
@@ -356,6 +368,7 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) error 
 			return err
 		}
 		newRuleCount = countNewPatterns(patternRecords, rules, workspace)
+		outcome.newPatternCount = newRuleCount
 		logger.DebugCF("evolution", "Built learning patterns", map[string]any{
 			"workspace":      workspace,
 			"pattern_count":  len(rules),
@@ -391,6 +404,7 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) error 
 	applier := rt.applierForWorkspace(workspace)
 	readyRules := filterReadyRules(patternRecords, workspace)
 	readyRules = enrichReadyRulesForDrafts(readyRules, taskRecords)
+	outcome.readyPatternCount = len(readyRules)
 	if len(readyRules) == 0 {
 		logger.DebugCF("evolution", "Finished cold path run without ready patterns", map[string]any{
 			"workspace":      workspace,
@@ -550,6 +564,7 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) error 
 		})
 		existingBySource[rule.ID] = struct{}{}
 		processedRules++
+		outcome.processedPatterns = processedRules
 	}
 
 	logger.InfoCF("evolution", "Finished cold path run", map[string]any{
