@@ -112,7 +112,15 @@ func NewRuntime(opts RuntimeOptions) (*Runtime, error) {
 }
 
 func (rt *Runtime) FinalizeTurn(ctx context.Context, input TurnCaseInput) error {
-	if rt == nil || !rt.cfg.Enabled || input.Workspace == "" || shouldSkipLearningRecord(input) {
+	if rt == nil || !rt.cfg.Enabled {
+		return nil
+	}
+	// Canonicalize the workspace identity so equivalent spellings (leading ~
+	// alias, relative/clean equivalents) resolve to one actual workspace/state
+	// path for records, IDs, and downstream cold-path deduplication.
+	input.Workspace = rt.canonicalWorkspace(input.Workspace)
+	input.WorkspaceID = input.Workspace
+	if input.Workspace == "" || shouldSkipLearningRecord(input) {
 		return nil
 	}
 
@@ -261,7 +269,14 @@ func uniqueTrimmedNames(values []string) []string {
 }
 
 func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) (err error) {
-	if rt == nil || !rt.cfg.Enabled || workspace == "" {
+	if rt == nil || !rt.cfg.Enabled {
+		return nil
+	}
+	// Canonicalize before this value becomes the WorkspaceID, state path root,
+	// and factory/store selection key, so aliased spellings share one execution
+	// path rather than writing skills/state to a literal relative directory.
+	workspace = rt.canonicalWorkspace(workspace)
+	if workspace == "" {
 		return nil
 	}
 
@@ -285,11 +300,20 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) (err e
 	store := rt.storeForWorkspace(workspace)
 
 	// Durably record the outcome of this meaningful (draft/apply) run and perform
-	// bounded ledger cleanup. Recording is best-effort and never alters the result.
+	// bounded ledger cleanup. The terminal ledger entry is required: a durable
+	// write/sync failure is joined into the run's result rather than swallowed,
+	// so a run is never reported as succeeding without its terminal record. An
+	// independent bounded context ensures cancellation cannot skip the entry.
 	startedAt := rt.now()
 	var outcome coldPathRunOutcome
 	defer func() {
-		rt.recordColdPathRun(store, workspace, mode, runID, startedAt, outcome, err)
+		finalizeCtx, cancel := context.WithTimeout(context.Background(), runLedgerFinalizeTimeout)
+		defer cancel()
+		if ledgerErr := rt.finalizeColdPathRun(
+			finalizeCtx, store, workspace, mode, runID, startedAt, outcome, err,
+		); ledgerErr != nil {
+			err = errorsJoin(err, ledgerErr)
+		}
 	}()
 
 	taskRecords, err := store.LoadTaskRecords()
@@ -463,7 +487,9 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) (err e
 			}
 			continue
 		}
-		updatedDraft, applyErr := rt.applyCandidateDraft(ctx, workspace, store, applier, draft, runID)
+		updatedDraft, applyErr := rt.applyCandidateDraftWithRetry(
+			ctx, workspace, store, applier, generator, rule, matches, evidence, draft, runID,
+		)
 		if applyErr != nil {
 			return applyErr
 		}
@@ -543,7 +569,9 @@ func (rt *Runtime) RunColdPathOnce(ctx context.Context, workspace string) (err e
 		})
 		if mode == "apply" && applier != nil && draft.Status == DraftStatusCandidate {
 			var err error
-			draft, err = rt.applyCandidateDraft(ctx, workspace, store, applier, draft, runID)
+			draft, err = rt.applyCandidateDraftWithRetry(
+				ctx, workspace, store, applier, generator, rule, matches, evidence, draft, runID,
+			)
 			if err != nil {
 				return err
 			}
@@ -791,6 +819,21 @@ func coldPathEvidenceRejectReason(record LearningRecord) string {
 		return "missing final output"
 	}
 	return ""
+}
+
+// canonicalWorkspace resolves a workspace identity to its canonical form,
+// falling back to the trimmed raw value only when home expansion fails so a
+// lookup error cannot silently redirect state to a wrong relative path.
+func (rt *Runtime) canonicalWorkspace(workspace string) string {
+	canonical, err := CanonicalWorkspace(workspace)
+	if err != nil {
+		logger.WarnCF("evolution", "Failed to canonicalize workspace; using raw value", map[string]any{
+			"workspace": workspace,
+			"error":     err.Error(),
+		})
+		return strings.TrimSpace(workspace)
+	}
+	return canonical
 }
 
 func (rt *Runtime) storeForWorkspace(workspace string) *Store {
@@ -1491,15 +1534,22 @@ func (rt *Runtime) applyCandidateDraft(
 				draft.ScanFindings,
 				fmt.Sprintf("rollback audit failed: %v", auditErr),
 			)
+			// Wrap the apply error with %w (not %v) so a typed apply-safety
+			// rejection compounded by an audit/save persistence failure keeps its
+			// DraftApplySafetyError chain and stays eligible for the one bounded
+			// regeneration, while errorsJoin preserves the human-readable prefix.
 			if saveErr := store.SaveDrafts([]SkillDraft{draft}); saveErr != nil {
-				return draft, errorsJoin(fmt.Errorf("%w: %v", ErrApplyDraftFailed, err), auditErr, saveErr)
+				return draft, errorsJoin(fmt.Errorf("%w: %w", ErrApplyDraftFailed, err), auditErr, saveErr)
 			}
-			return draft, errorsJoin(fmt.Errorf("%w: %v", ErrApplyDraftFailed, err), auditErr)
+			return draft, errorsJoin(fmt.Errorf("%w: %w", ErrApplyDraftFailed, err), auditErr)
 		}
 		if saveErr := store.SaveDrafts([]SkillDraft{draft}); saveErr != nil {
 			return draft, errorsJoin(fmt.Errorf("%w: %v", ErrApplyDraftFailed, err), saveErr)
 		}
-		return draft, fmt.Errorf("%w: %v", ErrApplyDraftFailed, err)
+		// Preserve the typed apply-safety classification in the chain (via %w) so
+		// the cold path can decide whether exactly one regeneration is eligible,
+		// while keeping the "apply draft failed: ..." message unchanged.
+		return draft, fmt.Errorf("%w: %w", ErrApplyDraftFailed, err)
 	}
 
 	draft.Status = DraftStatusAccepted
@@ -1549,6 +1599,173 @@ func (rt *Runtime) applyCandidateDraft(
 		"run_id":       runID,
 	})
 	return draft, nil
+}
+
+// draftLineageConstraints captures the immutable identity of a draft so a
+// feedback-aware regeneration cannot silently change what is being modified.
+type draftLineageConstraints struct {
+	id          string
+	workspaceID string
+	sourceID    string
+	target      string
+	changeKind  ChangeKind
+}
+
+func lineageConstraintsFromDraft(workspace string, draft SkillDraft) draftLineageConstraints {
+	return draftLineageConstraints{
+		id:          draft.ID,
+		workspaceID: workspace,
+		sourceID:    draft.SourceRecordID,
+		target:      strings.TrimSpace(draft.TargetSkillName),
+		changeKind:  draft.ChangeKind,
+	}
+}
+
+// enforceLineageConstraints restores immutable identity fields on a regenerated
+// draft and reports the first constraint the regeneration violated (target skill
+// name or change kind). It never rewrites target/change-kind to force a match:
+// a drifted regeneration is rejected, not normalized.
+func enforceLineageConstraints(draft *SkillDraft, c draftLineageConstraints) string {
+	if target := strings.TrimSpace(draft.TargetSkillName); target != "" && target != c.target {
+		return fmt.Sprintf("target skill changed from %q to %q", c.target, target)
+	}
+	if draft.ChangeKind != "" && draft.ChangeKind != c.changeKind {
+		return fmt.Sprintf("change kind changed from %q to %q", c.changeKind, draft.ChangeKind)
+	}
+	draft.ID = c.id
+	draft.WorkspaceID = c.workspaceID
+	draft.SourceRecordID = c.sourceID
+	draft.TargetSkillName = c.target
+	draft.ChangeKind = c.changeKind
+	return ""
+}
+
+func draftSafetyReason(err error) string {
+	var safety *DraftApplySafetyError
+	if errors.As(err, &safety) {
+		return safety.Error()
+	}
+	return err.Error()
+}
+
+// applyCandidateDraftWithRetry applies a candidate draft and, only for a typed
+// draft validation / apply-safety rejection that a regenerator can plausibly
+// repair, performs exactly one bounded feedback-aware regeneration and a single
+// full revalidation+apply. Every other failure class (context, provider,
+// filesystem/write/backup/rollback/profile/save, name/path, security scan,
+// unsupported generator) keeps the existing single-attempt behavior. There is
+// no recursion: at most one regeneration and one extra apply per call.
+func (rt *Runtime) applyCandidateDraftWithRetry(
+	ctx context.Context,
+	workspace string,
+	store *Store,
+	applier *Applier,
+	generator DraftGenerator,
+	rule LearningRecord,
+	matches []skills.SkillInfo,
+	evidence DraftEvidence,
+	draft SkillDraft,
+	runID string,
+) (SkillDraft, error) {
+	updated, applyErr := rt.applyCandidateDraft(ctx, workspace, store, applier, draft, runID)
+	if applyErr == nil {
+		return updated, nil
+	}
+
+	regenerator, ok := draftRegeneratorFrom(generator)
+	if !ok || !IsRetryableDraftFailure(applyErr) {
+		return updated, applyErr
+	}
+
+	constraints := lineageConstraintsFromDraft(workspace, draft)
+	reason := draftSafetyReason(applyErr)
+	skillPath := filepath.Join(workspace, "skills", constraints.target, "SKILL.md")
+	currentBody, readErr := os.ReadFile(skillPath)
+	targetExists := readErr == nil
+
+	logger.InfoCF("evolution", "Regenerating skill draft after apply-safety rejection", map[string]any{
+		"workspace":     workspace,
+		"draft_id":      draft.ID,
+		"target_skill":  constraints.target,
+		"retry_attempt": 1,
+		"reason":        reason,
+		"run_id":        runID,
+	})
+
+	regenerated, regenErr := regenerator.RegenerateDraft(ctx, DraftRegenerationRequest{
+		Rule:             rule,
+		Matches:          matches,
+		Evidence:         evidence,
+		OriginalDraft:    draft,
+		FailureReason:    reason,
+		AttemptNumber:    1,
+		WorkspaceID:      constraints.workspaceID,
+		TargetSkillName:  constraints.target,
+		ChangeKind:       constraints.changeKind,
+		TargetExists:     targetExists,
+		CurrentSkillBody: string(currentBody),
+	})
+	if regenErr != nil {
+		return rt.annotateQuarantinedDraft(store, updated, applyErr,
+			fmt.Sprintf("regeneration failed, retaining original rejection: %v", regenErr))
+	}
+
+	if violation := enforceLineageConstraints(&regenerated, constraints); violation != "" {
+		return rt.annotateQuarantinedDraft(store, updated, applyErr,
+			"regenerated draft rejected before apply: "+violation)
+	}
+
+	final := rt.finalizeDraft(workspace, rule, matches, evidence, regenerated)
+	if violation := enforceLineageConstraints(&final, constraints); violation != "" {
+		return rt.annotateQuarantinedDraft(store, updated, applyErr,
+			"regenerated draft rejected after normalization: "+violation)
+	}
+	if final.Status != DraftStatusCandidate {
+		return rt.annotateQuarantinedDraft(store, updated, applyErr,
+			"regenerated draft rejected by review: "+strings.Join(final.ScanFindings, "; "))
+	}
+
+	final.ReviewNotes = appendUniqueStrings(final.ReviewNotes,
+		fmt.Sprintf("regenerated once after apply-safety rejection: %s", reason))
+
+	retried, retryErr := rt.applyCandidateDraft(ctx, workspace, store, applier, final, runID)
+	if retryErr != nil {
+		// One retry only — no recursion. The retried draft is already quarantined
+		// and saved with its own reason; also record the first-attempt reason so
+		// the quarantined draft carries both.
+		retried.ScanFindings = appendUniqueStrings(retried.ScanFindings,
+			fmt.Sprintf("first apply attempt failed before regeneration: %s", reason))
+		if saveErr := store.SaveDrafts([]SkillDraft{retried}); saveErr != nil {
+			return retried, errorsJoin(retryErr, saveErr)
+		}
+		return retried, retryErr
+	}
+
+	logger.InfoCF("evolution", "Applied regenerated skill draft successfully", map[string]any{
+		"workspace":     workspace,
+		"draft_id":      retried.ID,
+		"target_skill":  retried.TargetSkillName,
+		"retry_attempt": 1,
+		"run_id":        runID,
+	})
+	return retried, nil
+}
+
+// annotateQuarantinedDraft records an additional finding on an already-quarantined
+// draft and re-persists it, returning the original (prefix-compatible) apply
+// error joined with any save failure.
+func (rt *Runtime) annotateQuarantinedDraft(
+	store *Store,
+	draft SkillDraft,
+	applyErr error,
+	finding string,
+) (SkillDraft, error) {
+	draft.Status = DraftStatusQuarantined
+	draft.ScanFindings = appendUniqueStrings(draft.ScanFindings, finding)
+	if saveErr := store.SaveDrafts([]SkillDraft{draft}); saveErr != nil {
+		return draft, errorsJoin(applyErr, saveErr)
+	}
+	return draft, applyErr
 }
 
 func (rt *Runtime) recordRollbackAudit(store *Store, draft SkillDraft, applyErr error) error {

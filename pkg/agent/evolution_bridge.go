@@ -206,9 +206,13 @@ func (b *evolutionBridge) handleTurnEndAsync(meta EventMeta, payload TurnEndPayl
 		return false
 	}
 
+	// Canonicalize the workspace identity at the evolution ingress so aliased
+	// spellings deduplicate to one scheduled entry, one turn record path, and
+	// one cold-path run key.
+	workspace := canonicalEvolutionWorkspace(payload.Workspace)
 	input := evolution.TurnCaseInput{
-		Workspace:             payload.Workspace,
-		WorkspaceID:           payload.Workspace,
+		Workspace:             workspace,
+		WorkspaceID:           workspace,
 		TurnID:                meta.TurnID,
 		SessionKey:            meta.SessionKey,
 		AgentID:               meta.AgentID,
@@ -335,11 +339,25 @@ func (b *evolutionBridge) startScheduledColdPath(workspace string, times []strin
 	}()
 }
 
+// canonicalEvolutionWorkspace normalizes a workspace spelling for evolution
+// bookkeeping, falling back to the trimmed raw value when home expansion fails.
+func canonicalEvolutionWorkspace(workspace string) string {
+	canonical, err := evolution.CanonicalWorkspace(workspace)
+	if err != nil {
+		logger.WarnCF("agent", "Failed to canonicalize evolution workspace; using raw value", map[string]any{
+			"workspace": workspace,
+			"error":     err.Error(),
+		})
+		return strings.TrimSpace(workspace)
+	}
+	return canonical
+}
+
 func (b *evolutionBridge) rememberScheduledColdPathWorkspace(workspace string) {
 	if b == nil || !b.cfg.RunsColdPathScheduled() {
 		return
 	}
-	workspace = strings.TrimSpace(workspace)
+	workspace = canonicalEvolutionWorkspace(workspace)
 	if workspace == "" {
 		return
 	}

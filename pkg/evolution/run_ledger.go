@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,6 +14,10 @@ import (
 	"github.com/sipeed/picoclaw/pkg/fileutil"
 	"github.com/sipeed/picoclaw/pkg/logger"
 )
+
+// runLedgerFinalizeTimeout bounds the independent finalization context used to
+// record a terminal ledger entry even when the run's own context was canceled.
+const runLedgerFinalizeTimeout = 5 * time.Second
 
 // maxRunLedgerEntries hard-bounds the run ledger per WorkspaceID, regardless of
 // the configured retention window, so a misconfigured or clock-skewed workspace
@@ -60,42 +65,34 @@ type coldPathRunOutcome struct {
 	processedPatterns int
 }
 
-// recordColdPathRun performs bounded ledger cleanup and appends a durable entry
-// describing the run. It is best-effort: cleanup or append failures are logged
-// but never alter the run's own result.
-func (rt *Runtime) recordColdPathRun(
+// finalizeColdPathRun performs bounded ledger cleanup and durably appends the
+// terminal entry describing the run. Pruning is maintenance: its failure is
+// logged but never blocks the terminal record. A durable append/sync failure is
+// returned so the caller can surface it (joined with any operation error);
+// success is never reported unless the terminal entry actually reached storage.
+func (rt *Runtime) finalizeColdPathRun(
+	ctx context.Context,
 	store *Store,
 	workspace, mode, runID string,
 	startedAt time.Time,
 	outcome coldPathRunOutcome,
 	runErr error,
-) {
+) error {
 	if rt == nil || store == nil || workspace == "" {
-		return
+		return nil
 	}
 
 	retention := time.Duration(rt.cfg.EffectiveRunLedgerRetentionHours()) * time.Hour
-	prunedLedger, err := store.PruneRunLedger(workspace, rt.now().Add(-retention))
-	if err != nil {
+	prunedLedger, pruneErr := store.PruneRunLedger(workspace, rt.now().Add(-retention))
+	if pruneErr != nil {
 		logger.WarnCF("evolution", "Run ledger cleanup failed", map[string]any{
 			"workspace": workspace,
 			"run_id":    runID,
-			"error":     err.Error(),
+			"error":     pruneErr.Error(),
 		})
 	}
 
-	status := runLedgerStatusCompleted
-	errSummary := ""
-	switch {
-	case runErr == nil:
-	case errors.Is(runErr, context.Canceled), errors.Is(runErr, context.DeadlineExceeded):
-		status = runLedgerStatusCanceled
-		errSummary = runErr.Error()
-	default:
-		status = runLedgerStatusFailed
-		errSummary = runErr.Error()
-	}
-
+	status, errSummary := classifyColdPathOutcome(runErr)
 	entry := ColdPathRunLedgerEntry{
 		RunID:             runID,
 		WorkspaceID:       workspace,
@@ -112,12 +109,25 @@ func (rt *Runtime) recordColdPathRun(
 		ProcessedPatterns: outcome.processedPatterns,
 		PrunedLedgerCount: prunedLedger,
 	}
-	if err := store.AppendRunLedgerEntry(entry); err != nil {
+	if err := store.AppendRunLedgerEntryDurable(ctx, entry); err != nil {
 		logger.WarnCF("evolution", "Run ledger append failed", map[string]any{
 			"workspace": workspace,
 			"run_id":    runID,
 			"error":     err.Error(),
 		})
+		return fmt.Errorf("run ledger append failed: %w", err)
+	}
+	return nil
+}
+
+func classifyColdPathOutcome(runErr error) (status, errSummary string) {
+	switch {
+	case runErr == nil:
+		return runLedgerStatusCompleted, ""
+	case errors.Is(runErr, context.Canceled), errors.Is(runErr, context.DeadlineExceeded):
+		return runLedgerStatusCanceled, runErr.Error()
+	default:
+		return runLedgerStatusFailed, runErr.Error()
 	}
 }
 
@@ -154,6 +164,74 @@ func (s *Store) AppendRunLedgerEntry(entry ColdPathRunLedgerEntry) error {
 	defer unlock()
 
 	return s.appendRunLedgerEntryLocked(entry)
+}
+
+// AppendRunLedgerEntryDurable appends one bounded entry to the run ledger and
+// forces it to stable storage: the record is fsync'd and, when the ledger file
+// is newly created, its parent directory is fsync'd too so the new file cannot
+// vanish after a crash. Unlike AppendRunLedgerEntry it treats an oversized
+// encoded entry as an explicit error rather than silently dropping it, because
+// a terminal run record must not be reported as written when it was not.
+//
+// It uses a context-aware lock so a caller can pass an independent finalization
+// context and still record a terminal entry even when the run was canceled.
+func (s *Store) AppendRunLedgerEntryDurable(ctx context.Context, entry ColdPathRunLedgerEntry) error {
+	unlock, err := lockStoreFileContext(ctx, s.paths.RunLedger)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	return s.appendRunLedgerEntryDurableLocked(entry)
+}
+
+func (s *Store) appendRunLedgerEntryDurableLocked(entry ColdPathRunLedgerEntry) (err error) {
+	dir := filepath.Dir(s.paths.RunLedger)
+	if mkdirErr := os.MkdirAll(dir, 0o755); mkdirErr != nil {
+		return mkdirErr
+	}
+	line, err := json.Marshal(boundedRunLedgerEntry(entry))
+	if err != nil {
+		return err
+	}
+	if len(line)+1 > maxJSONLRecordBytes {
+		return fmt.Errorf("run ledger entry for run %q exceeds %d bytes", entry.RunID, maxJSONLRecordBytes)
+	}
+
+	_, statErr := os.Stat(s.paths.RunLedger)
+	newFile := errors.Is(statErr, os.ErrNotExist)
+	if statErr != nil && !newFile {
+		return statErr
+	}
+
+	f, err := os.OpenFile(s.paths.RunLedger, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+	if _, err = f.Write(append(line, '\n')); err != nil {
+		return err
+	}
+	if err = f.Sync(); err != nil {
+		return err
+	}
+	if newFile {
+		if dirFile, dirErr := os.Open(dir); dirErr == nil {
+			syncErr := dirFile.Sync()
+			closeErr := dirFile.Close()
+			if syncErr != nil {
+				return syncErr
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+		}
+	}
+	return nil
 }
 
 func (s *Store) appendRunLedgerEntryLocked(entry ColdPathRunLedgerEntry) error {

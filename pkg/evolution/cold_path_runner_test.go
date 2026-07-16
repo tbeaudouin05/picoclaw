@@ -34,20 +34,20 @@ func TestColdPathRunner_QueuesPendingRunForWorkspace(t *testing.T) {
 	runner := NewColdPathRunner(runtime)
 	defer runner.Close()
 
-	if scheduled := runner.Trigger("workspace-a"); !scheduled {
+	if scheduled := runner.Trigger("/workspace-a"); !scheduled {
 		t.Fatal("expected first trigger to be scheduled")
 	}
 
 	select {
 	case workspace := <-runtime.started:
-		if workspace != "workspace-a" {
-			t.Fatalf("workspace = %q, want workspace-a", workspace)
+		if workspace != "/workspace-a" {
+			t.Fatalf("workspace = %q, want /workspace-a", workspace)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for first cold path run")
 	}
 
-	if scheduled := runner.Trigger("workspace-a"); !scheduled {
+	if scheduled := runner.Trigger("/workspace-a"); !scheduled {
 		t.Fatal("expected second trigger to queue a pending run")
 	}
 
@@ -61,8 +61,8 @@ func TestColdPathRunner_QueuesPendingRunForWorkspace(t *testing.T) {
 
 	select {
 	case workspace := <-runtime.started:
-		if workspace != "workspace-a" {
-			t.Fatalf("workspace = %q, want workspace-a", workspace)
+		if workspace != "/workspace-a" {
+			t.Fatalf("workspace = %q, want /workspace-a", workspace)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for pending cold path run")
@@ -81,6 +81,68 @@ func TestColdPathRunner_QueuesPendingRunForWorkspace(t *testing.T) {
 	t.Fatalf("runCount = %d, want 2", runtime.runCount.Load())
 }
 
+func TestColdPathRunner_CanonicalizesAliasedWorkspaces(t *testing.T) {
+	t.Setenv("HOME", "/root")
+
+	runtime := &blockingColdPathRuntime{
+		started: make(chan string, 4),
+		release: make(chan struct{}, 4),
+	}
+	runner := NewColdPathRunner(runtime)
+	defer runner.Close()
+
+	if !runner.Trigger("/root/.picoclaw/workspace") {
+		t.Fatal("expected first trigger to be scheduled")
+	}
+	select {
+	case ws := <-runtime.started:
+		if ws != "/root/.picoclaw/workspace" {
+			t.Fatalf("run workspace = %q, want canonical /root/.picoclaw/workspace", ws)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first cold path run")
+	}
+
+	// The tilde alias resolves to the same canonical key while the first run is
+	// blocked, so it must coalesce into pending work rather than start a second
+	// concurrent run.
+	if !runner.Trigger("~/.picoclaw/workspace") {
+		t.Fatal("expected aliased trigger to be scheduled")
+	}
+	select {
+	case ws := <-runtime.started:
+		t.Fatalf("aliased workspace started a second concurrent run for %q", ws)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// Release the first run: the coalesced pending run executes once more under
+	// the same canonical key.
+	runtime.release <- struct{}{}
+	select {
+	case ws := <-runtime.started:
+		if ws != "/root/.picoclaw/workspace" {
+			t.Fatalf("pending run workspace = %q, want /root/.picoclaw/workspace", ws)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for coalesced pending run")
+	}
+	runtime.release <- struct{}{}
+
+	// A genuinely different absolute path is not deduplicated.
+	if !runner.Trigger("/root/.picoclaw/other") {
+		t.Fatal("expected distinct workspace trigger to be scheduled")
+	}
+	select {
+	case ws := <-runtime.started:
+		if ws != "/root/.picoclaw/other" {
+			t.Fatalf("distinct workspace run = %q, want /root/.picoclaw/other", ws)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for distinct workspace run")
+	}
+	runtime.release <- struct{}{}
+}
+
 func TestColdPathRunner_CloseCancelsActiveRunAndDropsPendingWork(t *testing.T) {
 	runtime := &blockingColdPathRuntime{
 		started: make(chan string, 4),
@@ -88,7 +150,7 @@ func TestColdPathRunner_CloseCancelsActiveRunAndDropsPendingWork(t *testing.T) {
 	}
 	runner := NewColdPathRunner(runtime)
 
-	if scheduled := runner.Trigger("workspace-a"); !scheduled {
+	if scheduled := runner.Trigger("/workspace-a"); !scheduled {
 		t.Fatal("expected first trigger to be scheduled")
 	}
 
@@ -98,7 +160,7 @@ func TestColdPathRunner_CloseCancelsActiveRunAndDropsPendingWork(t *testing.T) {
 		t.Fatal("timed out waiting for first cold path run")
 	}
 
-	if scheduled := runner.Trigger("workspace-a"); !scheduled {
+	if scheduled := runner.Trigger("/workspace-a"); !scheduled {
 		t.Fatal("expected second trigger to mark pending work")
 	}
 
@@ -112,12 +174,12 @@ func TestColdPathRunner_CloseCancelsActiveRunAndDropsPendingWork(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if !runner.Trigger("workspace-a") {
+		if !runner.Trigger("/workspace-a") {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if runner.Trigger("workspace-a") {
+	if runner.Trigger("/workspace-a") {
 		t.Fatal("expected Trigger to reject new work after Close")
 	}
 

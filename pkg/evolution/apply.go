@@ -2,6 +2,7 @@ package evolution
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,42 @@ import (
 	"github.com/sipeed/picoclaw/pkg/fileutil"
 	"github.com/sipeed/picoclaw/pkg/skills"
 )
+
+// DraftApplySafetyError marks a draft rejection that stems from the candidate's
+// own structure or apply-time safety validation — the class of failure a model
+// can plausibly repair when handed the exact reason and the immutable target.
+// It is the ONLY classification eligible for bounded feedback-aware
+// regeneration. Filesystem, backup, rollback, profile, context, name/path and
+// security-scan failures are deliberately excluded and stay non-retryable.
+//
+// The wrapped reason preserves the original human-readable message (including
+// the "unsafe incomplete replacement" prefix) so logs and existing substring
+// expectations remain compatible.
+type DraftApplySafetyError struct {
+	Stage  string
+	reason error
+}
+
+func (e *DraftApplySafetyError) Error() string {
+	if e == nil || e.reason == nil {
+		return "draft apply safety rejection"
+	}
+	return e.reason.Error()
+}
+
+func (e *DraftApplySafetyError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.reason
+}
+
+// IsRetryableDraftFailure reports whether err (anywhere in its chain) is a typed
+// draft apply-safety rejection eligible for exactly one regeneration attempt.
+func IsRetryableDraftFailure(err error) bool {
+	var safety *DraftApplySafetyError
+	return errors.As(err, &safety)
+}
 
 type Applier struct {
 	paths Paths
@@ -85,11 +122,14 @@ func (a *Applier) applyDraftWithRollback(
 		draft.TargetSkillName,
 		allowsExistingFrontmatterFields(draft.ChangeKind, hadOriginal),
 	); err != nil {
-		return nil, err
+		return nil, &DraftApplySafetyError{Stage: "applied_body", reason: err}
 	}
 	if hadOriginal && draft.ChangeKind == ChangeKindReplace {
 		if err := validateHolisticReplacement(existingBody, renderedBody); err != nil {
-			return nil, fmt.Errorf("unsafe incomplete replacement: %w", err)
+			return nil, &DraftApplySafetyError{
+				Stage:  "holistic_replacement",
+				reason: fmt.Errorf("unsafe incomplete replacement: %w", err),
+			}
 		}
 	}
 

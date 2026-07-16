@@ -55,6 +55,15 @@ func (r *ColdPathRunner) Trigger(workspace string) bool {
 	if r == nil || r.runtime == nil || workspace == "" {
 		return false
 	}
+	// Deduplicate aliased spellings (e.g. /root/.picoclaw/workspace and
+	// ~/.picoclaw/workspace) onto one concurrency/coalescing key so equivalent
+	// paths cannot start two concurrent cold-path runs.
+	if canonical, err := CanonicalWorkspace(workspace); err == nil && canonical != "" {
+		workspace = canonical
+	}
+	if workspace == "" {
+		return false
+	}
 
 	r.mu.Lock()
 	if r.closed {

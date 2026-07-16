@@ -24,6 +24,41 @@ type EvidenceAwareDraftGenerator interface {
 	) (SkillDraft, error)
 }
 
+// DraftRegenerator is an optional capability: a generator that can produce a
+// single corrected draft after its previous output was rejected by typed draft
+// validation or apply-safety checks. Implementing it opts a generator into the
+// cold path's one bounded feedback-aware retry. Generators that do not
+// implement it retain the existing no-retry behavior.
+type DraftRegenerator interface {
+	RegenerateDraft(ctx context.Context, req DraftRegenerationRequest) (SkillDraft, error)
+}
+
+// DraftRegenerationRequest carries the exact rejection reason plus the immutable
+// target/change constraints captured before the first apply attempt. The
+// regenerator must return a corrected draft that honors these constraints; the
+// cold path rejects (never normalizes away) a result that changes the
+// lineage/target/change-kind.
+type DraftRegenerationRequest struct {
+	Rule             LearningRecord
+	Matches          []skills.SkillInfo
+	Evidence         DraftEvidence
+	OriginalDraft    SkillDraft
+	FailureReason    string
+	AttemptNumber    int
+	WorkspaceID      string
+	TargetSkillName  string
+	ChangeKind       ChangeKind
+	TargetExists     bool
+	CurrentSkillBody string
+}
+
+// draftRegeneratorFrom returns the generator's regeneration capability when it
+// supports the optional interface.
+func draftRegeneratorFrom(generator DraftGenerator) (DraftRegenerator, bool) {
+	regenerator, ok := generator.(DraftRegenerator)
+	return regenerator, ok && regenerator != nil
+}
+
 type DraftEvidence struct {
 	TaskRecords []LearningRecord
 }

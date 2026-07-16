@@ -1081,6 +1081,32 @@ func TestEvolutionBridge_ScheduledColdPathTracksObservedWorkspaces(t *testing.T)
 	}
 }
 
+func TestEvolutionBridge_ScheduledColdPathDeduplicatesWorkspaceAliases(t *testing.T) {
+	t.Setenv("HOME", "/root")
+
+	bridge := &evolutionBridge{
+		cfg: config.EvolutionConfig{
+			Enabled:         true,
+			Mode:            "draft",
+			ColdPathTrigger: "scheduled",
+			ColdPathTimes:   []string{"03:00"},
+		},
+	}
+
+	// Aliased spellings of the same workspace must collapse to one entry.
+	bridge.rememberScheduledColdPathWorkspace("/root/.picoclaw/workspace")
+	bridge.rememberScheduledColdPathWorkspace("~/.picoclaw/workspace")
+	bridge.rememberScheduledColdPathWorkspace("/root/.picoclaw/workspace/")
+	// A genuinely different path stays distinct.
+	bridge.rememberScheduledColdPathWorkspace("/root/.picoclaw/other")
+
+	got := bridge.scheduledColdPathWorkspaces()
+	want := []string{"/root/.picoclaw/other", "/root/.picoclaw/workspace"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("scheduled workspaces = %v, want %v", got, want)
+	}
+}
+
 func TestEvolutionBridge_ScheduledColdPathSeedsConfiguredAgentWorkspaces(t *testing.T) {
 	defaultWorkspace := t.TempDir()
 	workerWorkspace := t.TempDir()
