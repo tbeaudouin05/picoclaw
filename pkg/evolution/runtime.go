@@ -1686,19 +1686,135 @@ func (rt *Runtime) applyReviewedCandidateDraft(
 	draft SkillDraft,
 	runID string,
 ) (SkillDraft, error) {
+	return rt.applyReviewedCandidateDraftWithRepair(
+		ctx, workspace, store, applier, generator, rule, matches, evidence, draft, runID, true,
+	)
+}
+
+// applyReviewedCandidateDraftWithRepair runs the mandatory replacement review (as
+// applyReviewedCandidateDraft documents), then deterministically preflights the
+// fully rendered deployable body with the SAME validation semantics as final
+// application BEFORE any write. When allowRepair is set and the preflight detects
+// a formatting/body-validation failure, it attempts exactly ONE feedback-driven
+// repair and re-enters this path with allowRepair=false, so the repaired draft
+// runs the normal review/finalize/lineage/safety checks again and a second
+// formatting failure simply quarantines through the ordinary apply path (no
+// double repair). Every non-format cause — review-unavailable, holistic
+// frontmatter, stale/ownership, capacity, or a lifecycle error — flows straight
+// to apply and is never retried. Preflight never quarantines; the single
+// applyCandidateDraft call below owns all failure bookkeeping, so there is no
+// double-quarantine.
+func (rt *Runtime) applyReviewedCandidateDraftWithRepair(
+	ctx context.Context,
+	workspace string,
+	store *Store,
+	applier *Applier,
+	generator DraftGenerator,
+	rule LearningRecord,
+	matches []skills.SkillInfo,
+	evidence DraftEvidence,
+	draft SkillDraft,
+	runID string,
+	allowRepair bool,
+) (SkillDraft, error) {
 	finalDraft, expected, reviewErr := rt.reviewReplacementDraft(
 		ctx, workspace, generator, rule, matches, evidence, draft, runID,
 	)
 	if reviewErr != nil {
 		// A cancellation/deadline is propagated unchanged so the run is recorded
 		// as canceled, not as a quarantined apply failure. Every other cause is a
-		// mandatory-review-unavailable pre-apply failure that writes nothing.
+		// mandatory-review-unavailable pre-apply failure that writes nothing. A
+		// review failure is never retried.
 		if errors.Is(reviewErr, context.Canceled) || errors.Is(reviewErr, context.DeadlineExceeded) {
 			return draft, reviewErr
 		}
 		return rt.failReviewUnavailable(store, workspace, draft, reviewErr, runID)
 	}
+
+	if allowRepair {
+		if preErr := preflightAppliedBody(finalDraft, expected); isRetryableBodyFormatError(preErr) {
+			if repaired, ok := rt.repairDraftForFormat(
+				ctx, workspace, generator, rule, matches, evidence, finalDraft, preErr, runID,
+			); ok {
+				return rt.applyReviewedCandidateDraftWithRepair(
+					ctx, workspace, store, applier, generator, rule, matches, evidence, repaired, runID, false,
+				)
+			}
+		}
+	}
 	return rt.applyCandidateDraft(ctx, workspace, store, applier, finalDraft, runID, expected)
+}
+
+// repairDraftForFormat attempts the single bounded feedback-driven repair of a
+// candidate whose rendered deployable body failed formatting/body validation. It
+// is a no-op (returns ok=false, preserving the existing quarantine behavior) when
+// the generator does not implement FeedbackAwareDraftGenerator, when the repair
+// call yields no usable draft, when the repaired draft would alter the immutable
+// lineage (target skill name, change kind, draft_type, source/evidence identity),
+// or when the repaired draft does not pass the normal finalize review. The exact
+// deterministic validation error and the prior candidate are passed to the
+// generator; the returned draft is re-finalized and re-pinned so a repair can only
+// change body/content.
+func (rt *Runtime) repairDraftForFormat(
+	ctx context.Context,
+	workspace string,
+	generator DraftGenerator,
+	rule LearningRecord,
+	matches []skills.SkillInfo,
+	evidence DraftEvidence,
+	prior SkillDraft,
+	cause error,
+	runID string,
+) (SkillDraft, bool) {
+	fb, ok := feedbackAwareDraftGeneratorFrom(generator)
+	if !ok {
+		return SkillDraft{}, false
+	}
+	constraints := lineageConstraintsFromDraft(workspace, prior)
+	repaired, err := fb.RegenerateDraftWithFeedback(ctx, rule, matches, evidence, prior, cause.Error())
+	if err != nil {
+		logger.WarnCF("evolution", "Skill draft format repair unavailable; quarantining original", map[string]any{
+			"workspace":    workspace,
+			"draft_id":     prior.ID,
+			"target_skill": prior.TargetSkillName,
+			"error":        err.Error(),
+			"run_id":       runID,
+		})
+		return SkillDraft{}, false
+	}
+
+	// Re-run the normal finalize (normalize + local review) exactly as a
+	// first-pass draft, then re-pin the immutable lineage. A repaired draft that
+	// drifts on target/change-kind/draft_type or fails local review is refused, so
+	// the original is quarantined instead of an unvetted regeneration being applied.
+	repaired = rt.finalizeDraft(workspace, rule, matches, evidence, repaired)
+	if violation := enforceLineageConstraints(&repaired, constraints); violation != "" {
+		logger.WarnCF("evolution", "Skill draft format repair changed lineage; quarantining original", map[string]any{
+			"workspace":    workspace,
+			"draft_id":     prior.ID,
+			"target_skill": prior.TargetSkillName,
+			"violation":    violation,
+			"run_id":       runID,
+		})
+		return SkillDraft{}, false
+	}
+	if repaired.Status != DraftStatusCandidate {
+		logger.WarnCF("evolution", "Skill draft format repair failed local review; quarantining original", map[string]any{
+			"workspace":    workspace,
+			"draft_id":     prior.ID,
+			"target_skill": prior.TargetSkillName,
+			"findings":     strings.Join(repaired.ScanFindings, "; "),
+			"run_id":       runID,
+		})
+		return SkillDraft{}, false
+	}
+	logger.InfoCF("evolution", "Repaired skill draft formatting via one feedback pass", map[string]any{
+		"workspace":    workspace,
+		"draft_id":     repaired.ID,
+		"target_skill": repaired.TargetSkillName,
+		"run_id":       runID,
+	})
+	return repaired, true
 }
 
 // failReviewUnavailable fails an existing-skill replacement closed before apply

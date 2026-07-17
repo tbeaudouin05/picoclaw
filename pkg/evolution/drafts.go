@@ -76,6 +76,37 @@ func replacementReviewerFrom(generator DraftGenerator) (ReplacementReviewer, boo
 	return reviewer, ok && reviewer != nil
 }
 
+// FeedbackAwareDraftGenerator is an optional capability: a generator that can
+// regenerate a draft ONCE when a prior candidate's fully rendered deployable
+// SKILL.md failed the deterministic formatting/body validation the cold path runs
+// before any on-disk apply. It receives the exact deterministic validation error
+// plus the prior draft for context and returns a corrected candidate. It exists
+// solely to self-correct a single formatting failure; it never widens authority.
+//
+// A generator that does NOT implement this interface keeps its existing
+// single-attempt behavior: the cold path performs no repair and quarantines the
+// candidate exactly as before. A repair may only change body/content — the cold
+// path re-pins and re-validates the immutable lineage (target skill name, change
+// kind, draft_type, source/evidence identity) after a repair, rejecting any
+// regeneration that drifts.
+type FeedbackAwareDraftGenerator interface {
+	RegenerateDraftWithFeedback(
+		ctx context.Context,
+		rule LearningRecord,
+		matches []skills.SkillInfo,
+		evidence DraftEvidence,
+		prior SkillDraft,
+		validationError string,
+	) (SkillDraft, error)
+}
+
+// feedbackAwareDraftGeneratorFrom returns the generator's optional one-shot
+// feedback-driven repair capability when it implements the interface.
+func feedbackAwareDraftGeneratorFrom(generator DraftGenerator) (FeedbackAwareDraftGenerator, bool) {
+	fb, ok := generator.(FeedbackAwareDraftGenerator)
+	return fb, ok && fb != nil
+}
+
 type DraftEvidence struct {
 	TaskRecords []LearningRecord
 }

@@ -2,6 +2,7 @@ package evolution
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -397,6 +398,67 @@ func validateHolisticReplacement(existing, candidate string) error {
 		}
 	}
 	return nil
+}
+
+// preflightAppliedBody reproduces, WITHOUT writing anything, the exact
+// deterministic body validation the final apply performs on the fully rendered
+// deployable SKILL.md. It renders the body for the draft's change kind — using
+// the exact old body a replacement review observed (expected.body) so create and
+// replace are handled with the same allow-existing-frontmatter rule apply uses —
+// and runs validateAppliedSkillBody, plus the required-frontmatter preservation
+// gate for an existing-skill replacement. Failures are returned with the SAME
+// typed classification apply produces (a DraftApplySafetyError whose Stage is
+// "applied_body" for a formatting/body failure, "holistic_replacement" for a
+// dropped required frontmatter field), so a caller can distinguish a
+// self-correctable formatting failure from a safety failure that must never be
+// retried.
+//
+// It deliberately performs NO stale/ownership/create-exists disk-state check:
+// those are the locked apply's job and would race the file here. It never
+// mutates state and issues no I/O beyond what expected already captured.
+func preflightAppliedBody(draft SkillDraft, expected observedTargetState) error {
+	hadOriginal := expected.guard && expected.existed
+	existingBody := ""
+	if hadOriginal {
+		existingBody = expected.body
+	}
+	renderedBody, err := renderAppliedBody(draft, existingBody, hadOriginal)
+	if err != nil {
+		// A lifecycle/render error (e.g. replace of an absent target) is not a
+		// formatting failure; return it plain, exactly as apply does, so it is
+		// never treated as a self-correctable body defect.
+		return err
+	}
+	if err := validateAppliedSkillBody(
+		renderedBody,
+		draft.TargetSkillName,
+		allowsExistingFrontmatterFields(draft.ChangeKind, hadOriginal),
+	); err != nil {
+		return &DraftApplySafetyError{Stage: "applied_body", reason: err}
+	}
+	if hadOriginal && draft.ChangeKind == ChangeKindReplace {
+		if err := validateHolisticReplacement(existingBody, renderedBody); err != nil {
+			return &DraftApplySafetyError{
+				Stage:  "holistic_replacement",
+				reason: fmt.Errorf("unsafe incomplete replacement: %w", err),
+			}
+		}
+	}
+	return nil
+}
+
+// isRetryableBodyFormatError reports whether err is a formatting/body-validation
+// rejection (DraftApplySafetyError stage "applied_body") that a single bounded
+// feedback repair is allowed to attempt. Every other cause — a holistic
+// frontmatter-preservation failure, a stale/ownership conflict, a
+// review-unavailable failure, a capacity failure, or any lifecycle/render error —
+// returns false and is never retried.
+func isRetryableBodyFormatError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var safety *DraftApplySafetyError
+	return errors.As(err, &safety) && safety != nil && safety.Stage == "applied_body"
 }
 
 func (a *Applier) backupCurrentSkill(

@@ -19,7 +19,33 @@ func skillDraftPromptInstructions() []string {
 		"A revision may remove obsolete, redundant, contradictory, irrelevant, or historical instructions and may merge, restructure, or rephrase for concise actionable coverage.",
 		"Preserve every critical safety and domain constraint. Do not propose an update unless it is materially better, has no safeguard loss, contradictions, repetition, or needless history.",
 		"Keep operational instructions separable from audit/provenance notes because the final deployed SKILL.md will be rendered without learning traces.",
+		"body_or_patch must contain only the deployable SKILL.md content, with no surrounding prose, commentary, or explanation and no markdown code fences.",
+		"body_or_patch must follow this exact SKILL.md format (opening --- delimiter, name equal to the target_skill_name, a single nonempty description line, a closing --- delimiter, then the Markdown instructions):",
+		deployableSkillBodyTemplate(""),
+		"The very first line must be exactly --- and the YAML frontmatter must be closed by a --- line before the Markdown body begins.",
 	}
+}
+
+// deployableSkillBodyTemplate is the exact minimal SKILL.md body_or_patch
+// template the model must follow: an opening --- delimiter, a name equal to the
+// exact target skill name, a single nonempty description line, a closing ---
+// delimiter, then the Markdown instructions. When targetName is empty (the model
+// chooses the name during a create) it embeds the target_skill_name placeholder
+// so the exact-match requirement is still explicit; a repair request that already
+// knows the pinned name embeds it verbatim.
+func deployableSkillBodyTemplate(targetName string) string {
+	name := strings.TrimSpace(targetName)
+	if name == "" {
+		name = "<the exact target_skill_name>"
+	}
+	return strings.Join([]string{
+		"---",
+		"name: " + name,
+		"description: <one nonempty line describing what this skill does and when to use it>",
+		"---",
+		"",
+		"<Markdown instructions: concise usage guidance and the exact execution steps>",
+	}, "\n")
 }
 
 func skillDraftPromptText() string {
