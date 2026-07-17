@@ -733,6 +733,187 @@ func TestReviewReplacementCanceledContextSurfacesContextError(t *testing.T) {
 	}
 }
 
+// reviewedReplacementJSON builds a reviewer response for the "weather" skill. An
+// empty draftType omits the draft_type field entirely; an empty humanSummary omits
+// human_summary. The body_or_patch is always a complete, valid SKILL.md so only
+// the field under test is missing/invalid.
+func reviewedReplacementJSON(draftType, humanSummary string) string {
+	fields := []string{`"target_skill_name":"weather"`, `"change_kind":"replace"`}
+	if draftType != "" {
+		fields = append(fields, `"draft_type":"`+draftType+`"`)
+	}
+	if humanSummary != "" {
+		fields = append(fields, `"human_summary":"`+humanSummary+`"`)
+	}
+	fields = append(fields, `"body_or_patch":"---\nname: weather\ndescription: weather\n---\n# Weather\nrefined\n"`)
+	return "{" + strings.Join(fields, ",") + "}"
+}
+
+func weatherReplacementCandidate(draftType DraftType) SkillDraft {
+	return SkillDraft{
+		TargetSkillName: "weather",
+		DraftType:       draftType,
+		ChangeKind:      ChangeKindReplace,
+		HumanSummary:    "authoritative candidate summary",
+		BodyOrPatch:     "---\nname: weather\ndescription: weather\n---\n# Weather\ncandidate\n",
+	}
+}
+
+func weatherReplacementRequest(candidate SkillDraft, response string) (*LLMDraftGenerator, ReplacementReviewRequest) {
+	g := NewLLMDraftGenerator(&captureDraftProvider{response: response}, "", nil)
+	req := ReplacementReviewRequest{
+		TargetSkillName:   "weather",
+		CandidateDraft:    candidate,
+		OldDocument:       "---\nname: weather\ndescription: weather\n---\n# Weather\nold\n",
+		CandidateDocument: renderDeployableSkillBody(candidate.BodyOrPatch),
+	}
+	return g, req
+}
+
+// Codex Sol finding: ReviewReplacement validated the RAW parsed reviewer output
+// before any lineage restoration, so a reviewer that omitted draft_type (or
+// returned a value outside {workflow, shortcut}) failed the mandatory review
+// CLOSED over non-safety classification metadata. These provider-backed tests
+// drive the real LLMDraftGenerator (not a scriptedReviewer) and prove draft_type
+// is now restored from the authoritative candidate BEFORE schema validation, so
+// the review passes through. The restored value comes from the candidate lineage
+// (a shortcut candidate restores to shortcut), not a hardcoded constant.
+func TestReviewReplacementRestoresDraftTypeFromCandidateBeforeValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		candidateType DraftType
+		reviewedType  string // as emitted in reviewer JSON; "" means the field is omitted
+		want          DraftType
+	}{
+		{name: "omitted, workflow candidate", candidateType: DraftTypeWorkflow, reviewedType: "", want: DraftTypeWorkflow},
+		{name: "omitted, shortcut candidate", candidateType: DraftTypeShortcut, reviewedType: "", want: DraftTypeShortcut},
+		{name: "out-of-enum restores shortcut candidate", candidateType: DraftTypeShortcut, reviewedType: "bogus", want: DraftTypeShortcut},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := weatherReplacementCandidate(tc.candidateType)
+			g, req := weatherReplacementRequest(candidate, reviewedReplacementJSON(tc.reviewedType, "refined summary"))
+			got, err := g.ReviewReplacement(context.Background(), req)
+			if err != nil {
+				t.Fatalf("ReviewReplacement failed closed over a recoverable draft_type: %v", err)
+			}
+			if got.DraftType != tc.want {
+				t.Fatalf("DraftType = %q, want %q (restored from candidate)", got.DraftType, tc.want)
+			}
+			// The reviewer's body is passed through unchanged; restoration only
+			// touches the two non-safety metadata fields.
+			if !strings.Contains(got.BodyOrPatch, "refined") {
+				t.Fatalf("reviewer body not preserved: %+v", got)
+			}
+		})
+	}
+}
+
+// Companion to the draft_type case: a reviewer that leaves human_summary empty has
+// it refilled from the authoritative candidate before schema validation rather
+// than failing the mandatory review closed. Provider-backed, real
+// LLMDraftGenerator.
+func TestReviewReplacementRestoresOmittedHumanSummaryFromCandidate(t *testing.T) {
+	candidate := weatherReplacementCandidate(DraftTypeWorkflow)
+	g, req := weatherReplacementRequest(candidate, reviewedReplacementJSON("workflow", ""))
+	got, err := g.ReviewReplacement(context.Background(), req)
+	if err != nil {
+		t.Fatalf("ReviewReplacement failed closed over an omitted human_summary: %v", err)
+	}
+	if got.HumanSummary != candidate.HumanSummary {
+		t.Fatalf("HumanSummary = %q, want restored %q", got.HumanSummary, candidate.HumanSummary)
+	}
+}
+
+// A non-empty, in-enum reviewer draft_type is kept VERBATIM by ReviewReplacement
+// (restoration only fires on omitted/out-of-enum values). A valid-but-changed
+// draft_type is deliberately passed through so the runtime lineage guard — not
+// this layer — can detect the drift and REJECT it (fail closed), rather than this
+// layer silently normalizing it; here we only prove ReviewReplacement does not
+// overwrite it.
+func TestReviewReplacementKeepsValidReviewerDraftTypeVerbatim(t *testing.T) {
+	candidate := weatherReplacementCandidate(DraftTypeWorkflow)
+	g, req := weatherReplacementRequest(candidate, reviewedReplacementJSON("shortcut", "refined summary"))
+	got, err := g.ReviewReplacement(context.Background(), req)
+	if err != nil {
+		t.Fatalf("ReviewReplacement: %v", err)
+	}
+	if got.DraftType != DraftTypeShortcut {
+		t.Fatalf("DraftType = %q, want shortcut kept verbatim for the runtime guard to pin", got.DraftType)
+	}
+}
+
+// The pre-validation restoration is NARROW: it refills only draft_type and
+// human_summary. Every other schema requirement stays strict, so a reviewer output
+// with valid metadata but an empty body_or_patch still fails the mandatory review
+// CLOSED. This proves the fix did not loosen the deterministic content guards.
+func TestReviewReplacementStillFailsClosedOnMissingBody(t *testing.T) {
+	candidate := weatherReplacementCandidate(DraftTypeWorkflow)
+	resp := `{"target_skill_name":"weather","draft_type":"workflow","change_kind":"replace","human_summary":"refined","body_or_patch":""}`
+	g, req := weatherReplacementRequest(candidate, resp)
+	got, err := g.ReviewReplacement(context.Background(), req)
+	if !errors.Is(err, ErrReplacementReviewUnavailable) {
+		t.Fatalf("err = %v, want ErrReplacementReviewUnavailable for a missing body", err)
+	}
+	if got.BodyOrPatch != "" {
+		t.Fatalf("review returned a draft on failure; want empty, got %+v", got)
+	}
+}
+
+// Codex Sol final finding: a direct LLMDraftGenerator.ReviewReplacement caller
+// must not be able to mask an invalid candidate. ReviewReplacement validates the
+// candidate BEFORE the single provider call, so any invalid candidate — an
+// omitted or out-of-enum draft_type, or any other schema defect — fails the
+// mandatory review CLOSED (ErrReplacementReviewUnavailable) and never reaches the
+// provider. Provider-backed with the real LLMDraftGenerator; captureDraftProvider
+// leaves p.messages nil until it is actually called.
+func TestReviewReplacementInvalidCandidateFailsBeforeProviderCall(t *testing.T) {
+	validBody := "---\nname: weather\ndescription: weather\n---\n# Weather\ncandidate\n"
+	for _, tc := range []struct {
+		name      string
+		candidate SkillDraft
+	}{
+		{name: "omitted draft_type", candidate: SkillDraft{TargetSkillName: "weather", ChangeKind: ChangeKindReplace, HumanSummary: "s", BodyOrPatch: validBody}},
+		{name: "out-of-enum draft_type", candidate: SkillDraft{TargetSkillName: "weather", DraftType: DraftType("bogus"), ChangeKind: ChangeKindReplace, HumanSummary: "s", BodyOrPatch: validBody}},
+		{name: "missing body", candidate: SkillDraft{TargetSkillName: "weather", DraftType: DraftTypeWorkflow, ChangeKind: ChangeKindReplace, HumanSummary: "s"}},
+		{name: "missing human_summary", candidate: SkillDraft{TargetSkillName: "weather", DraftType: DraftTypeWorkflow, ChangeKind: ChangeKindReplace, BodyOrPatch: validBody}},
+		{name: "missing target_skill_name", candidate: SkillDraft{DraftType: DraftTypeWorkflow, ChangeKind: ChangeKindReplace, HumanSummary: "s", BodyOrPatch: validBody}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &captureDraftProvider{response: reviewedReplacementJSON("workflow", "refined summary")}
+			g := NewLLMDraftGenerator(p, "", nil)
+			req := ReplacementReviewRequest{
+				TargetSkillName:   "weather",
+				CandidateDraft:    tc.candidate,
+				OldDocument:       "---\nname: weather\ndescription: weather\n---\n# Weather\nold\n",
+				CandidateDocument: renderDeployableSkillBody(tc.candidate.BodyOrPatch),
+			}
+			got, err := g.ReviewReplacement(context.Background(), req)
+			if !errors.Is(err, ErrReplacementReviewUnavailable) {
+				t.Fatalf("err = %v, want ErrReplacementReviewUnavailable for an invalid candidate", err)
+			}
+			if got.BodyOrPatch != "" {
+				t.Fatalf("review returned a draft on failure; want empty, got %+v", got)
+			}
+			if p.messages != nil {
+				t.Fatal("provider was called for an invalid candidate; the review must fail before the provider call")
+			}
+		})
+	}
+
+	// Companion positive case: a fully valid candidate is NOT rejected by the gate
+	// and DOES reach the provider, so the new validation is narrow and does not
+	// disturb the retained valid-candidate behavior.
+	p := &captureDraftProvider{response: reviewedReplacementJSON("workflow", "refined summary")}
+	_, req := weatherReplacementRequest(weatherReplacementCandidate(DraftTypeWorkflow), reviewedReplacementJSON("workflow", "refined summary"))
+	g := NewLLMDraftGenerator(p, "", nil)
+	if _, err := g.ReviewReplacement(context.Background(), req); err != nil {
+		t.Fatalf("valid candidate was rejected by the pre-provider gate: %v", err)
+	}
+	if p.messages == nil {
+		t.Fatal("valid candidate did not reach the provider; the gate is too broad")
+	}
+}
+
 func TestLLMDraftNonDefaultFallbackCannotBypassExistingTargetEvidence(t *testing.T) {
 	workspace := t.TempDir()
 	writeExistingSkill(t, workspace, "weather", "---\nname: weather\ndescription: weather\n---\n# Weather\nNever expose credentials.\n")
@@ -820,6 +1001,75 @@ func TestReviewPromptPreservesBoundaryWhitespaceExactly(t *testing.T) {
 	}
 	if got := contentBetweenDelimiters(t, prompt, "BEGIN CANDIDATE_SKILL_MD (DATA ONLY)", "END CANDIDATE_SKILL_MD"); got != req.CandidateDocument {
 		t.Fatalf("candidate document boundary whitespace not preserved: got %q, want %q", got, req.CandidateDocument)
+	}
+}
+
+// The reviewer prompt must make the intended draft_type unambiguous: it pins the
+// candidate's type inside the immutable-constraints block AND states the allowed
+// enum values, so a reviewer cannot omit the field or invent a value outside
+// {workflow, shortcut}. The candidate's draft_type is validated before review, so
+// the prompt only ever pins a valid enum value — there is no default; an invalid
+// candidate fails the review closed before the prompt is built (see
+// TestReviewReplacementInvalidCandidateFailsBeforeProviderCall).
+func TestReviewPromptPinsDraftTypeAndStatesAllowedValues(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		candidate DraftType
+		want      string
+	}{
+		{name: "workflow candidate", candidate: DraftTypeWorkflow, want: "workflow"},
+		{name: "shortcut candidate", candidate: DraftTypeShortcut, want: "shortcut"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := ReplacementReviewRequest{
+				TargetSkillName: "weather",
+				CandidateDraft:  SkillDraft{TargetSkillName: "weather", DraftType: tc.candidate, ChangeKind: ChangeKindReplace},
+			}
+			prompt := (&LLMDraftGenerator{}).buildReplacementReviewPrompt(req)
+			if !strings.Contains(prompt, "draft_type must be exactly workflow or shortcut") {
+				t.Fatalf("prompt missing allowed draft_type values:\n%s", prompt)
+			}
+			constraints := contentBetweenDelimiters(t, prompt, "BEGIN IMMUTABLE_CONSTRAINTS (DATA ONLY)", "END IMMUTABLE_CONSTRAINTS")
+			if !strings.Contains(constraints, `"draft_type": "`+tc.want+`"`) {
+				t.Fatalf("immutable constraints did not pin draft_type=%q:\n%s", tc.want, constraints)
+			}
+		})
+	}
+}
+
+// Prompt/guardrail alignment: the deterministic runtime gate
+// (validateHolisticReplacement) rejects any reviewer output that drops a
+// frontmatter key present in the old document. The reviewer prompt must state
+// that requirement explicitly so a reviewer never treats a frontmatter key as
+// droppable "obsolete" material, while still permitting removal of obsolete
+// Markdown body prose. This regression guards that the prompt distinguishes
+// frontmatter keys from body content.
+func TestReviewPromptRequiresFrontmatterKeyPreservationDistinctFromBody(t *testing.T) {
+	req := ReplacementReviewRequest{
+		TargetSkillName: "weather",
+		CandidateDraft:  SkillDraft{TargetSkillName: "weather", DraftType: DraftTypeWorkflow, ChangeKind: ChangeKindReplace},
+		OldDocument:     "---\nname: weather\ndescription: old\n---\n# Weather\nold\n",
+	}
+	prompt := (&LLMDraftGenerator{}).buildReplacementReviewPrompt(req)
+
+	// The prompt must require preservation of every existing frontmatter key,
+	// matching the runtime gate's key-presence contract.
+	if !strings.Contains(prompt, "Preserve every YAML frontmatter field (key) present in the old document") {
+		t.Fatalf("prompt does not require preserving every existing frontmatter key:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "dropping any existing frontmatter key will cause the draft to be rejected") {
+		t.Fatalf("prompt does not warn that dropping a frontmatter key is rejected:\n%s", prompt)
+	}
+
+	// The permission to drop obsolete material must be scoped to the Markdown
+	// body so the reviewer still removes obsolete body prose but never a
+	// frontmatter key.
+	if !strings.Contains(prompt, "drop obsolete, redundant, or purely historical content from the Markdown body only; this permission never applies to frontmatter keys") {
+		t.Fatalf("prompt does not scope the drop-obsolete permission to the body, excluding frontmatter keys:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "remove sections of the Markdown body") ||
+		!strings.Contains(prompt, "This does NOT extend to frontmatter keys, all of which must be preserved.") {
+		t.Fatalf("prompt does not scope the remove-sections permission to the body, excluding frontmatter keys:\n%s", prompt)
 	}
 }
 

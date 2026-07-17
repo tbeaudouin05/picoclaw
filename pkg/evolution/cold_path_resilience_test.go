@@ -2,6 +2,7 @@ package evolution_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/evolution"
+	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/skills"
 )
 
@@ -797,5 +799,282 @@ func TestRuntime_RunColdPathOnce_StaleOldDocumentConflictFailsClosed(t *testing.
 	}
 	if len(drafts) != 1 || drafts[0].Status != evolution.DraftStatusQuarantined {
 		t.Fatalf("drafts = %+v, want one quarantined draft", drafts)
+	}
+}
+
+// A reviewer that OMITS draft_type must not, by that omission alone, sink an
+// otherwise-valid complete replacement. draft_type is immutable classification
+// metadata restored from the candidate before the deterministic schema gate runs,
+// so the refined document still applies and the accepted draft keeps the
+// candidate's type. This is the exact failure the fix targets: a mandatory review
+// previously returned an invalid draft (empty draft_type) and failed closed.
+func TestRuntime_RunColdPathOnce_ReviewerOmittedDraftTypeIsNormalizedAndApplied(t *testing.T) {
+	root := t.TempDir()
+	store := evolution.NewStore(evolution.NewPaths(root, ""))
+	skillPath := writeSelfRestartSkill(t, root, selfRestartOriginalBody())
+	seedSelfRestartReadyRule(t, store, root)
+
+	reviewed := selfRestartReplaceDraft(root, selfRestartCorrectedBody())
+	reviewed.DraftType = "" // reviewer dropped the field entirely
+	gen := &scriptedReviewer{
+		first:    selfRestartReplaceDraft(root, selfRestartBadHeadingBody()),
+		reviewed: reviewed,
+	}
+	rt := newReviewRuntime(t, root, store, gen)
+
+	if runErr := rt.RunColdPathOnce(context.Background(), root); runErr != nil {
+		t.Fatalf("RunColdPathOnce: %v", runErr)
+	}
+	if gen.reviewCalls != 1 {
+		t.Fatalf("reviewCalls = %d, want exactly 1", gen.reviewCalls)
+	}
+
+	got, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(got), "fall back to the documented steps") {
+		t.Fatalf("refined document was not applied despite an omitted draft_type:\n%s", string(got))
+	}
+
+	drafts, err := store.LoadDrafts()
+	if err != nil {
+		t.Fatalf("LoadDrafts: %v", err)
+	}
+	if len(drafts) != 1 || drafts[0].Status != evolution.DraftStatusAccepted {
+		t.Fatalf("drafts = %+v, want one accepted draft", drafts)
+	}
+	if drafts[0].DraftType != evolution.DraftTypeWorkflow {
+		t.Fatalf("draft_type = %q, want %q (restored from candidate)", drafts[0].DraftType, evolution.DraftTypeWorkflow)
+	}
+}
+
+// A reviewer that returns a draft_type OUTSIDE the allowed enum is normalized back
+// to the candidate's type rather than rejected. Using a shortcut candidate proves
+// the restored value comes from the candidate lineage, not a hardcoded default.
+func TestRuntime_RunColdPathOnce_ReviewerInvalidDraftTypeRestoresCandidateType(t *testing.T) {
+	root := t.TempDir()
+	store := evolution.NewStore(evolution.NewPaths(root, ""))
+	skillPath := writeSelfRestartSkill(t, root, selfRestartOriginalBody())
+	seedSelfRestartReadyRule(t, store, root)
+
+	candidate := selfRestartReplaceDraft(root, selfRestartBadHeadingBody())
+	candidate.DraftType = evolution.DraftTypeShortcut
+	reviewed := selfRestartReplaceDraft(root, selfRestartCorrectedBody())
+	reviewed.DraftType = evolution.DraftType("bogus")
+	gen := &scriptedReviewer{first: candidate, reviewed: reviewed}
+	rt := newReviewRuntime(t, root, store, gen)
+
+	if runErr := rt.RunColdPathOnce(context.Background(), root); runErr != nil {
+		t.Fatalf("RunColdPathOnce: %v", runErr)
+	}
+	if gen.reviewCalls != 1 {
+		t.Fatalf("reviewCalls = %d, want exactly 1", gen.reviewCalls)
+	}
+
+	got, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(got), "fall back to the documented steps") {
+		t.Fatalf("refined document was not applied despite an invalid draft_type:\n%s", string(got))
+	}
+
+	drafts, err := store.LoadDrafts()
+	if err != nil {
+		t.Fatalf("LoadDrafts: %v", err)
+	}
+	if len(drafts) != 1 || drafts[0].Status != evolution.DraftStatusAccepted {
+		t.Fatalf("drafts = %+v, want one accepted draft", drafts)
+	}
+	if drafts[0].DraftType != evolution.DraftTypeShortcut {
+		t.Fatalf("draft_type = %q, want %q (restored from candidate, not a constant)", drafts[0].DraftType, evolution.DraftTypeShortcut)
+	}
+}
+
+// Codex Sol strict-lineage finding: a reviewer that returns the OTHER valid
+// draft_type enum value (candidate workflow -> reviewed shortcut) has asserted a
+// competing, valid classification. That is lineage drift, exactly like a changed
+// target or change kind, so the runtime must FAIL CLOSED — quarantine the draft,
+// write nothing to disk, run the review exactly once — rather than silently
+// normalizing the type back to the candidate's. An out-of-enum/omitted value is
+// still repaired (see the sibling tests); only a valid, changed value drifts.
+func TestRuntime_RunColdPathOnce_ReviewerValidChangedDraftTypeFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		candidateType evolution.DraftType
+		reviewedType  evolution.DraftType
+	}{
+		{name: "workflow to shortcut", candidateType: evolution.DraftTypeWorkflow, reviewedType: evolution.DraftTypeShortcut},
+		{name: "shortcut to workflow", candidateType: evolution.DraftTypeShortcut, reviewedType: evolution.DraftTypeWorkflow},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			store := evolution.NewStore(evolution.NewPaths(root, ""))
+			skillPath := writeSelfRestartSkill(t, root, selfRestartOriginalBody())
+			seedSelfRestartReadyRule(t, store, root)
+
+			candidate := selfRestartReplaceDraft(root, selfRestartBadHeadingBody())
+			candidate.DraftType = tc.candidateType
+			reviewed := selfRestartReplaceDraft(root, selfRestartCorrectedBody())
+			reviewed.DraftType = tc.reviewedType
+			gen := &scriptedReviewer{first: candidate, reviewed: reviewed}
+			rt := newReviewRuntime(t, root, store, gen)
+
+			err := rt.RunColdPathOnce(context.Background(), root)
+			if err == nil || !errors.Is(err, evolution.ErrApplyDraftFailed) {
+				t.Fatalf("error = %v, want ErrApplyDraftFailed for valid-but-changed draft_type", err)
+			}
+			if gen.reviewCalls != 1 {
+				t.Fatalf("reviewCalls = %d, want exactly 1 (no retry)", gen.reviewCalls)
+			}
+
+			// The valid changed type is drift, not a repairable omission: nothing is
+			// written, so the on-disk skill is untouched.
+			got, err := os.ReadFile(skillPath)
+			if err != nil {
+				t.Fatalf("ReadFile: %v", err)
+			}
+			if string(got) != selfRestartOriginalBody() {
+				t.Fatalf("skill was modified despite failing closed on lineage drift:\n%s", string(got))
+			}
+
+			drafts, err := store.LoadDrafts()
+			if err != nil {
+				t.Fatalf("LoadDrafts: %v", err)
+			}
+			if len(drafts) != 1 || drafts[0].Status != evolution.DraftStatusQuarantined {
+				t.Fatalf("drafts = %+v, want one quarantined draft", drafts)
+			}
+		})
+	}
+}
+
+// A reviewer that leaves human_summary empty has its candidate summary restored
+// rather than failing the mandatory review closed over missing descriptive
+// metadata. A non-empty reviewer summary is not touched (see the happy-path test).
+func TestRuntime_RunColdPathOnce_ReviewerOmittedHumanSummaryIsFilledAndApplied(t *testing.T) {
+	root := t.TempDir()
+	store := evolution.NewStore(evolution.NewPaths(root, ""))
+	skillPath := writeSelfRestartSkill(t, root, selfRestartOriginalBody())
+	seedSelfRestartReadyRule(t, store, root)
+
+	reviewed := selfRestartReplaceDraft(root, selfRestartCorrectedBody())
+	reviewed.HumanSummary = "" // reviewer omitted the summary
+	gen := &scriptedReviewer{
+		first:    selfRestartReplaceDraft(root, selfRestartBadHeadingBody()),
+		reviewed: reviewed,
+	}
+	rt := newReviewRuntime(t, root, store, gen)
+
+	if runErr := rt.RunColdPathOnce(context.Background(), root); runErr != nil {
+		t.Fatalf("RunColdPathOnce: %v", runErr)
+	}
+
+	got, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(got), "fall back to the documented steps") {
+		t.Fatalf("refined document was not applied despite an omitted human_summary:\n%s", string(got))
+	}
+
+	drafts, err := store.LoadDrafts()
+	if err != nil {
+		t.Fatalf("LoadDrafts: %v", err)
+	}
+	if len(drafts) != 1 || drafts[0].Status != evolution.DraftStatusAccepted {
+		t.Fatalf("drafts = %+v, want one accepted draft", drafts)
+	}
+	if strings.TrimSpace(drafts[0].HumanSummary) == "" {
+		t.Fatalf("human_summary was not restored from the candidate: %+v", drafts[0])
+	}
+}
+
+// providerBackedReviewGenerator produces a fixed candidate draft but performs the
+// proactive replacement review through a REAL LLMDraftGenerator backed by a
+// provider. It lets the cold path exercise ReviewReplacement's genuine provider
+// path — parse, pre-validation metadata restoration, and the schema gate — instead
+// of a scriptedReviewer stand-in, while still pinning the candidate the runtime
+// reviews against.
+type providerBackedReviewGenerator struct {
+	candidate evolution.SkillDraft
+	reviewer  *evolution.LLMDraftGenerator
+	calls     int
+}
+
+func (g *providerBackedReviewGenerator) GenerateDraft(
+	context.Context,
+	evolution.LearningRecord,
+	[]skills.SkillInfo,
+) (evolution.SkillDraft, error) {
+	return g.candidate, nil
+}
+
+func (g *providerBackedReviewGenerator) ReviewReplacement(
+	ctx context.Context,
+	req evolution.ReplacementReviewRequest,
+) (evolution.SkillDraft, error) {
+	g.calls++
+	return g.reviewer.ReviewReplacement(ctx, req)
+}
+
+// End-to-end, provider-backed: a real LLMDraftGenerator reviewer whose response
+// OMITS draft_type must not sink the replacement, AND the normalized refinement
+// must still clear the runtime's strict lineage + deterministic (schema/secret/
+// frontmatter) gates before it is applied. This is the true provider path — not a
+// scriptedReviewer — proving the omitted field passes through ReviewReplacement
+// yet remains subject to the later strict checks.
+func TestRuntime_RunColdPathOnce_ProviderReviewerOmittedDraftTypeNormalizedAndGated(t *testing.T) {
+	root := t.TempDir()
+	store := evolution.NewStore(evolution.NewPaths(root, ""))
+	skillPath := writeSelfRestartSkill(t, root, selfRestartOriginalBody())
+	seedSelfRestartReadyRule(t, store, root)
+
+	// A complete, valid replacement body that preserves the required frontmatter
+	// and echoes the immutable target/change_kind, but OMITS draft_type entirely.
+	respBytes, err := json.Marshal(map[string]string{
+		"target_skill_name": selfRestartSkill,
+		"change_kind":       "replace",
+		"human_summary":     "refined self-restart fast path",
+		"body_or_patch":     selfRestartCorrectedBody(),
+	})
+	if err != nil {
+		t.Fatalf("marshal reviewer response: %v", err)
+	}
+	reviewer := evolution.NewLLMDraftGenerator(
+		&llmDraftTestProvider{defaultModel: "review-model", response: &providers.LLMResponse{Content: string(respBytes)}},
+		"", nil,
+	)
+	gen := &providerBackedReviewGenerator{
+		candidate: selfRestartReplaceDraft(root, selfRestartBadHeadingBody()),
+		reviewer:  reviewer,
+	}
+	rt := newReviewRuntime(t, root, store, gen)
+
+	if runErr := rt.RunColdPathOnce(context.Background(), root); runErr != nil {
+		t.Fatalf("RunColdPathOnce: %v", runErr)
+	}
+	if gen.calls != 1 {
+		t.Fatalf("review calls = %d, want exactly 1", gen.calls)
+	}
+
+	got, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(got), "fall back to the documented steps") {
+		t.Fatalf("provider-reviewed refinement was not applied despite an omitted draft_type:\n%s", string(got))
+	}
+
+	drafts, err := store.LoadDrafts()
+	if err != nil {
+		t.Fatalf("LoadDrafts: %v", err)
+	}
+	if len(drafts) != 1 || drafts[0].Status != evolution.DraftStatusAccepted {
+		t.Fatalf("drafts = %+v, want one accepted draft", drafts)
+	}
+	if drafts[0].DraftType != evolution.DraftTypeWorkflow {
+		t.Fatalf("draft_type = %q, want %q (restored from candidate)", drafts[0].DraftType, evolution.DraftTypeWorkflow)
 	}
 }

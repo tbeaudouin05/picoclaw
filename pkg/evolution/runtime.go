@@ -1610,6 +1610,7 @@ type draftLineageConstraints struct {
 	sourceID    string
 	target      string
 	changeKind  ChangeKind
+	draftType   DraftType
 }
 
 func lineageConstraintsFromDraft(workspace string, draft SkillDraft) draftLineageConstraints {
@@ -1619,13 +1620,25 @@ func lineageConstraintsFromDraft(workspace string, draft SkillDraft) draftLineag
 		sourceID:    draft.SourceRecordID,
 		target:      strings.TrimSpace(draft.TargetSkillName),
 		changeKind:  draft.ChangeKind,
+		draftType:   draft.DraftType,
 	}
 }
 
 // enforceLineageConstraints restores immutable identity fields on a regenerated
 // draft and reports the first constraint the regeneration violated (target skill
-// name or change kind). It never rewrites target/change-kind to force a match:
-// a drifted regeneration is rejected, not normalized.
+// name, change kind, or draft_type). It never rewrites those identity fields to
+// force a match: a drifted regeneration is rejected, not normalized.
+//
+// draft_type is an immutable classification of the candidate, so it is treated
+// exactly like target/change-kind: a reviewer that returns a VALID enum value
+// ({workflow, shortcut}) differing from the candidate's has asserted a competing
+// classification and is rejected as lineage drift, not silently normalized. A
+// reviewer that OMITS draft_type or returns a value OUTSIDE the enum has not
+// asserted a competing classification, so it is repaired by restoring the
+// candidate's already-validated type below. The concrete LLMDraftGenerator repairs
+// omitted/out-of-enum values before its own schema gate; this guard applies the
+// same repair for interface-based reviewers while failing closed on valid drift
+// for every reviewer.
 func enforceLineageConstraints(draft *SkillDraft, c draftLineageConstraints) string {
 	if target := strings.TrimSpace(draft.TargetSkillName); target != "" && target != c.target {
 		return fmt.Sprintf("target skill changed from %q to %q", c.target, target)
@@ -1633,11 +1646,15 @@ func enforceLineageConstraints(draft *SkillDraft, c draftLineageConstraints) str
 	if draft.ChangeKind != "" && draft.ChangeKind != c.changeKind {
 		return fmt.Sprintf("change kind changed from %q to %q", c.changeKind, draft.ChangeKind)
 	}
+	if isValidDraftType(draft.DraftType) && draft.DraftType != c.draftType {
+		return fmt.Sprintf("draft type changed from %q to %q", c.draftType, draft.DraftType)
+	}
 	draft.ID = c.id
 	draft.WorkspaceID = c.workspaceID
 	draft.SourceRecordID = c.sourceID
 	draft.TargetSkillName = c.target
 	draft.ChangeKind = c.changeKind
+	draft.DraftType = c.draftType
 	return ""
 }
 
@@ -1861,6 +1878,14 @@ func (rt *Runtime) reviewReplacementDraft(
 	}
 	reviewed.CreatedAt = draft.CreatedAt
 	reviewed.MatchedSkillRefs = draft.MatchedSkillRefs
+
+	// human_summary is descriptive, non-safety metadata. A reviewer focused on the
+	// body may legitimately improve it, but if it left the field empty, restore the
+	// candidate's summary rather than failing the mandatory review closed over a
+	// missing description. A non-empty reviewer summary is kept verbatim.
+	if strings.TrimSpace(reviewed.HumanSummary) == "" {
+		reviewed.HumanSummary = draft.HumanSummary
+	}
 
 	// Run the deterministic draft review (schema/type + secret scan) on the
 	// reviewed body. A hard-gate failure means the reviewer output is unusable, so

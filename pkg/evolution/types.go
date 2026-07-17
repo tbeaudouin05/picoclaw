@@ -24,6 +24,15 @@ const (
 	DraftTypeShortcut DraftType = "shortcut"
 )
 
+// isValidDraftType reports whether t is one of the allowed draft_type enum values.
+// An omitted (empty) or out-of-enum value is not valid: such a value is treated as
+// unasserted classification metadata that may be repaired by restoring the
+// candidate's type, whereas a valid value that differs from the candidate's is
+// lineage drift.
+func isValidDraftType(t DraftType) bool {
+	return t == DraftTypeWorkflow || t == DraftTypeShortcut
+}
+
 type ChangeKind string
 
 const (
