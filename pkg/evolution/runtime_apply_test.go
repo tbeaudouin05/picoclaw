@@ -908,7 +908,10 @@ func TestRuntime_RunColdPathOnce_FirstApplyFailureDoesNotCreateGhostProfile(t *t
 				DraftType:       evolution.DraftTypeShortcut,
 				ChangeKind:      evolution.ChangeKindCreate,
 				HumanSummary:    "broken weather helper",
-				BodyOrPatch:     "invalid-frontmatter",
+				// A well-formed frontmatter whose name mismatches the target is a
+				// retained deterministic failure (malformed/absent frontmatter no
+				// longer blocks).
+				BodyOrPatch: "---\nname: wrong-name\ndescription: broken\n---\n# Wrong\nbody\n",
 			},
 		},
 		Organizer:      evolution.NewOrganizer(evolution.OrganizerOptions{MinCaseCount: 3, MinSuccessRate: 0.7}),

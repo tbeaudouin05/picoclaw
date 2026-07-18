@@ -126,6 +126,20 @@ func weatherCreateDraft(root, body string) evolution.SkillDraft {
 const validWeatherBody = "---\nname: weather\ndescription: Use to look up weather by native name.\n---\n" +
 	"# Weather\n\n## Start Here\nQuery the weather service using the native place name first.\n"
 
+// mismatchedNameBody is a well-formed SKILL.md whose frontmatter name does not
+// match the target skill. Since the YAML frontmatter requirement was removed,
+// this — not a malformed/absent frontmatter block — is the deterministic,
+// retryable body-format failure used to exercise the format-repair path.
+const mismatchedNameBody = "---\nname: not-weather\ndescription: Use to look up weather by native name.\n---\n" +
+	"# Weather\n\n## Start Here\nQuery the weather service using the native place name first.\n"
+
+// secondMismatchedNameBody is a distinct still-failing candidate for asserting a
+// single repair attempt does not loop.
+const secondMismatchedNameBody = "---\nname: still-not-weather\ndescription: Use to look up weather by native name.\n---\n" +
+	"# Weather\n\n## Start Here\nQuery the weather service using the native place name first.\n"
+
+const nameMismatchValidationErr = "does not match target skill"
+
 // TestGenerationPromptIncludesExactDeployableTemplate covers requirement 1: the
 // generation request embeds the exact minimal SKILL.md template and the
 // no-prose/no-fences rule.
@@ -208,17 +222,59 @@ func TestRepairPromptWithoutProviderIsUnavailable(t *testing.T) {
 	}
 }
 
-// TestColdPath_MalformedCreateRepairsOnceAndApplies covers requirements 2/3/4:
-// malformed frontmatter is caught before any write, the feedback generator
-// receives the exact deterministic error, repairs exactly once, and the corrected
-// skill is applied.
-func TestColdPath_MalformedCreateRepairsOnceAndApplies(t *testing.T) {
+// TestColdPath_MalformedCreateFrontmatterAppliesWithoutRepair proves the removed
+// requirement: a create draft whose body has NO YAML frontmatter is applied
+// directly, with no repair attempt and no quarantine. This is the core behavior
+// change — a malformed or absent frontmatter block no longer stalls a cold-path
+// run.
+func TestColdPath_MalformedCreateFrontmatterAppliesWithoutRepair(t *testing.T) {
 	root := t.TempDir()
 	store := evolution.NewStore(evolution.NewPaths(root, ""))
 	seedWeatherReadyRule(t, store, root)
 
 	gen := &feedbackDraftGenerator{
-		first:    weatherCreateDraft(root, "invalid-frontmatter"),
+		first: weatherCreateDraft(root, "# Weather\n\n## Start Here\nQuery by native place name first.\n"),
+		// repaired should never be used.
+		repaired: weatherCreateDraft(root, validWeatherBody),
+	}
+	rt := newReviewRuntime(t, root, store, gen)
+
+	if err := rt.RunColdPathOnce(context.Background(), root); err != nil {
+		t.Fatalf("RunColdPathOnce: %v", err)
+	}
+	if gen.repairCalls != 0 {
+		t.Fatalf("repairCalls = %d, want 0 (absent frontmatter must not trigger repair)", gen.repairCalls)
+	}
+
+	applied, err := os.ReadFile(filepath.Join(root, "skills", "weather", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("expected the skill on disk: %v", err)
+	}
+	if !strings.Contains(string(applied), "native place name") {
+		t.Fatalf("applied skill missing body:\n%s", string(applied))
+	}
+
+	drafts, err := store.LoadDrafts()
+	if err != nil {
+		t.Fatalf("LoadDrafts: %v", err)
+	}
+	if len(drafts) != 1 || drafts[0].Status != evolution.DraftStatusAccepted {
+		t.Fatalf("drafts = %+v, want exactly 1 accepted", drafts)
+	}
+}
+
+// TestColdPath_MismatchedNameCreateRepairsOnceAndApplies covers the retained
+// target-selection gate and the repair plumbing: a well-formed frontmatter whose
+// name does not match the target is caught before any write, the feedback
+// generator receives the exact deterministic error, repairs exactly once, and the
+// corrected skill is applied.
+func TestColdPath_MismatchedNameCreateRepairsOnceAndApplies(t *testing.T) {
+	root := t.TempDir()
+	store := evolution.NewStore(evolution.NewPaths(root, ""))
+	seedWeatherReadyRule(t, store, root)
+
+	gen := &feedbackDraftGenerator{
+		first:    weatherCreateDraft(root, mismatchedNameBody),
 		repaired: weatherCreateDraft(root, validWeatherBody),
 	}
 	rt := newReviewRuntime(t, root, store, gen)
@@ -230,10 +286,10 @@ func TestColdPath_MalformedCreateRepairsOnceAndApplies(t *testing.T) {
 	if gen.repairCalls != 1 {
 		t.Fatalf("repairCalls = %d, want exactly 1", gen.repairCalls)
 	}
-	if !strings.Contains(gen.lastValidationErr, "skill frontmatter is required") {
-		t.Fatalf("repair validation error = %q, want it to mention the frontmatter defect", gen.lastValidationErr)
+	if !strings.Contains(gen.lastValidationErr, nameMismatchValidationErr) {
+		t.Fatalf("repair validation error = %q, want it to mention the name mismatch", gen.lastValidationErr)
 	}
-	if gen.lastPrior.TargetSkillName != "weather" || gen.lastPrior.BodyOrPatch != "invalid-frontmatter" {
+	if gen.lastPrior.TargetSkillName != "weather" || gen.lastPrior.BodyOrPatch != mismatchedNameBody {
 		t.Fatalf("repair prior draft mismatch: %+v", gen.lastPrior)
 	}
 
@@ -267,8 +323,8 @@ func TestColdPath_SecondMalformedRepairQuarantines(t *testing.T) {
 	seedWeatherReadyRule(t, store, root)
 
 	gen := &feedbackDraftGenerator{
-		first:    weatherCreateDraft(root, "invalid-frontmatter"),
-		repaired: weatherCreateDraft(root, "still-invalid-frontmatter"),
+		first:    weatherCreateDraft(root, mismatchedNameBody),
+		repaired: weatherCreateDraft(root, secondMismatchedNameBody),
 	}
 	rt := newReviewRuntime(t, root, store, gen)
 
@@ -304,7 +360,7 @@ func TestColdPath_RepairUnavailableQuarantinesOriginal(t *testing.T) {
 	seedWeatherReadyRule(t, store, root)
 
 	gen := &feedbackDraftGenerator{
-		first:     weatherCreateDraft(root, "invalid-frontmatter"),
+		first:     weatherCreateDraft(root, mismatchedNameBody),
 		repairErr: evolution.ErrDraftRepairUnavailable,
 	}
 	rt := newReviewRuntime(t, root, store, gen)
@@ -335,7 +391,7 @@ func TestColdPath_NonFeedbackGeneratorDoesNotRetry(t *testing.T) {
 
 	// stubDraftGenerator does not implement FeedbackAwareDraftGenerator.
 	rt := newReviewRuntime(t, root, store, stubDraftGenerator{
-		draft: weatherCreateDraft(root, "invalid-frontmatter"),
+		draft: weatherCreateDraft(root, mismatchedNameBody),
 	})
 
 	err := rt.RunColdPathOnce(context.Background(), root)
@@ -478,7 +534,7 @@ func TestColdPath_RepairLineageDriftIsRejectedAndQuarantines(t *testing.T) {
 	seedWeatherReadyRule(t, store, root)
 
 	gen := &feedbackDraftGenerator{
-		first: weatherCreateDraft(root, "invalid-frontmatter"),
+		first: weatherCreateDraft(root, mismatchedNameBody),
 		// Repair returns a draft with a drifted target name.
 		repaired: evolution.SkillDraft{
 			ID:              "draft-weather",

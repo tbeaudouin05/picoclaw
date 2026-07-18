@@ -614,8 +614,10 @@ func TestRuntime_RunColdPathOnce_FailedApplyIsRecordedInLedger(t *testing.T) {
 		t.Fatalf("AppendLearningRecords: %v", err)
 	}
 
-	// A create draft with invalid frontmatter fails apply-safety; the default
-	// (non-regenerating) generator keeps the existing single-attempt behavior.
+	// A create draft whose well-formed frontmatter name mismatches the target
+	// fails apply-safety (a retained deterministic gate; malformed/absent
+	// frontmatter no longer blocks); the default (non-regenerating) generator
+	// keeps the existing single-attempt behavior.
 	rt := newReviewRuntime(t, root, store, stubDraftGenerator{
 		draft: evolution.SkillDraft{
 			ID:              "draft-broken",
@@ -625,7 +627,7 @@ func TestRuntime_RunColdPathOnce_FailedApplyIsRecordedInLedger(t *testing.T) {
 			DraftType:       evolution.DraftTypeShortcut,
 			ChangeKind:      evolution.ChangeKindCreate,
 			HumanSummary:    "broken weather helper",
-			BodyOrPatch:     "invalid-frontmatter",
+			BodyOrPatch:     "---\nname: wrong-name\ndescription: broken\n---\n# Wrong\nbody\n",
 		},
 	})
 

@@ -102,20 +102,49 @@ func TestApplierAppliesReplacementWithRephrasedSafetyGuidance(t *testing.T) {
 	}
 }
 
-// The deterministic apply gate still rejects a complete replacement that drops
-// the required description frontmatter field, independent of any body wording.
-func TestApplierRejectsReplacementThatDropsRequiredFrontmatterField(t *testing.T) {
+// The deterministic apply gate no longer requires the description frontmatter
+// field: a complete replacement whose candidate omits it still applies. The
+// frontmatter requirement was removed because a malformed or partial frontmatter
+// block was stalling repeated cold-path runs; the skills loader falls back to the
+// Markdown body for a missing description.
+func TestApplierAppliesReplacementThatDropsDescriptionFrontmatterField(t *testing.T) {
 	workspace := t.TempDir()
 	existing := "---\nname: weather\ndescription: weather\n---\n# Weather\n\n## Procedure\nQuery weather.\n"
 	writeExistingSkill(t, workspace, "weather", existing)
-	candidate := "---\nname: weather\n---\n# Weather\n\n## Procedure\nQuery weather.\n"
+	candidate := "---\nname: weather\n---\n# Weather\n\n## Procedure\nQuery weather. Never expose the API credential.\n"
+	skillPath := filepath.Join(workspace, "skills", "weather", "SKILL.md")
 	_, err := NewApplier(NewPaths(filepath.Join(workspace, "state"), ""), nil).applyDraftWithRollback(
 		context.Background(), workspace,
 		SkillDraft{TargetSkillName: "weather", ChangeKind: ChangeKindReplace, BodyOrPatch: candidate},
 		observedTargetState{guard: true, existed: true, body: existing},
 	)
-	if err == nil || !strings.Contains(err.Error(), "description is required") {
-		t.Fatalf("error=%v, want dropped required frontmatter field rejection", err)
+	if err != nil {
+		t.Fatalf("replacement dropping description was rejected: %v", err)
+	}
+	got, readErr := os.ReadFile(skillPath)
+	if readErr != nil {
+		t.Fatalf("ReadFile: %v", readErr)
+	}
+	if !strings.Contains(string(got), "## Procedure") {
+		t.Fatalf("replacement body was not written:\n%s", string(got))
+	}
+}
+
+// A well-formed frontmatter whose name does not match the target skill is still a
+// deterministic target-selection failure: the frontmatter requirement was
+// removed, but the name-match contract is retained.
+func TestApplierRejectsReplacementWithMismatchedName(t *testing.T) {
+	workspace := t.TempDir()
+	existing := "---\nname: weather\ndescription: weather\n---\n# Weather\n\n## Procedure\nQuery weather.\n"
+	writeExistingSkill(t, workspace, "weather", existing)
+	candidate := "---\nname: not-weather\ndescription: weather\n---\n# Weather\n\n## Procedure\nQuery weather.\n"
+	_, err := NewApplier(NewPaths(filepath.Join(workspace, "state"), ""), nil).applyDraftWithRollback(
+		context.Background(), workspace,
+		SkillDraft{TargetSkillName: "weather", ChangeKind: ChangeKindReplace, BodyOrPatch: candidate},
+		observedTargetState{guard: true, existed: true, body: existing},
+	)
+	if err == nil || !strings.Contains(err.Error(), "does not match target skill") {
+		t.Fatalf("error=%v, want name-mismatch rejection", err)
 	}
 }
 

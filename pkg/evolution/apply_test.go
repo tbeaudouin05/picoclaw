@@ -268,6 +268,10 @@ func TestApplier_FailedNewSkillDoesNotLeaveEmptyDirectory(t *testing.T) {
 		return time.Unix(1700000000, 0).UTC()
 	})
 
+	// A well-formed frontmatter whose name does not match the target skill is a
+	// retained target-selection failure (malformed/absent frontmatter no longer
+	// blocks, but a wrong name still does), so this exercises the on-failure
+	// cleanup path.
 	draft := evolution.SkillDraft{
 		ID:              "draft-invalid-new-skill",
 		WorkspaceID:     workspace,
@@ -276,13 +280,16 @@ func TestApplier_FailedNewSkillDoesNotLeaveEmptyDirectory(t *testing.T) {
 		DraftType:       evolution.DraftTypeWorkflow,
 		ChangeKind:      evolution.ChangeKindCreate,
 		HumanSummary:    "broken new skill",
-		BodyOrPatch:     "invalid-frontmatter",
+		BodyOrPatch:     "---\nname: wrong-name\ndescription: broken\n---\n# Wrong\nbody\n",
 		Status:          evolution.DraftStatusAccepted,
 	}
 
 	err := applier.ApplyDraft(context.Background(), workspace, draft)
 	if err == nil {
 		t.Fatal("expected ApplyDraft to fail")
+	}
+	if !strings.Contains(err.Error(), "does not match target skill") {
+		t.Fatalf("error = %v, want frontmatter name mismatch", err)
 	}
 
 	skillPath := filepath.Join(workspace, "skills", "calculate-100-via-theorems", "SKILL.md")
@@ -292,6 +299,75 @@ func TestApplier_FailedNewSkillDoesNotLeaveEmptyDirectory(t *testing.T) {
 	skillDir := filepath.Dir(skillPath)
 	if _, statErr := os.Stat(skillDir); !os.IsNotExist(statErr) {
 		t.Fatalf("expected no leftover skill dir, got err=%v", statErr)
+	}
+}
+
+// A create draft whose body carries NO YAML frontmatter at all is applied: the
+// frontmatter requirement is gone, so a malformed or absent block no longer
+// blocks an otherwise safe draft. The skills loader derives the name from the
+// skill directory and the description from the body.
+func TestApplier_CreateDraftWithoutFrontmatterApplies(t *testing.T) {
+	workspace := t.TempDir()
+	applier := evolution.NewApplier(evolution.NewPaths(workspace, ""), func() time.Time {
+		return time.Unix(1700000000, 0).UTC()
+	})
+
+	draft := evolution.SkillDraft{
+		ID:              "draft-no-frontmatter",
+		WorkspaceID:     workspace,
+		SourceRecordID:  "rule-no-frontmatter",
+		TargetSkillName: "weather",
+		DraftType:       evolution.DraftTypeShortcut,
+		ChangeKind:      evolution.ChangeKindCreate,
+		HumanSummary:    "weather helper",
+		BodyOrPatch:     "# Weather\n\n## Start Here\nQuery the weather service using the native place name first.\n",
+		Status:          evolution.DraftStatusAccepted,
+	}
+
+	if err := applier.ApplyDraft(context.Background(), workspace, draft); err != nil {
+		t.Fatalf("ApplyDraft with absent frontmatter should apply: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(workspace, "skills", "weather", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(data), "native place name") {
+		t.Fatalf("applied skill missing body:\n%s", string(data))
+	}
+}
+
+// A create draft whose body carries a MALFORMED (unparseable) YAML frontmatter
+// block is applied too: only a well-formed frontmatter whose name mismatches, an
+// unsupported field, or a nonempty-body violation is deterministic-gated.
+func TestApplier_CreateDraftWithMalformedFrontmatterApplies(t *testing.T) {
+	workspace := t.TempDir()
+	applier := evolution.NewApplier(evolution.NewPaths(workspace, ""), func() time.Time {
+		return time.Unix(1700000000, 0).UTC()
+	})
+
+	draft := evolution.SkillDraft{
+		ID:              "draft-malformed-frontmatter",
+		WorkspaceID:     workspace,
+		SourceRecordID:  "rule-malformed-frontmatter",
+		TargetSkillName: "weather",
+		DraftType:       evolution.DraftTypeShortcut,
+		ChangeKind:      evolution.ChangeKindCreate,
+		HumanSummary:    "weather helper",
+		BodyOrPatch:     "---\nname: weather: broken: yaml\n\t- : :\n---\n# Weather\n\n## Start Here\nQuery by native place name.\n",
+		Status:          evolution.DraftStatusAccepted,
+	}
+
+	if err := applier.ApplyDraft(context.Background(), workspace, draft); err != nil {
+		t.Fatalf("ApplyDraft with malformed frontmatter should apply: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(workspace, "skills", "weather", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(data), "native place name") {
+		t.Fatalf("applied skill missing body:\n%s", string(data))
 	}
 }
 

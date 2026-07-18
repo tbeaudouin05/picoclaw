@@ -107,6 +107,13 @@ func resolveAgainstExistingAncestor(path string) (string, error) {
 	}
 }
 
+// errUnsupportedFrontmatterField sentinels a frontmatter block that parses as
+// valid YAML but carries a field outside the supported set (name, description).
+// It is distinguished from a malformed (unparseable) frontmatter block: the
+// supported-field restriction is a real, retained safety constraint, whereas a
+// malformed or absent frontmatter block no longer blocks an apply.
+var errUnsupportedFrontmatterField = errors.New("unsupported skill frontmatter field")
+
 // DraftApplySafetyError marks a draft rejection that stems from the candidate's
 // own structure or apply-time validation (frontmatter/heading shape,
 // name/description, a dropped required frontmatter field, or a stale-replacement
@@ -370,27 +377,34 @@ func (a *Applier) applyDraftWithRollback(
 	}, nil
 }
 
-// validateHolisticReplacement enforces the only deterministic hard gate that
-// survives a complete replacement of an existing skill: every required
-// frontmatter field present in the old document must still be present in the
-// candidate. It deliberately applies NO natural-language safety-wording
-// heuristic and NO structural-diff heuristic (no literal root heading, minimum
-// body size, named section, or safety-constraint-line comparison). Preserving
-// still-relevant safety boundaries and invariants across a replacement is the
-// job of the mandatory proactive reviewer, whose refined output is trusted after
-// the deterministic schema/type, name/path, frontmatter, and secret-scan gates
-// pass. This gate only guards the machine-checkable frontmatter contract; the
-// secret scan runs separately in ReviewDraft.
+// validateHolisticReplacement enforces the deterministic gate that survives a
+// complete replacement of an existing skill: every well-formed frontmatter field
+// present in the old document must still be present in the candidate. It
+// deliberately applies NO natural-language safety-wording heuristic and NO
+// structural-diff heuristic (no literal root heading, minimum body size, named
+// section, or safety-constraint-line comparison). Preserving still-relevant safety
+// boundaries and invariants across a replacement is the job of the mandatory
+// proactive reviewer, whose refined output is trusted after the deterministic
+// schema/type, name/path, and secret-scan gates pass; the secret scan runs
+// separately in ReviewDraft.
+//
+// YAML frontmatter is no longer required: a malformed (unparseable) or absent
+// frontmatter block — on either the existing document or the candidate — no
+// longer blocks the replacement. The skills loader falls back to the skill
+// directory name and the Markdown body for a missing/unparseable block, so a
+// malformed frontmatter must not stall a cold-path replacement.
 func validateHolisticReplacement(existing, candidate string) error {
 	existingFM, _ := splitSkillFrontmatter(existing)
 	candidateFM, _ := splitSkillFrontmatter(candidate)
 	existingFields, err := parseSkillFrontmatterFields(existingFM, true)
 	if err != nil {
-		return fmt.Errorf("existing frontmatter: %w", err)
+		// A malformed existing frontmatter cannot define a preservation contract.
+		return nil
 	}
 	candidateFields, err := parseSkillFrontmatterFields(candidateFM, true)
 	if err != nil {
-		return fmt.Errorf("candidate frontmatter: %w", err)
+		// A malformed candidate frontmatter is tolerated rather than blocking.
+		return nil
 	}
 	for key := range existingFields {
 		if _, ok := candidateFields[key]; !ok {
@@ -562,25 +576,41 @@ func isDirNotEmptyError(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "directory not empty")
 }
 
+// validateAppliedSkillBody performs the deterministic body checks the final apply
+// enforces on a fully rendered deployable SKILL.md. YAML frontmatter is NO LONGER
+// required: an absent or malformed (unparseable) frontmatter block does not block
+// an otherwise safe evolution draft, because the skills loader derives the name
+// from the skill directory and the description from the Markdown body when the
+// frontmatter is missing or cannot be parsed. This removes the failure mode where
+// repeated cold-path runs stalled on a generated SKILL.md whose frontmatter was
+// malformed.
+//
+// The retained deterministic checks are the ones that are not part of the
+// frontmatter-shape requirement: a nonempty body (ordinary body validity), the
+// target-selection contract (a well-formed frontmatter name, when present, must
+// match the target skill), and the create-time supported-field restriction.
 func validateAppliedSkillBody(body, targetSkillName string, allowExtraFrontmatterFields bool) error {
 	body = strings.TrimSpace(body)
-	if !strings.HasPrefix(body, "---\n") {
-		return fmt.Errorf("skill frontmatter is required")
+	if body == "" {
+		return fmt.Errorf("skill body is required")
 	}
 	frontmatter, _ := splitSkillFrontmatter(body)
+	if strings.TrimSpace(frontmatter) == "" {
+		// Absent frontmatter (no delimiters, or an unterminated block) no longer
+		// blocks apply.
+		return nil
+	}
 	fields, err := parseSkillFrontmatterFields(frontmatter, allowExtraFrontmatterFields)
 	if err != nil {
-		return err
+		// The supported-field restriction is a real constraint and is retained; a
+		// malformed (unparseable) frontmatter block is tolerated.
+		if errors.Is(err, errUnsupportedFrontmatterField) {
+			return err
+		}
+		return nil
 	}
-	name := strings.TrimSpace(fields["name"])
-	if name == "" {
-		return fmt.Errorf("skill frontmatter name is required")
-	}
-	if name != targetSkillName {
+	if name := strings.TrimSpace(fields["name"]); name != "" && name != targetSkillName {
 		return fmt.Errorf("skill frontmatter name %q does not match target skill %q", name, targetSkillName)
-	}
-	if strings.TrimSpace(fields["description"]) == "" {
-		return fmt.Errorf("skill frontmatter description is required")
 	}
 	return nil
 }
@@ -638,9 +668,10 @@ func renderDeployablePatchBody(body, targetSkillName string) (string, error) {
 	} else {
 		fields, err := parseSkillFrontmatterFields(frontmatter, true)
 		if err != nil {
-			return "", err
-		}
-		if name := strings.TrimSpace(fields["name"]); name != "" && name != targetSkillName {
+			// Malformed frontmatter no longer blocks: treat the whole body as
+			// Markdown rather than rejecting the patch.
+			markdownBody = body
+		} else if name := strings.TrimSpace(fields["name"]); name != "" && name != targetSkillName {
 			return "", fmt.Errorf(
 				"skill patch frontmatter name %q does not match target skill %q",
 				name,
@@ -680,7 +711,7 @@ func parseSkillFrontmatterFields(frontmatter string, allowExtraFields bool) (map
 			if allowExtraFields {
 				continue
 			}
-			return nil, fmt.Errorf("unsupported skill frontmatter field %q", key)
+			return nil, fmt.Errorf("%w %q", errUnsupportedFrontmatterField, key)
 		}
 	}
 
