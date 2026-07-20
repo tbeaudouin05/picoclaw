@@ -420,6 +420,20 @@ func phoneNumberFromJID(jidStr string) string {
 	return "+" + jid.User
 }
 
+// authenticatedSenderE164 returns the authenticated sender's phone number in
+// E.164 form, or "" when the resolved identity is not a phone number. It covers
+// both direct phone-JID senders (allowedSender carries the phone JID) and LID
+// senders whose phone was resolved via SenderAlt or a LID->PN lookup (carried
+// by linkedPhone). The value derives solely from whatsmeow-authenticated sender
+// metadata — never from message content or tool arguments — so callers may
+// treat a non-empty result as the trusted authenticated sender identity.
+func authenticatedSenderE164(allowedSender bus.SenderInfo, linkedPhone *linkedPhoneInfo) string {
+	if linkedPhone != nil && linkedPhone.LinkedNumber != "" {
+		return linkedPhone.LinkedNumber
+	}
+	return phoneNumberFromJID(allowedSender.PlatformID)
+}
+
 func whatsappSenderInfo(platformID, displayName string) bus.SenderInfo {
 	return bus.SenderInfo{
 		Platform:    "whatsapp",
@@ -656,6 +670,16 @@ func (c *WhatsAppNativeChannel) handleIncoming(evt *events.Message) {
 		metadata["whatsapp_linked_phone_jid"] = linkedPhone.LinkedJID
 		metadata["whatsapp_linked_phone_number"] = linkedPhone.LinkedNumber
 		metadata["whatsapp_linked_phone_source"] = linkedPhone.Source
+	}
+
+	// Populate the native-channel-owned trusted marker with the authenticated
+	// sender's E.164 identity. Unlike whatsapp_linked_phone_number above (which
+	// is set only when the sender was reached via a LID/alt link and drives the
+	// user-facing "linked phone" prompt line), this marker is also set for
+	// direct phone-JID senders, giving downstream exec-context derivation a
+	// single trusted signal for every authenticated native WhatsApp sender.
+	if e164 := authenticatedSenderE164(allowedSender, linkedPhone); e164 != "" {
+		metadata[bus.RawKeyWhatsAppAuthenticatedSenderE164] = e164
 	}
 
 	inboundCtx := bus.InboundContext{

@@ -43,13 +43,14 @@ type PromptMetadataProvider interface {
 type toolCtxKey struct{ name string }
 
 var (
-	ctxKeyChannel          = &toolCtxKey{"channel"}
-	ctxKeyChatID           = &toolCtxKey{"chatID"}
-	ctxKeyMessageID        = &toolCtxKey{"messageID"}
-	ctxKeyReplyToMessageID = &toolCtxKey{"replyToMessageID"}
-	ctxKeyAgentID          = &toolCtxKey{"agentID"}
-	ctxKeySessionKey       = &toolCtxKey{"sessionKey"}
-	ctxKeySessionScope     = &toolCtxKey{"sessionScope"}
+	ctxKeyChannel            = &toolCtxKey{"channel"}
+	ctxKeyChatID             = &toolCtxKey{"chatID"}
+	ctxKeyMessageID          = &toolCtxKey{"messageID"}
+	ctxKeyReplyToMessageID   = &toolCtxKey{"replyToMessageID"}
+	ctxKeyAgentID            = &toolCtxKey{"agentID"}
+	ctxKeySessionKey         = &toolCtxKey{"sessionKey"}
+	ctxKeySessionScope       = &toolCtxKey{"sessionScope"}
+	ctxKeyWhatsAppSenderE164 = &toolCtxKey{"whatsappSenderE164"}
 )
 
 // WithToolContext returns a child context carrying channel and chatID.
@@ -86,6 +87,24 @@ func WithToolSessionContext(
 	ctx = context.WithValue(ctx, ctxKeySessionKey, sessionKey)
 	ctx = context.WithValue(ctx, ctxKeySessionScope, session.CloneScope(scope))
 	return ctx
+}
+
+// WithToolWhatsAppSenderE164 returns a child context carrying the authenticated
+// native WhatsApp sender phone number (E.164). The caller is responsible for
+// only passing values derived from authenticated native WhatsApp inbound
+// metadata — this helper stores the value verbatim.
+func WithToolWhatsAppSenderE164(ctx context.Context, phone string) context.Context {
+	return context.WithValue(ctx, ctxKeyWhatsAppSenderE164, phone)
+}
+
+// ToolWhatsAppSenderE164 extracts the authenticated native WhatsApp sender
+// phone number (E.164) from ctx, or "" if unset.
+func ToolWhatsAppSenderE164(ctx context.Context) string {
+	v, ok := ctx.Value(ctxKeyWhatsAppSenderE164).(string)
+	if !ok {
+		return ""
+	}
+	return v
 }
 
 // ToolChannel extracts the channel from ctx, or "" if unset.

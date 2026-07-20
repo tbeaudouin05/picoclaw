@@ -61,6 +61,14 @@ func WithToolSessionContext(
 	return toolshared.WithToolSessionContext(ctx, agentID, sessionKey, scope)
 }
 
+func WithToolWhatsAppSenderE164(ctx context.Context, phone string) context.Context {
+	return toolshared.WithToolWhatsAppSenderE164(ctx, phone)
+}
+
+func ToolWhatsAppSenderE164(ctx context.Context) string {
+	return toolshared.ToolWhatsAppSenderE164(ctx)
+}
+
 func ToolChannel(ctx context.Context) string {
 	return toolshared.ToolChannel(ctx)
 }
