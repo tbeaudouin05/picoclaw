@@ -2,6 +2,19 @@ package bus
 
 import "strings"
 
+// RawKeyWhatsAppAuthenticatedSenderE164 is the InboundContext.Raw key that
+// carries the authenticated native WhatsApp sender's phone number in E.164 form
+// (e.g. "+33695651381").
+//
+// It is a native-WhatsApp-channel-owned trusted marker: the native channel is
+// the only writer, and it populates the key exclusively from whatsmeow-
+// authenticated sender metadata — for both direct phone-JID senders and LID
+// senders whose phone was resolved via SenderAlt or a LID->PN lookup. It is
+// never derived from message content, tool arguments, or any other channel.
+// Downstream consumers (the agent exec-context layer) treat its presence as the
+// sole trusted signal of an authenticated native WhatsApp sender.
+const RawKeyWhatsAppAuthenticatedSenderE164 = "whatsapp_authenticated_sender_e164"
+
 // NormalizeInboundMessage ensures the inbound context is normalized and keeps
 // convenience mirrors in sync for runtime consumers.
 func NormalizeInboundMessage(msg InboundMessage) InboundMessage {

@@ -567,6 +567,14 @@ toolLoop:
 			ts.sessionKey,
 			ts.opts.Dispatch.SessionScope,
 		)
+		// Carry the authenticated native WhatsApp sender identity (E.164) into
+		// the tool exec context so exec-tool child processes can read it from a
+		// dedicated environment variable. Derived only from channel-populated
+		// inbound metadata — never from tool arguments — and left unset for
+		// non-native-WhatsApp sources or absent/invalid identities.
+		if senderE164 := whatsAppSenderE164FromInbound(ts.opts.Dispatch.InboundContext); senderE164 != "" {
+			execCtx = tools.WithToolWhatsAppSenderE164(execCtx, senderE164)
+		}
 		toolResult := ts.agent.Tools.ExecuteWithContext(
 			execCtx,
 			toolName,

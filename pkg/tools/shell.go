@@ -382,6 +382,24 @@ func (t *ExecTool) executeRun(ctx context.Context, args map[string]any) *ToolRes
 	return t.runSync(ctx, command, cwd)
 }
 
+// applyInboundSenderEnv injects authenticated inbound sender identity from the
+// tool exec context into the child process environment. Currently this exposes
+// the native WhatsApp sender phone number (E.164) via a dedicated PICOCLAW_*
+// variable. The value originates from channel-populated inbound metadata (set
+// upstream in the agent turn), never from tool arguments, so a spoofed tool
+// input cannot set it. When no authenticated sender is present the child
+// environment is left untouched.
+func applyInboundSenderEnv(ctx context.Context, cmd *exec.Cmd) {
+	phone := ToolWhatsAppSenderE164(ctx)
+	if phone == "" {
+		return
+	}
+	// cmd.Environ() returns cmd.Env when set, otherwise os.Environ(); appending
+	// preserves the inherited environment and is honored by the isolation layer,
+	// which rebuilds cmd.Env from cmd.Environ().
+	cmd.Env = append(cmd.Environ(), constants.EnvWhatsAppSenderE164+"="+phone)
+}
+
 func (t *ExecTool) runSync(ctx context.Context, command, cwd string) *ToolResult {
 	// timeout == 0 means no timeout
 	var cmdCtx context.Context
@@ -404,6 +422,7 @@ func (t *ExecTool) runSync(ctx context.Context, command, cwd string) *ToolResult
 	}
 
 	prepareCommandForTermination(cmd)
+	applyInboundSenderEnv(ctx, cmd)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -526,6 +545,7 @@ func (t *ExecTool) runBackground(ctx context.Context, command, cwd string, ptyEn
 	}
 
 	prepareCommandForTermination(cmd)
+	applyInboundSenderEnv(ctx, cmd)
 
 	var stdoutReader io.ReadCloser
 	var stderrReader io.ReadCloser
