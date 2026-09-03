@@ -242,6 +242,10 @@ func TestRefreshAccessToken(t *testing.T) {
 			http.Error(w, "invalid grant_type", http.StatusBadRequest)
 			return
 		}
+		if r.FormValue("scope") != "openid profile email" {
+			http.Error(w, "invalid scope", http.StatusBadRequest)
+			return
+		}
 
 		resp := map[string]any{
 			"access_token":  "refreshed-access-token",
@@ -274,6 +278,47 @@ func TestRefreshAccessToken(t *testing.T) {
 	}
 	if refreshed.RefreshToken != "refreshed-refresh-token" {
 		t.Errorf("RefreshToken = %q, want %q", refreshed.RefreshToken, "refreshed-refresh-token")
+	}
+}
+
+func TestRefreshAccessTokenGoogleOmitsScope(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "invalid form", http.StatusBadRequest)
+			return
+		}
+		if _, ok := r.PostForm["scope"]; ok {
+			http.Error(w, "scope must be omitted", http.StatusBadRequest)
+			return
+		}
+
+		resp := map[string]any{
+			"access_token": "refreshed-google-access-token",
+			"expires_in":   3600,
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	cfg := OAuthProviderConfig{
+		Issuer:   "https://accounts.google.com/o/oauth2/v2",
+		TokenURL: server.URL,
+		ClientID: "test-client",
+		Scopes:   "a historic scope that must not be sent",
+	}
+	cred := &AuthCredential{
+		AccessToken:  "old-token",
+		RefreshToken: "old-refresh-token",
+		Provider:     "google-antigravity",
+		AuthMethod:   "oauth",
+	}
+
+	refreshed, err := RefreshAccessToken(cred, cfg)
+	if err != nil {
+		t.Fatalf("RefreshAccessToken() error: %v", err)
+	}
+	if refreshed.AccessToken != "refreshed-google-access-token" {
+		t.Errorf("AccessToken = %q, want %q", refreshed.AccessToken, "refreshed-google-access-token")
 	}
 }
 

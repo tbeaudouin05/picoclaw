@@ -444,7 +444,9 @@ func RefreshAccessToken(cred *AuthCredential, cfg OAuthProviderConfig) (*AuthCre
 		"client_id":     {cfg.ClientID},
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {cred.RefreshToken},
-		"scope":         {"openid profile email"},
+	}
+	if !strings.Contains(strings.ToLower(cfg.Issuer), "accounts.google.com") {
+		data.Set("scope", "openid profile email")
 	}
 	if cfg.ClientSecret != "" {
 		data.Set("client_secret", cfg.ClientSecret)
