@@ -25,6 +25,8 @@ const (
 	antigravityVersion      = "1.15.8"
 )
 
+var googleAntigravityOAuthConfig = auth.GoogleAntigravityOAuthConfig
+
 // AntigravityProvider implements LLMProvider using Google's Cloud Code Assist (Antigravity) API.
 // This provider authenticates via Google OAuth and provides access to models like Claude and Gemini
 // through Google's infrastructure.
@@ -461,7 +463,7 @@ func createAntigravityTokenSource() func() (string, string, error) {
 
 		// Refresh if needed
 		if cred.NeedsRefresh() && cred.RefreshToken != "" {
-			oauthCfg := auth.GoogleAntigravityOAuthConfig()
+			oauthCfg := googleAntigravityOAuthConfig()
 			refreshed, err := auth.RefreshAccessToken(cred, oauthCfg)
 			if err != nil {
 				return "", "", fmt.Errorf("refreshing token: %w", err)
