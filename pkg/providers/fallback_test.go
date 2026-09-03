@@ -2,9 +2,15 @@ package providers
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/sipeed/picoclaw/pkg/logger"
+	"github.com/sipeed/picoclaw/pkg/providers/common"
 )
 
 func makeCandidate(provider, model string) FallbackCandidate {
@@ -578,6 +584,29 @@ func TestImageFallbackCandidate_PreservesConfigIdentity(t *testing.T) {
 	}
 }
 
+func TestExecuteImageCandidate_LoggingDoesNotMutateFailoverError(t *testing.T) {
+	fc := NewFallbackChain(NewCooldownTracker(), nil)
+	wrapped := errors.New("rate limit exceeded")
+	original := &FailoverError{
+		Reason:  FailoverRateLimit,
+		Status:  429,
+		Wrapped: wrapped,
+	}
+
+	_, err := fc.ExecuteImageCandidate(context.Background(), []FallbackCandidate{{
+		Provider: "openai",
+		Model:    "gpt-image-1",
+	}}, func(context.Context, FallbackCandidate) (*LLMResponse, error) {
+		return nil, original
+	})
+	if err == nil {
+		t.Fatal("ExecuteImageCandidate() error = nil, want exhausted fallback error")
+	}
+	if original.Provider != "" || original.Model != "" || original.Reason != FailoverRateLimit || original.Status != 429 || original.Wrapped != wrapped {
+		t.Errorf("FailoverError was mutated for logging: %+v", original)
+	}
+}
+
 func TestFallbackCandidateStableKeyIncludesConfigIdentity(t *testing.T) {
 	first := FallbackCandidate{IdentityKey: "model_name:shared", ConfigKey: "config:first"}
 	second := FallbackCandidate{IdentityKey: "model_name:shared", ConfigKey: "config:second"}
@@ -731,5 +760,111 @@ func TestFallbackExhaustedError_Message(t *testing.T) {
 	msg := e.Error()
 	if msg == "" {
 		t.Error("expected non-empty error message")
+	}
+}
+
+func TestLLMAttemptLogFields_FallbackRateLimitIsPrivacySafe(t *testing.T) {
+	candidate := FallbackCandidate{
+		Provider:    "openai",
+		Model:       "gpt-4.1-mini",
+		DisplayName: "primary-alias",
+	}
+	target := FallbackCandidate{Provider: "anthropic", Model: "claude-haiku"}
+	fields := llmAttemptLogFields(candidate, 1, 2, "failed", &FailoverError{
+		Reason:  FailoverRateLimit,
+		Status:  429,
+		Wrapped: errors.New(`provider body: {"prompt":"secret prompt","authorization":"Bearer secret"}`),
+	}, &target)
+
+	for key, want := range map[string]any{
+		"configured_model":        "primary-alias",
+		"requested_provider":      "openai",
+		"requested_model":         "gpt-4.1-mini",
+		"attempt":                 1,
+		"attempt_count":           2,
+		"outcome":                 "failed",
+		"failure_class":           "rate_limit",
+		"status_code":             429,
+		"next_requested_provider": "anthropic",
+		"next_requested_model":    "claude-haiku",
+	} {
+		if got := fields[key]; got != want {
+			t.Errorf("fields[%q] = %#v, want %#v", key, got, want)
+		}
+	}
+	for _, forbidden := range []string{"prompt", "authorization", "error", "response", "body", "credentials"} {
+		if _, ok := fields[forbidden]; ok {
+			t.Errorf("fields unexpectedly contains sensitive key %q", forbidden)
+		}
+	}
+}
+
+func TestLLMAttemptLogFields_SuccessRecordsTerminalOutcome(t *testing.T) {
+	candidate := FallbackCandidate{Provider: "anthropic", Model: "claude-haiku"}
+	fields := llmAttemptLogFields(candidate, 2, 2, "success", nil, nil)
+
+	for key, want := range map[string]any{
+		"requested_provider": "anthropic",
+		"requested_model":    "claude-haiku",
+		"outcome":            "success",
+	} {
+		if got := fields[key]; got != want {
+			t.Errorf("fields[%q] = %#v, want %#v", key, got, want)
+		}
+	}
+	for _, key := range []string{"actual_provider", "actual_model", "fallback_success"} {
+		if _, ok := fields[key]; ok {
+			t.Errorf("fields unexpectedly contains misleading key %q", key)
+		}
+	}
+}
+
+func TestExecuteCandidate_LogsClassifiedHTTP429WithoutErrorText(t *testing.T) {
+	logFile := t.TempDir() + "/llm-attempt.log"
+	if err := logger.EnableFileLogging(logFile); err != nil {
+		t.Fatalf("EnableFileLogging() error = %v", err)
+	}
+	defer logger.DisableFileLogging()
+
+	fc := NewFallbackChain(NewCooldownTracker(), nil)
+	_, err := fc.ExecuteCandidate(context.Background(), []FallbackCandidate{{
+		Provider:    "configured-provider",
+		Model:       "configured-model",
+		DisplayName: "configured-alias",
+	}}, func(context.Context, FallbackCandidate) (*LLMResponse, error) {
+		return nil, &common.HTTPError{
+			StatusCode:  429,
+			BodyPreview: `sensitive-provider-body: {"prompt":"do not log","token":"do not log"}`,
+		}
+	})
+	if err == nil {
+		t.Fatal("ExecuteCandidate() error = nil, want exhausted fallback error")
+	}
+
+	logs, readErr := os.ReadFile(logFile)
+	if readErr != nil {
+		t.Fatalf("ReadFile(%q) error = %v", logFile, readErr)
+	}
+	output := string(logs)
+	var fields map[string]any
+	if unmarshalErr := json.Unmarshal(logs, &fields); unmarshalErr != nil {
+		t.Fatalf("log output is not structured JSON: %v\n%s", unmarshalErr, output)
+	}
+	for key, want := range map[string]any{
+		"message":            "LLM attempt completed",
+		"requested_provider": "configured-provider",
+		"requested_model":    "configured-model",
+		"failure_class":      "rate_limit",
+		"status_code":        float64(429),
+		"outcome":            "failed",
+	} {
+		if got := fields[key]; got != want {
+			t.Errorf("fields[%q] = %#v, want %#v", key, got, want)
+		}
+	}
+	for _, forbidden := range []string{"sensitive-provider-body", "do not log", "prompt", "token"} {
+		if strings.Contains(output, forbidden) {
+			t.Errorf("log output contains sensitive error text %q: %q", forbidden, output)
+		}
 	}
 }

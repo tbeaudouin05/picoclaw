@@ -2,9 +2,12 @@ package providers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/sipeed/picoclaw/pkg/logger"
 )
 
 // FallbackChain orchestrates model fallback across multiple candidates.
@@ -56,6 +59,39 @@ type FallbackAttempt struct {
 	Reason   FailoverReason
 	Duration time.Duration
 	Skipped  bool // true if skipped due to cooldown
+}
+
+// logLLMAttempt records only routing and outcome metadata. In particular, it
+// deliberately excludes the request, response, credentials, headers, and the
+// provider error text, which can contain sensitive provider response bodies.
+func logLLMAttempt(candidate FallbackCandidate, attempt, attemptCount int, outcome string, failErr *FailoverError, fallbackTarget *FallbackCandidate) {
+	logger.InfoCF("llm", "LLM attempt completed", llmAttemptLogFields(candidate, attempt, attemptCount, outcome, failErr, fallbackTarget))
+}
+
+func llmAttemptLogFields(candidate FallbackCandidate, attempt, attemptCount int, outcome string, failErr *FailoverError, fallbackTarget *FallbackCandidate) map[string]any {
+	configuredModel := candidate.DisplayName
+	if configuredModel == "" {
+		configuredModel = candidate.Model
+	}
+	fields := map[string]any{
+		"configured_model":   configuredModel,
+		"requested_provider": candidate.Provider,
+		"requested_model":    candidate.Model,
+		"attempt":            attempt,
+		"attempt_count":      attemptCount,
+		"outcome":            outcome,
+	}
+	if failErr != nil {
+		fields["failure_class"] = string(failErr.Reason)
+		if failErr.Status > 0 {
+			fields["status_code"] = failErr.Status
+		}
+	}
+	if fallbackTarget != nil {
+		fields["next_requested_provider"] = fallbackTarget.Provider
+		fields["next_requested_model"] = fallbackTarget.Model
+	}
+	return fields
 }
 
 // NewFallbackChain creates a new fallback chain with the given cooldown tracker
@@ -152,6 +188,7 @@ func (fc *FallbackChain) ExecuteCandidate(
 	}
 
 	for i, candidate := range candidates {
+		attemptNumber := i + 1
 		// Check context before each attempt.
 		if ctx.Err() == context.Canceled {
 			return nil, context.Canceled
@@ -173,6 +210,7 @@ func (fc *FallbackChain) ExecuteCandidate(
 					remaining.Round(time.Second),
 				),
 			})
+			logLLMAttempt(candidate, attemptNumber, len(candidates), "skipped", &FailoverError{Reason: FailoverRateLimit}, nextFallbackCandidate(candidates, i))
 			continue
 		}
 
@@ -188,6 +226,7 @@ func (fc *FallbackChain) ExecuteCandidate(
 						Reason:   FailoverRateLimit,
 						Error:    fmt.Errorf("%s waiting for local rate limit token", cooldownKey),
 					})
+					logLLMAttempt(candidate, attemptNumber, len(candidates), "skipped", &FailoverError{Reason: FailoverRateLimit}, nextFallbackCandidate(candidates, i))
 					continue
 				}
 				if waitErr := fc.rl.Wait(ctx, cooldownKey); waitErr != nil {
@@ -198,6 +237,7 @@ func (fc *FallbackChain) ExecuteCandidate(
 						Reason:   FailoverRateLimit,
 						Error:    waitErr,
 					})
+					logLLMAttempt(candidate, attemptNumber, len(candidates), "skipped", &FailoverError{Reason: FailoverRateLimit}, nil)
 					return nil, waitErr
 				}
 			}
@@ -215,6 +255,7 @@ func (fc *FallbackChain) ExecuteCandidate(
 			result.Provider = candidate.Provider
 			result.Model = candidate.Model
 			result.IdentityKey = candidate.StableKey()
+			logLLMAttempt(candidate, attemptNumber, len(candidates), "success", nil, nil)
 			return result, nil
 		}
 
@@ -226,6 +267,7 @@ func (fc *FallbackChain) ExecuteCandidate(
 				Error:    err,
 				Duration: elapsed,
 			})
+			logLLMAttempt(candidate, attemptNumber, len(candidates), "failed", &FailoverError{Reason: FailoverCanceled}, nil)
 			return nil, context.Canceled
 		}
 
@@ -240,6 +282,7 @@ func (fc *FallbackChain) ExecuteCandidate(
 				Error:    err,
 				Duration: elapsed,
 			})
+			logLLMAttempt(candidate, attemptNumber, len(candidates), "failed", &FailoverError{Reason: FailoverUnknown}, nil)
 			return nil, fmt.Errorf("fallback: unclassified error from %s/%s: %w",
 				candidate.Provider, candidate.Model, err)
 		}
@@ -253,6 +296,7 @@ func (fc *FallbackChain) ExecuteCandidate(
 				Reason:   failErr.Reason,
 				Duration: elapsed,
 			})
+			logLLMAttempt(candidate, attemptNumber, len(candidates), "failed", failErr, nil)
 			return nil, failErr
 		}
 
@@ -265,6 +309,7 @@ func (fc *FallbackChain) ExecuteCandidate(
 			Reason:   failErr.Reason,
 			Duration: elapsed,
 		})
+		logLLMAttempt(candidate, attemptNumber, len(candidates), "failed", failErr, nextFallbackCandidate(candidates, i))
 
 		// If this was the last candidate, return aggregate error.
 		if i == len(candidates)-1 {
@@ -309,6 +354,7 @@ func (fc *FallbackChain) ExecuteImageCandidate(
 	}
 
 	for i, candidate := range candidates {
+		attemptNumber := i + 1
 		if ctx.Err() == context.Canceled {
 			return nil, context.Canceled
 		}
@@ -326,6 +372,7 @@ func (fc *FallbackChain) ExecuteImageCandidate(
 						Reason:   FailoverRateLimit,
 						Error:    fmt.Errorf("%s waiting for local rate limit token", imageKey),
 					})
+					logLLMAttempt(candidate, attemptNumber, len(candidates), "skipped", &FailoverError{Reason: FailoverRateLimit}, nextFallbackCandidate(candidates, i))
 					continue
 				}
 				if waitErr := fc.rl.Wait(ctx, imageKey); waitErr != nil {
@@ -336,6 +383,7 @@ func (fc *FallbackChain) ExecuteImageCandidate(
 						Reason:   FailoverRateLimit,
 						Error:    waitErr,
 					})
+					logLLMAttempt(candidate, attemptNumber, len(candidates), "skipped", &FailoverError{Reason: FailoverRateLimit}, nil)
 					return nil, waitErr
 				}
 			}
@@ -350,6 +398,7 @@ func (fc *FallbackChain) ExecuteImageCandidate(
 			result.Provider = candidate.Provider
 			result.Model = candidate.Model
 			result.IdentityKey = candidate.StableKey()
+			logLLMAttempt(candidate, attemptNumber, len(candidates), "success", nil, nil)
 			return result, nil
 		}
 
@@ -360,6 +409,7 @@ func (fc *FallbackChain) ExecuteImageCandidate(
 				Error:    err,
 				Duration: elapsed,
 			})
+			logLLMAttempt(candidate, attemptNumber, len(candidates), "failed", &FailoverError{Reason: FailoverCanceled}, nil)
 			return nil, context.Canceled
 		}
 
@@ -373,6 +423,7 @@ func (fc *FallbackChain) ExecuteImageCandidate(
 				Reason:   FailoverFormat,
 				Duration: elapsed,
 			})
+			logLLMAttempt(candidate, attemptNumber, len(candidates), "failed", &FailoverError{Reason: FailoverFormat}, nil)
 			return nil, &FailoverError{
 				Reason:   FailoverFormat,
 				Provider: candidate.Provider,
@@ -388,6 +439,11 @@ func (fc *FallbackChain) ExecuteImageCandidate(
 			Error:    err,
 			Duration: elapsed,
 		})
+		failErr := classifyErrorForLog(err, candidate.Provider, candidate.Model)
+		if failErr == nil {
+			failErr = &FailoverError{Reason: FailoverUnknown}
+		}
+		logLLMAttempt(candidate, attemptNumber, len(candidates), "failed", failErr, nextFallbackCandidate(candidates, i))
 
 		if i == len(candidates)-1 {
 			return nil, &FallbackExhaustedError{Attempts: result.Attempts}
@@ -395,6 +451,24 @@ func (fc *FallbackChain) ExecuteImageCandidate(
 	}
 
 	return nil, &FallbackExhaustedError{Attempts: result.Attempts}
+}
+
+func nextFallbackCandidate(candidates []FallbackCandidate, index int) *FallbackCandidate {
+	if index+1 >= len(candidates) {
+		return nil
+	}
+	return &candidates[index+1]
+}
+
+// classifyErrorForLog obtains classification metadata without allowing
+// ClassifyError to fill fields on a FailoverError owned by the caller.
+func classifyErrorForLog(err error, provider, model string) *FailoverError {
+	var existing *FailoverError
+	if errors.As(err, &existing) && existing != nil {
+		copy := *existing
+		return ClassifyError(&copy, provider, model)
+	}
+	return ClassifyError(err, provider, model)
 }
 
 // FallbackExhaustedError indicates all fallback candidates were tried and failed.
