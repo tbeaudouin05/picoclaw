@@ -191,7 +191,7 @@ func applySubTurnModelConfig(al *AgentLoop, agent *AgentInstance, model string) 
 	}
 
 	fallbacks := []string(nil)
-	modelCfg, err := resolvedModelConfig(al.cfg, model, agent.Workspace)
+	modelCfg, err := resolvedRuntimeModelConfig(al.cfg, model, agent.Workspace)
 	if err == nil {
 		factory := providers.CreateProviderFromConfig
 		if al != nil && al.providerFactory != nil {
