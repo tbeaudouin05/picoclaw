@@ -144,7 +144,7 @@ picoclaw onboard
 ```
 
 > **新機能**: `model_list` 設定形式により、コード変更なしで provider を追加できます。詳細は[モデル設定](providers.ja.md#モデル設定-model_list)を参照してください。
-> `request_timeout` はオプションで、単位は秒です。省略または `<= 0` に設定した場合、PicoClaw はデフォルトのタイムアウト（120 秒）を使用します。
+> `request_timeout` はオプションで、単位は秒です。省略または `<= 0` に設定した場合、PicoClaw はデフォルトのタイムアウト（1時間、3600秒）を使用します。
 
 **3. API Key の取得**
 

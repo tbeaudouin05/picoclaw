@@ -142,7 +142,7 @@ picoclaw onboard
 ```
 
 > **Nouveau** : Le format de configuration `model_list` permet l'ajout de fournisseurs sans modification de code. Voir [Configuration des Modèles](#configuration-des-modèles-model_list) pour plus de détails.
-> `request_timeout` est optionnel et utilise les secondes. S'il est omis ou défini à `<= 0`, PicoClaw utilise le timeout par défaut (120s).
+> `request_timeout` est optionnel et utilise les secondes. S'il est omis ou défini à `<= 0`, PicoClaw utilise le timeout par défaut (une heure / 3600 secondes).
 
 **3. Obtenir des clés API**
 

@@ -148,7 +148,7 @@ picoclaw onboard
 ```
 
 > **New**: The `model_list` configuration format allows zero-code provider addition. See [Model Configuration](#model-configuration-model_list) for details.
-> `request_timeout` is optional and uses seconds. If omitted or set to `<= 0`, PicoClaw uses the default timeout (120s).
+> `request_timeout` is optional and uses seconds. If omitted or set to `<= 0`, PicoClaw uses the default timeout (one hour / 3600 seconds).
 
 **3. Get API Keys**
 

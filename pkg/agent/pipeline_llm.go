@@ -17,7 +17,10 @@ import (
 )
 
 const (
-	defaultLLMCallTimeout      = 120 * time.Second
+	// CLI-backed coding tasks can legitimately run for more than 30 minutes.
+	// Keep a finite default so abandoned provider calls still terminate, while
+	// allowing model-level request_timeout to select a shorter deadline.
+	defaultLLMCallTimeout      = time.Hour
 	llmWatchdogInitialInterval = 30 * time.Second
 	llmWatchdogMaxInterval     = 60 * time.Second
 )
@@ -543,10 +546,13 @@ func (p *Pipeline) CallLLM(
 		)
 		logger.ErrorCF("agent", "LLM call failed",
 			map[string]any{
-				"agent_id":  ts.agent.ID,
-				"iteration": iteration,
-				"model":     exec.llmModel,
-				"error":     err.Error(),
+				"agent_id":        ts.agent.ID,
+				"iteration":       iteration,
+				"model":           exec.llmModel,
+				"error":           err.Error(),
+				"call_timeout_ms": llmCallTimeout(exec).Milliseconds(),
+				"timeout_configured": exec.activeModelConfig != nil &&
+					exec.activeModelConfig.RequestTimeout > 0,
 			})
 		return ControlBreak, fmt.Errorf("LLM call failed after retries: %w", err)
 	}

@@ -141,7 +141,7 @@ picoclaw onboard
 ```
 
 > **Baharu**: Format konfigurasi `model_list` membolehkan penambahan penyedia tanpa perubahan kod. Lihat [Konfigurasi Model](#konfigurasi-model-model_list) untuk butiran.
-> `request_timeout` adalah pilihan dan menggunakan saat. Jika diabaikan atau ditetapkan kepada `<= 0`, PicoClaw menggunakan timeout lalai (120s).
+> `request_timeout` adalah pilihan dan menggunakan saat. Jika diabaikan atau ditetapkan kepada `<= 0`, PicoClaw menggunakan timeout lalai (satu jam / 3600 saat).
 
 **3. Dapatkan API Key**
 

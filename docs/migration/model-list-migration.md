@@ -130,7 +130,7 @@ Examples:
 | `connect_mode` | No | Connection mode for CLI providers: `stdio`, `grpc` |
 | `rpm` | No | Requests per minute limit |
 | `max_tokens_field` | No | Field name for max tokens |
-| `request_timeout` | No | HTTP request timeout in seconds; `<=0` uses default `120s` |
+| `request_timeout` | No | HTTP request timeout in seconds; `<=0` uses the default of one hour (3600 seconds) |
 
 > **Note**: `api_key` (singular) has been **removed** in V2 configs. Only `api_keys` (array) is supported. During migration from V0/V1, both `api_key` and `api_keys` are automatically merged into the new `api_keys` array.
 

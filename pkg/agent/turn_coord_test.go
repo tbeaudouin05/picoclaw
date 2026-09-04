@@ -1195,8 +1195,35 @@ func TestPipeline_CallLLM_ProviderCallUsesModelRequestTimeout(t *testing.T) {
 	}
 	// The existing timeout retry policy performs three 1s provider attempts with
 	// 2s and 4s backoffs, so the full call should complete in roughly 9s rather
-	// than hanging for the 120s default provider timeout.
+	// than hanging for the default provider timeout.
 	if elapsed := time.Since(start); elapsed > 12*time.Second {
 		t.Fatalf("provider call did not respect request timeout; elapsed=%v", elapsed)
+	}
+}
+
+func TestLLMCallTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		exec *turnExecution
+		want time.Duration
+	}{
+		{
+			name: "default permits long-running tasks",
+			exec: &turnExecution{},
+			want: time.Hour,
+		},
+		{
+			name: "explicit model override",
+			exec: &turnExecution{activeModelConfig: &config.ModelConfig{RequestTimeout: 17}},
+			want: 17 * time.Second,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := llmCallTimeout(tt.exec); got != tt.want {
+				t.Fatalf("llmCallTimeout() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

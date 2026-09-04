@@ -142,7 +142,7 @@ picoclaw onboard
 ```
 
 > **Mới**: Định dạng cấu hình `model_list` cho phép thêm provider mà không cần thay đổi code. Xem [Cấu Hình Mô Hình](#cấu-hình-mô-hình-model_list) để biết chi tiết.
-> `request_timeout` là tùy chọn và tính bằng giây. Nếu bỏ qua hoặc đặt `<= 0`, PicoClaw sử dụng timeout mặc định (120s).
+> `request_timeout` là tùy chọn và tính bằng giây. Nếu bỏ qua hoặc đặt `<= 0`, PicoClaw sử dụng timeout mặc định (một giờ / 3600 giây).
 
 **3. Lấy API Key**
 

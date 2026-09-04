@@ -147,7 +147,7 @@ picoclaw onboard
 ```
 
 > **新功能**: `model_list` 配置格式支持零代码添加 provider。详见[模型配置](providers.zh.md#模型配置-model_list)章节。
-> `request_timeout` 为可选项，单位为秒。若省略或设置为 `<= 0`，PicoClaw 使用默认超时（120 秒）。
+> `request_timeout` 为可选项，单位为秒。若省略或设置为 `<= 0`，PicoClaw 使用默认超时（一小时 / 3600 秒）。
 
 **3. 获取 API Key**
 
