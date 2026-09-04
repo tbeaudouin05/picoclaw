@@ -139,7 +139,7 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 		// streamer and let the normal outbound path deliver that response instead.
 		// Treating this as an LLM failure loses valid answers (notably when Telegram
 		// returns TEXTDRAFT_PEER_INVALID for a draft).
-		if ts.channel == "telegram" && publisher.Err() != nil && nativeToolFeedbackErr == nil && !nativeToolFeedbackPublished && streamErr == nil && response != nil {
+		if ts.channel == "telegram" && publisher.Err() != nil && nativeToolFeedbackErr == nil && response != nil && streamErr == nil {
 			logger.WarnCF("agent", "Telegram draft streaming failed; falling back to normal response", map[string]any{
 				"agent_id": ts.agent.ID,
 				"channel":  ts.channel,
