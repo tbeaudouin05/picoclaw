@@ -216,6 +216,19 @@ type failingUpdateStreamer struct {
 	err error
 }
 
+type sequentialFailingUpdateStreamer struct {
+	recordingStreamer
+	errs []error
+}
+
+func (s *sequentialFailingUpdateStreamer) Update(ctx context.Context, content string) error {
+	s.updates = append(s.updates, content)
+	if update := len(s.updates) - 1; update < len(s.errs) {
+		return s.errs[update]
+	}
+	return nil
+}
+
 func (s *failingUpdateStreamer) Update(ctx context.Context, content string) error {
 	s.updates = append(s.updates, content)
 	return s.err
@@ -804,52 +817,51 @@ func TestConfiguredStreamingNativeToolFeedbackThenStreamErrorDoesNotFallBackToCh
 	}
 }
 
-func TestConfiguredStreamingNativeToolFeedbackThenUpdateErrorDoesNotFallBackToChat(t *testing.T) {
-	for _, channel := range []string{"pico", "telegram"} {
-		t.Run(channel, func(t *testing.T) {
-			cfg := newConfiguredStreamingTestConfig(t, true, true, nil)
-			msgBus := bus.NewMessageBus()
-			streamer := &failingUpdateStreamer{err: errors.New("draft failed")}
-			msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: streamer})
-			provider := &configuredStreamingProvider{
-				eventPlan: []configuredStreamingEventCall{{
-					chunks: []providers.StreamChunk{
-						{ToolCalls: []providers.ToolCall{{
-							ID:        "toolu_1",
-							Type:      "function",
-							Name:      "Bash",
-							Arguments: map[string]any{"command": "touch side-effect"},
-						}}},
-						{Content: "not visible"},
-					},
-					response: &providers.LLMResponse{Content: "stream response"},
-				}},
-				chatResponse: &providers.LLMResponse{Content: "chat fallback"},
-			}
-			al := NewAgentLoop(cfg, msgBus, provider)
+func TestConfiguredStreamingPicoNativeToolFeedbackThenUpdateErrorDoesNotFallBackToChat(t *testing.T) {
+	channel := "pico"
+	t.Run(channel, func(t *testing.T) {
+		cfg := newConfiguredStreamingTestConfig(t, true, true, nil)
+		msgBus := bus.NewMessageBus()
+		streamer := &failingUpdateStreamer{err: errors.New("draft failed")}
+		msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: streamer})
+		provider := &configuredStreamingProvider{
+			eventPlan: []configuredStreamingEventCall{{
+				chunks: []providers.StreamChunk{
+					{ToolCalls: []providers.ToolCall{{
+						ID:        "toolu_1",
+						Type:      "function",
+						Name:      "Bash",
+						Arguments: map[string]any{"command": "touch side-effect"},
+					}}},
+					{Content: "not visible"},
+				},
+				response: &providers.LLMResponse{Content: "stream response"},
+			}},
+			chatResponse: &providers.LLMResponse{Content: "chat fallback"},
+		}
+		al := NewAgentLoop(cfg, msgBus, provider)
 
-			_, err := al.runAgentLoop(
-				context.Background(),
-				al.GetRegistry().GetDefaultAgent(),
-				configuredStreamingProcessOptions(channel),
-			)
-			if err == nil {
-				t.Fatal("expected update failure after native tool feedback")
-			}
-			if provider.streamCalls != 1 || provider.chatCalls != 0 {
-				t.Fatalf("calls = stream:%d chat:%d, want stream:1 chat:0", provider.streamCalls, provider.chatCalls)
-			}
-			if streamer.canceled != 0 {
-				t.Fatalf("streamer canceled = %d, want 0", streamer.canceled)
-			}
-			select {
-			case outbound := <-msgBus.OutboundChan():
-				assertNativeToolCallOutbound(t, channel, outbound, "Bash", "touch side-effect")
-			case <-time.After(time.Second):
-				t.Fatal("expected native tool call feedback")
-			}
-		})
-	}
+		_, err := al.runAgentLoop(
+			context.Background(),
+			al.GetRegistry().GetDefaultAgent(),
+			configuredStreamingProcessOptions(channel),
+		)
+		if err == nil {
+			t.Fatal("expected update failure after native tool feedback")
+		}
+		if provider.streamCalls != 1 || provider.chatCalls != 0 {
+			t.Fatalf("calls = stream:%d chat:%d, want stream:1 chat:0", provider.streamCalls, provider.chatCalls)
+		}
+		if streamer.canceled != 0 {
+			t.Fatalf("streamer canceled = %d, want 0", streamer.canceled)
+		}
+		select {
+		case outbound := <-msgBus.OutboundChan():
+			assertNativeToolCallOutbound(t, channel, outbound, "Bash", "touch side-effect")
+		case <-time.After(time.Second):
+			t.Fatal("expected native tool call feedback")
+		}
+	})
 }
 
 func TestConfiguredStreamingNativeToolFeedbackDeliveryFailureIsTerminal(t *testing.T) {
@@ -1075,14 +1087,25 @@ func TestConfiguredStreamingUpdateFailureThenStreamSuccessIsTerminal(t *testing.
 	}
 }
 
-func TestConfiguredStreamingTelegramDraftFailureFallsBackToNormalResponse(t *testing.T) {
+func TestConfiguredStreamingTelegramDraftFailureAfterNativeToolFeedbackFallsBackToNormalResponse(t *testing.T) {
 	cfg := newConfiguredStreamingTestConfig(t, true, true, nil)
 	msgBus := bus.NewMessageBus()
-	streamer := &failingUpdateStreamer{err: errors.New("Bad Request: TEXTDRAFT_PEER_INVALID")}
+	draftErr := errors.New("Bad Request: TEXTDRAFT_PEER_INVALID")
+	disabledErr := errors.New("telegram streaming disabled after previous draft failure")
+	streamer := &sequentialFailingUpdateStreamer{errs: []error{draftErr, disabledErr}}
 	msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: streamer})
 	provider := &configuredStreamingProvider{
-		streamPlan: []configuredStreamingCall{{
-			chunks:   []string{"partial answer"},
+		eventPlan: []configuredStreamingEventCall{{
+			chunks: []providers.StreamChunk{
+				{ToolCalls: []providers.ToolCall{{
+					ID:        "toolu_time_1",
+					Type:      "function",
+					Name:      "time",
+					Arguments: map[string]any{"timezone": "UTC"},
+				}}},
+				{Content: "partial answer"},
+				{Content: "completed partial answer"},
+			},
 			response: &providers.LLMResponse{Content: "completed answer"},
 		}},
 	}
@@ -1106,6 +1129,12 @@ func TestConfiguredStreamingTelegramDraftFailureFallsBackToNormalResponse(t *tes
 
 	select {
 	case outbound := <-msgBus.OutboundChan():
+		assertNativeToolCallOutbound(t, "telegram", outbound, "time", "UTC")
+	default:
+		t.Fatal("expected native tool feedback before Telegram draft failure")
+	}
+	select {
+	case outbound := <-msgBus.OutboundChan():
 		if outbound.Content != "completed answer" {
 			t.Fatalf("outbound content = %q, want completed answer", outbound.Content)
 		}
@@ -1114,6 +1143,46 @@ func TestConfiguredStreamingTelegramDraftFailureFallsBackToNormalResponse(t *tes
 		}
 	default:
 		t.Fatal("expected normal outbound response after Telegram draft failure")
+	}
+	select {
+	case outbound := <-msgBus.OutboundChan():
+		t.Fatalf("unexpected duplicate normal outbound response: %#v", outbound)
+	default:
+	}
+}
+
+func TestConfiguredStreamingTelegramDraftFailureDoesNotHideProviderStreamError(t *testing.T) {
+	cfg := newConfiguredStreamingTestConfig(t, true, true, nil)
+	msgBus := bus.NewMessageBus()
+	draftErr := errors.New("Bad Request: TEXTDRAFT_PEER_INVALID")
+	disabledErr := errors.New("telegram streaming disabled after previous draft failure")
+	streamer := &sequentialFailingUpdateStreamer{errs: []error{draftErr, disabledErr}}
+	msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: streamer})
+	providerErr := errors.New("provider stream failed")
+	provider := &configuredStreamingProvider{
+		streamPlan: []configuredStreamingCall{{
+			chunks: []string{"partial answer", "completed partial answer"},
+			err:    providerErr,
+		}},
+	}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	opts := configuredStreamingProcessOptions("telegram")
+	opts.SendResponse = true
+
+	_, err := al.runAgentLoop(context.Background(), al.GetRegistry().GetDefaultAgent(), opts)
+	if err == nil {
+		t.Fatal("expected provider stream error to remain terminal")
+	}
+	if provider.streamCalls != 1 || provider.chatCalls != 0 {
+		t.Fatalf("calls = stream:%d chat:%d, want stream:1 chat:0", provider.streamCalls, provider.chatCalls)
+	}
+	if streamer.canceled != 1 {
+		t.Fatalf("streamer canceled = %d, want 1", streamer.canceled)
+	}
+	select {
+	case outbound := <-msgBus.OutboundChan():
+		t.Fatalf("unexpected normal outbound after provider stream error: %#v", outbound)
+	default:
 	}
 }
 
