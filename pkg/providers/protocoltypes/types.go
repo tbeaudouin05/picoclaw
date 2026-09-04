@@ -40,6 +40,10 @@ type LLMResponse struct {
 type StreamChunk struct {
 	Content          string
 	ReasoningContent string
+	// ToolCalls contains native tool calls whose arguments have been completely
+	// assembled by the provider. Stream consumers can render these through the
+	// same tool-call feedback path as a non-streaming response.
+	ToolCalls []ToolCall
 }
 
 type ReasoningDetail struct {

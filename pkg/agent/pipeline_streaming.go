@@ -78,6 +78,7 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 	}
 	var response *providers.LLMResponse
 	var streamErr error
+	nativeToolFeedbackPublished := false
 	if eventProvider, ok := exec.activeProvider.(providers.StreamingEventProvider); ok {
 		response, streamErr = eventProvider.ChatStreamEvents(
 			ctx,
@@ -87,6 +88,14 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 			exec.llmOpts,
 			func(chunk providers.StreamChunk) {
 				recordChunk()
+				if p.al != nil && ts.channel == "pico" && len(chunk.ToolCalls) > 0 {
+					// Native provider tool activity is informational: it has already
+					// happened inside the provider, so publish it for the client but
+					// never add it to the agent tool-execution loop.
+					nativeToolFeedbackPublished = p.al.publishPicoToolCallInterim(
+						ctx, ts, exec.llmModelName, "", "", chunk.ToolCalls,
+					) || nativeToolFeedbackPublished
+				}
 				if !exec.suppressReasoning && strings.TrimSpace(chunk.ReasoningContent) != "" {
 					publisher.UpdateReasoning(ctx, chunk.ReasoningContent)
 				}
@@ -117,7 +126,7 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 				"model":    exec.llmModel,
 				"error":    updateErr.Error(),
 			}
-			if publisher.Published() {
+			if publisher.Published() || nativeToolFeedbackPublished {
 				logger.WarnCF("agent", "ChatStream update failed after visible output", logFields)
 				return nil, true, configuredStreamingVisibleError{err: updateErr}
 			}
@@ -137,7 +146,7 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 		}
 	}
 	if streamErr != nil {
-		if !publisher.Published() {
+		if !publisher.Published() && !nativeToolFeedbackPublished {
 			logger.WarnCF("agent", "ChatStream failed before visible output; retrying with Chat", map[string]any{
 				"agent_id": ts.agent.ID,
 				"channel":  ts.channel,

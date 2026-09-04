@@ -91,8 +91,8 @@ func (p *ClaudeCliProvider) ChatStream(
 	})
 }
 
-// ChatStreamEvents streams text deltas from the Claude CLI stream-json output.
-// Thinking and native CLI tool events are intentionally not exposed.
+// ChatStreamEvents streams text deltas and completed native tool calls from the
+// Claude CLI stream-json output. Thinking is intentionally not exposed.
 func (p *ClaudeCliProvider) ChatStreamEvents(
 	ctx context.Context,
 	messages []Message,
@@ -136,6 +136,12 @@ func (p *ClaudeCliProvider) ChatStreamEvents(
 
 	var content strings.Builder
 	var terminalResult *claudeCliJSONResponse
+	type toolUseAccum struct {
+		id   string
+		name string
+		args strings.Builder
+	}
+	activeToolUses := make(map[int]*toolUseAccum)
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
 	for scanner.Scan() {
@@ -156,11 +162,63 @@ func (p *ClaudeCliProvider) ChatStreamEvents(
 			continue
 		}
 
-		if record.Type == "stream_event" && record.Event.Type == "content_block_delta" &&
-			record.Event.Delta.Type == "text_delta" && record.Event.Delta.Text != "" {
-			content.WriteString(record.Event.Delta.Text)
+		if record.Type != "stream_event" {
+			continue
+		}
+
+		switch record.Event.Type {
+		case "content_block_start":
+			if record.Event.ContentBlock.Type == "tool_use" {
+				// A block index is unique for a streamed message. Replacing any
+				// stale entry avoids mixing arguments if a malformed stream reuses it.
+				activeToolUses[record.Event.Index] = &toolUseAccum{
+					id:   record.Event.ContentBlock.ID,
+					name: record.Event.ContentBlock.Name,
+				}
+			}
+
+		case "content_block_delta":
+			if record.Event.Delta.Type == "text_delta" && record.Event.Delta.Text != "" {
+				content.WriteString(record.Event.Delta.Text)
+				if onChunk != nil {
+					onChunk(StreamChunk{Content: content.String()})
+				}
+				continue
+			}
+			if record.Event.Delta.Type == "input_json_delta" && record.Event.Delta.PartialJSON != "" {
+				if toolUse, ok := activeToolUses[record.Event.Index]; ok {
+					toolUse.args.WriteString(record.Event.Delta.PartialJSON)
+				}
+			}
+
+		case "content_block_stop":
+			toolUse, ok := activeToolUses[record.Event.Index]
+			if !ok {
+				continue
+			}
+			delete(activeToolUses, record.Event.Index)
+			if toolUse.id == "" || toolUse.name == "" {
+				continue
+			}
+
+			argsJSON := toolUse.args.String()
+			args := make(map[string]any)
+			if argsJSON != "" {
+				if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+					continue
+				}
+			}
 			if onChunk != nil {
-				onChunk(StreamChunk{Content: content.String()})
+				onChunk(StreamChunk{ToolCalls: []ToolCall{{
+					ID:        toolUse.id,
+					Type:      "function",
+					Name:      toolUse.name,
+					Arguments: args,
+					Function: &FunctionCall{
+						Name:      toolUse.name,
+						Arguments: argsJSON,
+					},
+				}}})
 			}
 		}
 	}
@@ -322,10 +380,17 @@ type claudeCliUsageInfo struct {
 type claudeCliStreamRecord struct {
 	Type  string `json:"type"`
 	Event struct {
-		Type  string `json:"type"`
-		Delta struct {
+		Type         string `json:"type"`
+		Index        int    `json:"index"`
+		ContentBlock struct {
 			Type string `json:"type"`
-			Text string `json:"text"`
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"content_block"`
+		Delta struct {
+			Type        string `json:"type"`
+			Text        string `json:"text"`
+			PartialJSON string `json:"partial_json"`
 		} `json:"delta"`
 	} `json:"event"`
 }

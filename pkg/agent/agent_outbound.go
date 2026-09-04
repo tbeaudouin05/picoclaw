@@ -152,9 +152,9 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 	reasoningContent string,
 	content string,
 	toolCalls []providers.ToolCall,
-) {
+) bool {
 	if ts == nil || ts.chatID == "" || al == nil || al.bus == nil {
-		return
+		return false
 	}
 
 	if strings.TrimSpace(reasoningContent) != "" {
@@ -183,7 +183,7 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 	}
 
 	if !ts.opts.AllowInterimPicoPublish {
-		return
+		return false
 	}
 
 	visibleToolCalls := utils.BuildVisibleToolCalls(
@@ -214,7 +214,7 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 	}
 
 	if len(visibleToolCalls) == 0 {
-		return
+		return false
 	}
 
 	rawToolCalls, err := json.Marshal(visibleToolCalls)
@@ -224,7 +224,7 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 			"chat_id": ts.chatID,
 			"error":   err.Error(),
 		})
-		return
+		return false
 	}
 
 	msg := outboundMessageForTurnWithOptions(ts, "", outboundTurnMessageOptions{
@@ -247,6 +247,7 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 			"error":   err.Error(),
 		})
 	}
+	return err == nil
 }
 
 func (al *AgentLoop) handleReasoning(

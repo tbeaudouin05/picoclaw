@@ -481,6 +481,63 @@ func TestChatStream_StreamsTextAndReturnsTerminalResultUsage(t *testing.T) {
 	}
 }
 
+func TestChatStreamEvents_StreamsCompletedNativeToolUsesWithInterleavedArguments(t *testing.T) {
+	output := strings.Join([]string{
+		`{"type":"stream_event","event":{"type":"content_block_start","index":3,"content_block":{"type":"tool_use","id":"toolu_read","name":"Read"}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","index":3,"delta":{"type":"input_json_delta","partial_json":"{\"file_"}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_start","index":7,"content_block":{"type":"tool_use","id":"toolu_bash","name":"Bash"}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","index":7,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"pwd\"}"}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hidden"}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Working"}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_stop","index":7}}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","index":3,"delta":{"type":"input_json_delta","partial_json":"path\":\"README.md\"}"}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_stop","index":3}}`,
+		`{"type":"result","subtype":"success","is_error":false,"result":"done"}`,
+	}, "\n")
+	script := createMockCLI(t, output, "", 0)
+	p := NewClaudeCliProvider(t.TempDir())
+	p.command = script
+
+	var chunks []StreamChunk
+	resp, err := p.ChatStreamEvents(context.Background(), []Message{{Role: "user", Content: "Hi"}}, nil, "", nil, func(chunk StreamChunk) {
+		chunks = append(chunks, chunk)
+	})
+	if err != nil {
+		t.Fatalf("ChatStreamEvents() error = %v", err)
+	}
+	if resp.Content != "done" {
+		t.Fatalf("response content = %q, want done", resp.Content)
+	}
+	if len(chunks) != 3 {
+		t.Fatalf("chunks = %#v, want text plus two completed tool calls", chunks)
+	}
+	if chunks[0].Content != "Working" || len(chunks[0].ToolCalls) != 0 {
+		t.Fatalf("first chunk = %#v, want visible text only", chunks[0])
+	}
+
+	for i, want := range []struct {
+		id, name, args, argKey, argValue string
+	}{
+		{id: "toolu_bash", name: "Bash", args: `{"command":"pwd"}`, argKey: "command", argValue: "pwd"},
+		{id: "toolu_read", name: "Read", args: `{"file_path":"README.md"}`, argKey: "file_path", argValue: "README.md"},
+	} {
+		toolCalls := chunks[i+1].ToolCalls
+		if len(toolCalls) != 1 {
+			t.Fatalf("tool chunk %d = %#v, want one completed tool call", i, chunks[i+1])
+		}
+		got := toolCalls[0]
+		if got.ID != want.id || got.Name != want.name || got.Type != "function" {
+			t.Errorf("tool chunk %d = %#v, want id=%q name=%q", i, got, want.id, want.name)
+		}
+		if got.Function == nil || got.Function.Arguments != want.args {
+			t.Errorf("tool chunk %d function = %#v, want arguments %q", i, got.Function, want.args)
+		}
+		if got.Arguments[want.argKey] != want.argValue {
+			t.Errorf("tool chunk %d arguments = %#v, want %s=%q", i, got.Arguments, want.argKey, want.argValue)
+		}
+	}
+}
+
 func TestChatStreamEvents_MalformedLine(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("mock CLI scripts not supported on Windows")
