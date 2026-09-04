@@ -298,6 +298,26 @@ func TestChat_ContextCancellation(t *testing.T) {
 	}
 }
 
+func TestChat_DoesNotPassDangerousPermissionsFlag(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "args.txt")
+	script := createArgCaptureCLI(t, argsFile)
+
+	p := NewClaudeCliProvider(t.TempDir())
+	p.command = script
+
+	if _, err := p.Chat(context.Background(), []Message{{Role: "user", Content: "Hi"}}, nil, "", nil); err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+
+	argsBytes, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("failed to read args file: %v", err)
+	}
+	if strings.Contains(string(argsBytes), "--dangerously-skip-permissions") {
+		t.Errorf("CLI args must not include --dangerously-skip-permissions, got: %s", argsBytes)
+	}
+}
+
 func TestChat_PassesSystemPromptFlag(t *testing.T) {
 	argsFile := filepath.Join(t.TempDir(), "args.txt")
 	script := createArgCaptureCLI(t, argsFile)

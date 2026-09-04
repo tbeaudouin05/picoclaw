@@ -92,7 +92,7 @@ func TestIntegration_RealClaudeCLI_ParsesRealJSON(t *testing.T) {
 
 	// Run claude directly and verify our parser handles real output
 	cmd := exec.Command("claude", "-p", "--output-format", "json",
-		"--dangerously-skip-permissions", "--no-chrome", "--no-session-persistence", "-")
+		"--no-chrome", "--no-session-persistence", "-")
 	cmd.Stdin = strings.NewReader("Say hi")
 	cmd.Dir = t.TempDir()
 

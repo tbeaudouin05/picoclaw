@@ -32,7 +32,9 @@ func (p *ClaudeCliProvider) Chat(
 	systemPrompt := p.buildSystemPrompt(messages, tools)
 	prompt := p.messagesToPrompt(messages)
 
-	args := []string{"-p", "--output-format", "json", "--dangerously-skip-permissions", "--no-chrome"}
+	// Claude CLI rejects --dangerously-skip-permissions when PicoClaw runs as root.
+	// Root-safe permission allowlists are configured narrowly in /root/.claude/settings.json.
+	args := []string{"-p", "--output-format", "json", "--no-chrome"}
 	if systemPrompt != "" {
 		args = append(args, "--system-prompt", systemPrompt)
 	}
