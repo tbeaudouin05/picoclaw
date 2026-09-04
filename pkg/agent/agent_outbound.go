@@ -250,6 +250,59 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 	return err == nil
 }
 
+// publishNativeToolCallFeedback renders native provider tool-call activity as
+// visible tool_feedback text for chat channels that don't understand Pico's
+// structured tool_calls message kind (e.g. Telegram).
+func (al *AgentLoop) publishNativeToolCallFeedback(
+	ctx context.Context,
+	ts *turnState,
+	modelName string,
+	toolCalls []providers.ToolCall,
+) bool {
+	if ts == nil || ts.chatID == "" || al == nil || al.bus == nil || len(toolCalls) == 0 {
+		return false
+	}
+	if !shouldPublishToolFeedback(al.cfg, ts) {
+		return false
+	}
+
+	maxArgsLen := al.cfg.Agents.Defaults.GetToolFeedbackMaxArgsLength()
+	published := false
+	for _, tc := range toolCalls {
+		name, _ := utils.VisibleToolCallNameAndArguments(tc)
+		argsPreview := utils.VisibleToolCallArgumentsPreview(tc, maxArgsLen)
+		explanation := ""
+		if tc.ExtraContent != nil {
+			explanation = strings.TrimSpace(tc.ExtraContent.ToolFeedbackExplanation)
+		}
+		feedbackMsg := utils.FormatToolFeedbackMessage(name, explanation, argsPreview)
+		if strings.TrimSpace(feedbackMsg) == "" {
+			continue
+		}
+
+		pubCtx, pubCancel := context.WithTimeout(ctx, 3*time.Second)
+		err := al.bus.PublishOutbound(pubCtx, outboundMessageForTurnWithOptions(ts, feedbackMsg, outboundTurnMessageOptions{
+			kind:      messageKindToolFeedback,
+			modelName: modelName,
+		}))
+		pubCancel()
+		if err != nil {
+			if !errors.Is(err, context.DeadlineExceeded) &&
+				!errors.Is(err, context.Canceled) &&
+				!errors.Is(err, bus.ErrBusClosed) {
+				logger.WarnCF("agent", "Failed to publish native tool call feedback", map[string]any{
+					"channel": ts.channel,
+					"chat_id": ts.chatID,
+					"error":   err.Error(),
+				})
+			}
+			continue
+		}
+		published = true
+	}
+	return published
+}
+
 func (al *AgentLoop) handleReasoning(
 	ctx context.Context,
 	reasoningContent, channelName, channelID string,

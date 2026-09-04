@@ -518,125 +518,161 @@ func TestConfiguredStreamingStreamsPicoReasoningBeforeAnswerContent(t *testing.T
 	}
 }
 
-func TestConfiguredStreamingPublishesNativeToolCallChunksForPico(t *testing.T) {
-	cfg := newConfiguredStreamingTestConfig(t, true, true, nil)
-	msgBus := bus.NewMessageBus()
-	msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: &recordingStreamer{}})
-	provider := &configuredStreamingProvider{
-		eventPlan: []configuredStreamingEventCall{{
-			chunks: []providers.StreamChunk{{
-				ToolCalls: []providers.ToolCall{{
-					ID:        "toolu_1",
-					Type:      "function",
-					Name:      "Read",
-					Arguments: map[string]any{"file_path": "README.md"},
-					Function:  &providers.FunctionCall{Name: "Read", Arguments: `{"file_path":"README.md"}`},
-				}},
-			}},
-			response: &providers.LLMResponse{Content: "done"},
-		}},
-	}
-	al := NewAgentLoop(cfg, msgBus, provider)
-
-	if got := runConfiguredStreamingTurn(t, al, "pico"); got != "done" {
-		t.Fatalf("response = %q, want done", got)
-	}
-	select {
-	case outbound := <-msgBus.OutboundChan():
+// assertNativeToolCallOutbound checks that native provider tool-call activity
+// surfaces per channel expectations: Pico gets a structured tool_calls
+// message with empty Content, Telegram gets non-empty tool_feedback text
+// rendered through the existing formatter (tool name + arguments).
+func assertNativeToolCallOutbound(t *testing.T, channel string, outbound bus.OutboundMessage, wantToolName, wantArgsSubstr string) {
+	t.Helper()
+	switch channel {
+	case "pico":
 		if outbound.Context.Raw[metadataKeyMessageKind] != messageKindToolCalls {
 			t.Fatalf("outbound = %+v, want structured tool_calls feedback", outbound)
 		}
-		if !strings.Contains(outbound.Context.Raw[metadataKeyToolCalls], "README.md") {
-			t.Fatalf("tool feedback = %q, want completed arguments", outbound.Context.Raw[metadataKeyToolCalls])
+		if outbound.Content != "" {
+			t.Fatalf("outbound.Content = %q, want empty content for structured tool_calls", outbound.Content)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("expected native tool call feedback")
+		rawToolCalls := outbound.Context.Raw[metadataKeyToolCalls]
+		if !strings.Contains(rawToolCalls, wantToolName) || !strings.Contains(rawToolCalls, wantArgsSubstr) {
+			t.Fatalf("tool feedback = %q, want tool name %q and arguments %q", rawToolCalls, wantToolName, wantArgsSubstr)
+		}
+	case "telegram":
+		if outbound.Context.Raw[metadataKeyMessageKind] != messageKindToolFeedback {
+			t.Fatalf("outbound = %+v, want tool_feedback text", outbound)
+		}
+		if strings.TrimSpace(outbound.Content) == "" {
+			t.Fatalf("outbound.Content is empty, want visible tool_feedback text")
+		}
+		if !strings.Contains(outbound.Content, wantToolName) || !strings.Contains(outbound.Content, wantArgsSubstr) {
+			t.Fatalf("tool feedback content = %q, want tool name %q and arguments %q", outbound.Content, wantToolName, wantArgsSubstr)
+		}
+	default:
+		t.Fatalf("unexpected channel %q", channel)
+	}
+}
+
+func TestConfiguredStreamingPublishesNativeToolCallChunksForPicoAndTelegram(t *testing.T) {
+	for _, channel := range []string{"pico", "telegram"} {
+		t.Run(channel, func(t *testing.T) {
+			cfg := newConfiguredStreamingTestConfig(t, true, true, nil)
+			msgBus := bus.NewMessageBus()
+			msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: &recordingStreamer{}})
+			provider := &configuredStreamingProvider{
+				eventPlan: []configuredStreamingEventCall{{
+					chunks: []providers.StreamChunk{{
+						ToolCalls: []providers.ToolCall{{
+							ID:        "toolu_1",
+							Type:      "function",
+							Name:      "Read",
+							Arguments: map[string]any{"file_path": "README.md"},
+							Function:  &providers.FunctionCall{Name: "Read", Arguments: `{"file_path":"README.md"}`},
+						}},
+					}},
+					response: &providers.LLMResponse{Content: "done"},
+				}},
+			}
+			al := NewAgentLoop(cfg, msgBus, provider)
+
+			if got := runConfiguredStreamingTurn(t, al, channel); got != "done" {
+				t.Fatalf("response = %q, want done", got)
+			}
+			select {
+			case outbound := <-msgBus.OutboundChan():
+				assertNativeToolCallOutbound(t, channel, outbound, "Read", "README.md")
+			case <-time.After(time.Second):
+				t.Fatal("expected native tool call feedback")
+			}
+		})
 	}
 }
 
 func TestConfiguredStreamingNativeToolFeedbackThenStreamErrorDoesNotFallBackToChat(t *testing.T) {
-	cfg := newConfiguredStreamingTestConfig(t, true, true, nil)
-	msgBus := bus.NewMessageBus()
-	msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: &recordingStreamer{}})
-	provider := &configuredStreamingProvider{
-		eventPlan: []configuredStreamingEventCall{{
-			chunks: []providers.StreamChunk{{
-				ToolCalls: []providers.ToolCall{{
-					ID:        "toolu_1",
-					Type:      "function",
-					Name:      "Bash",
-					Arguments: map[string]any{"command": "touch side-effect"},
+	for _, channel := range []string{"pico", "telegram"} {
+		t.Run(channel, func(t *testing.T) {
+			cfg := newConfiguredStreamingTestConfig(t, true, true, nil)
+			msgBus := bus.NewMessageBus()
+			msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: &recordingStreamer{}})
+			provider := &configuredStreamingProvider{
+				eventPlan: []configuredStreamingEventCall{{
+					chunks: []providers.StreamChunk{{
+						ToolCalls: []providers.ToolCall{{
+							ID:        "toolu_1",
+							Type:      "function",
+							Name:      "Bash",
+							Arguments: map[string]any{"command": "touch side-effect"},
+						}},
+					}},
+					err: errors.New("stream failed after native tool feedback"),
 				}},
-			}},
-			err: errors.New("stream failed after native tool feedback"),
-		}},
-	}
-	al := NewAgentLoop(cfg, msgBus, provider)
+			}
+			al := NewAgentLoop(cfg, msgBus, provider)
 
-	_, err := al.runAgentLoop(
-		context.Background(),
-		al.GetRegistry().GetDefaultAgent(),
-		configuredStreamingProcessOptions("pico"),
-	)
-	if err == nil {
-		t.Fatal("expected stream failure after native tool feedback")
-	}
-	if provider.streamCalls != 1 || provider.chatCalls != 0 {
-		t.Fatalf("calls = stream:%d chat:%d, want stream:1 chat:0", provider.streamCalls, provider.chatCalls)
-	}
-	select {
-	case outbound := <-msgBus.OutboundChan():
-		if outbound.Context.Raw[metadataKeyMessageKind] != messageKindToolCalls {
-			t.Fatalf("outbound = %+v, want structured tool_calls feedback", outbound)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("expected native tool call feedback")
+			_, err := al.runAgentLoop(
+				context.Background(),
+				al.GetRegistry().GetDefaultAgent(),
+				configuredStreamingProcessOptions(channel),
+			)
+			if err == nil {
+				t.Fatal("expected stream failure after native tool feedback")
+			}
+			if provider.streamCalls != 1 || provider.chatCalls != 0 {
+				t.Fatalf("calls = stream:%d chat:%d, want stream:1 chat:0", provider.streamCalls, provider.chatCalls)
+			}
+			select {
+			case outbound := <-msgBus.OutboundChan():
+				assertNativeToolCallOutbound(t, channel, outbound, "Bash", "touch side-effect")
+			case <-time.After(time.Second):
+				t.Fatal("expected native tool call feedback")
+			}
+		})
 	}
 }
 
 func TestConfiguredStreamingNativeToolFeedbackThenUpdateErrorDoesNotFallBackToChat(t *testing.T) {
-	cfg := newConfiguredStreamingTestConfig(t, true, true, nil)
-	msgBus := bus.NewMessageBus()
-	streamer := &failingUpdateStreamer{err: errors.New("draft failed")}
-	msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: streamer})
-	provider := &configuredStreamingProvider{
-		eventPlan: []configuredStreamingEventCall{{
-			chunks: []providers.StreamChunk{
-				{ToolCalls: []providers.ToolCall{{
-					ID:        "toolu_1",
-					Type:      "function",
-					Name:      "Bash",
-					Arguments: map[string]any{"command": "touch side-effect"},
-				}}},
-				{Content: "not visible"},
-			},
-			response: &providers.LLMResponse{Content: "stream response"},
-		}},
-		chatResponse: &providers.LLMResponse{Content: "chat fallback"},
-	}
-	al := NewAgentLoop(cfg, msgBus, provider)
+	for _, channel := range []string{"pico", "telegram"} {
+		t.Run(channel, func(t *testing.T) {
+			cfg := newConfiguredStreamingTestConfig(t, true, true, nil)
+			msgBus := bus.NewMessageBus()
+			streamer := &failingUpdateStreamer{err: errors.New("draft failed")}
+			msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: streamer})
+			provider := &configuredStreamingProvider{
+				eventPlan: []configuredStreamingEventCall{{
+					chunks: []providers.StreamChunk{
+						{ToolCalls: []providers.ToolCall{{
+							ID:        "toolu_1",
+							Type:      "function",
+							Name:      "Bash",
+							Arguments: map[string]any{"command": "touch side-effect"},
+						}}},
+						{Content: "not visible"},
+					},
+					response: &providers.LLMResponse{Content: "stream response"},
+				}},
+				chatResponse: &providers.LLMResponse{Content: "chat fallback"},
+			}
+			al := NewAgentLoop(cfg, msgBus, provider)
 
-	_, err := al.runAgentLoop(
-		context.Background(),
-		al.GetRegistry().GetDefaultAgent(),
-		configuredStreamingProcessOptions("pico"),
-	)
-	if err == nil {
-		t.Fatal("expected update failure after native tool feedback")
-	}
-	if provider.streamCalls != 1 || provider.chatCalls != 0 {
-		t.Fatalf("calls = stream:%d chat:%d, want stream:1 chat:0", provider.streamCalls, provider.chatCalls)
-	}
-	if streamer.canceled != 0 {
-		t.Fatalf("streamer canceled = %d, want 0", streamer.canceled)
-	}
-	select {
-	case outbound := <-msgBus.OutboundChan():
-		if outbound.Context.Raw[metadataKeyMessageKind] != messageKindToolCalls {
-			t.Fatalf("outbound = %+v, want structured tool_calls feedback", outbound)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("expected native tool call feedback")
+			_, err := al.runAgentLoop(
+				context.Background(),
+				al.GetRegistry().GetDefaultAgent(),
+				configuredStreamingProcessOptions(channel),
+			)
+			if err == nil {
+				t.Fatal("expected update failure after native tool feedback")
+			}
+			if provider.streamCalls != 1 || provider.chatCalls != 0 {
+				t.Fatalf("calls = stream:%d chat:%d, want stream:1 chat:0", provider.streamCalls, provider.chatCalls)
+			}
+			if streamer.canceled != 0 {
+				t.Fatalf("streamer canceled = %d, want 0", streamer.canceled)
+			}
+			select {
+			case outbound := <-msgBus.OutboundChan():
+				assertNativeToolCallOutbound(t, channel, outbound, "Bash", "touch side-effect")
+			case <-time.After(time.Second):
+				t.Fatal("expected native tool call feedback")
+			}
+		})
 	}
 }
 
@@ -1195,11 +1231,16 @@ func newConfiguredStreamingTestConfig(
 				ModelFallbacks:    append([]string(nil), fallbacks...),
 				MaxTokens:         4096,
 				MaxToolIterations: 3,
+				ToolFeedback: config.ToolFeedbackConfig{
+					Enabled:       true,
+					MaxArgsLength: 300,
+				},
 			},
 		},
 		Channels: config.ChannelsConfig{
-			"pico":  newConfiguredStreamingPicoChannel(t, channelStreaming),
-			"wecom": newConfiguredStreamingWeComChannel(t, channelStreaming),
+			"pico":     newConfiguredStreamingPicoChannel(t, channelStreaming),
+			"telegram": newConfiguredStreamingTelegramChannel(t, channelStreaming),
+			"wecom":    newConfiguredStreamingWeComChannel(t, channelStreaming),
 		},
 		ModelList: []*config.ModelConfig{{
 			ModelName: "test-model",
@@ -1238,6 +1279,27 @@ func newConfiguredStreamingWeComChannel(t *testing.T, enabled bool) *config.Chan
 	}
 	return &config.Channel{
 		Type:     config.ChannelWeCom,
+		Enabled:  true,
+		Settings: config.RawNode(raw),
+	}
+}
+
+func newConfiguredStreamingTelegramChannel(t *testing.T, enabled bool) *config.Channel {
+	t.Helper()
+	settings := config.TelegramSettings{
+		Streaming: config.StreamingConfig{
+			Enabled:         enabled,
+			ThrottleSeconds: 1,
+			MinGrowthChars:  40,
+		},
+	}
+	settings.Token = *config.NewSecureString("test-token")
+	raw, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatalf("Marshal settings error = %v", err)
+	}
+	return &config.Channel{
+		Type:     config.ChannelTelegram,
 		Enabled:  true,
 		Settings: config.RawNode(raw),
 	}

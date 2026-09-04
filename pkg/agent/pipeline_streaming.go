@@ -88,13 +88,20 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 			exec.llmOpts,
 			func(chunk providers.StreamChunk) {
 				recordChunk()
-				if p.al != nil && ts.channel == "pico" && len(chunk.ToolCalls) > 0 {
-					// Native provider tool activity is informational: it has already
-					// happened inside the provider, so publish it for the client but
-					// never add it to the agent tool-execution loop.
-					nativeToolFeedbackPublished = p.al.publishPicoToolCallInterim(
-						ctx, ts, exec.llmModelName, "", "", chunk.ToolCalls,
-					) || nativeToolFeedbackPublished
+				// Native provider tool activity is informational: it has already
+				// happened inside the provider, so publish it for the client but
+				// never add it to the agent tool-execution loop.
+				if p.al != nil && len(chunk.ToolCalls) > 0 {
+					switch ts.channel {
+					case "pico":
+						nativeToolFeedbackPublished = p.al.publishPicoToolCallInterim(
+							ctx, ts, exec.llmModelName, "", "", chunk.ToolCalls,
+						) || nativeToolFeedbackPublished
+					case "telegram":
+						nativeToolFeedbackPublished = p.al.publishNativeToolCallFeedback(
+							ctx, ts, exec.llmModelName, chunk.ToolCalls,
+						) || nativeToolFeedbackPublished
+					}
 				}
 				if !exec.suppressReasoning && strings.TrimSpace(chunk.ReasoningContent) != "" {
 					publisher.UpdateReasoning(ctx, chunk.ReasoningContent)
