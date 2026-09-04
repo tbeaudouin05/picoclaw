@@ -1,6 +1,7 @@
 package cliprovider
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -73,6 +74,115 @@ func (p *ClaudeCliProvider) Chat(
 	return p.parseClaudeCliResponse(stdout.String())
 }
 
+// ChatStream streams accumulated text from the Claude CLI while returning the
+// complete response after its terminal result record.
+func (p *ClaudeCliProvider) ChatStream(
+	ctx context.Context,
+	messages []Message,
+	tools []ToolDefinition,
+	model string,
+	options map[string]any,
+	onChunk func(accumulated string),
+) (*LLMResponse, error) {
+	return p.ChatStreamEvents(ctx, messages, tools, model, options, func(chunk StreamChunk) {
+		if onChunk != nil && chunk.Content != "" {
+			onChunk(chunk.Content)
+		}
+	})
+}
+
+// ChatStreamEvents streams text deltas from the Claude CLI stream-json output.
+// Thinking and native CLI tool events are intentionally not exposed.
+func (p *ClaudeCliProvider) ChatStreamEvents(
+	ctx context.Context,
+	messages []Message,
+	tools []ToolDefinition,
+	model string,
+	options map[string]any,
+	onChunk func(StreamChunk),
+) (*LLMResponse, error) {
+	systemPrompt := p.buildSystemPrompt(messages, tools)
+	prompt := p.messagesToPrompt(messages)
+
+	args := []string{"-p", "--verbose", "--output-format", "stream-json", "--include-partial-messages", "--no-chrome"}
+	if systemPrompt != "" {
+		args = append(args, "--system-prompt", systemPrompt)
+	}
+	if model != "" && model != "claude-code" {
+		args = append(args, "--model", model)
+	}
+	args = append(args, "-")
+
+	cmd := exec.CommandContext(ctx, p.command, args...)
+	if p.workspace != "" {
+		cmd.Dir = p.workspace
+	}
+	cmd.Stdin = bytes.NewReader([]byte(prompt))
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create claude cli stdout pipe: %w", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	if err := isolation.Start(cmd); err != nil {
+		return nil, fmt.Errorf("claude cli error: %w", err)
+	}
+	terminateAndWait := func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	}
+
+	var content strings.Builder
+	var terminalResult *claudeCliJSONResponse
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		var record claudeCliStreamRecord
+		if err := json.Unmarshal(line, &record); err != nil {
+			terminateAndWait()
+			return nil, fmt.Errorf("failed to parse claude cli stream record: %w", err)
+		}
+
+		if record.Type == "result" {
+			var result claudeCliJSONResponse
+			if err := json.Unmarshal(line, &result); err != nil {
+				terminateAndWait()
+				return nil, fmt.Errorf("failed to parse claude cli stream result: %w", err)
+			}
+			terminalResult = &result
+			continue
+		}
+
+		if record.Type == "stream_event" && record.Event.Type == "content_block_delta" &&
+			record.Event.Delta.Type == "text_delta" && record.Event.Delta.Text != "" {
+			content.WriteString(record.Event.Delta.Text)
+			if onChunk != nil {
+				onChunk(StreamChunk{Content: content.String()})
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		terminateAndWait()
+		return nil, fmt.Errorf("failed to read claude cli stream: %w", err)
+	}
+
+	if err := cmd.Wait(); err != nil {
+		stderrStr := strings.TrimSpace(stderr.String())
+		if stderrStr != "" {
+			return nil, fmt.Errorf("claude cli error: %s", stderrStr)
+		}
+		return nil, fmt.Errorf("claude cli error: %w", err)
+	}
+	if terminalResult == nil {
+		return nil, fmt.Errorf("claude cli stream ended without terminal result")
+	}
+
+	return p.parseClaudeCliJSONResponse(*terminalResult)
+}
+
 // GetDefaultModel returns the default model identifier.
 func (p *ClaudeCliProvider) GetDefaultModel() string {
 	return "claude-code"
@@ -126,7 +236,10 @@ func (p *ClaudeCliProvider) parseClaudeCliResponse(output string) (*LLMResponse,
 	if err := json.Unmarshal([]byte(output), &resp); err != nil {
 		return nil, fmt.Errorf("failed to parse claude cli response: %w", err)
 	}
+	return p.parseClaudeCliJSONResponse(resp)
+}
 
+func (p *ClaudeCliProvider) parseClaudeCliJSONResponse(resp claudeCliJSONResponse) (*LLMResponse, error) {
 	if resp.IsError {
 		return nil, fmt.Errorf("claude cli returned error: %s", resp.Result)
 	}
@@ -204,4 +317,15 @@ type claudeCliUsageInfo struct {
 	OutputTokens             int `json:"output_tokens"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+}
+
+type claudeCliStreamRecord struct {
+	Type  string `json:"type"`
+	Event struct {
+		Type  string `json:"type"`
+		Delta struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"delta"`
+	} `json:"event"`
 }

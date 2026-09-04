@@ -92,6 +92,25 @@ EOFMOCK
 	return script
 }
 
+func createStreamArgCaptureCLI(t *testing.T, argsFile, output string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("mock CLI scripts not supported on Windows")
+	}
+
+	dir := t.TempDir()
+	outputFile := filepath.Join(dir, "stdout.txt")
+	if err := os.WriteFile(outputFile, []byte(output), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(dir, "claude")
+	content := fmt.Sprintf("#!/bin/sh\necho \"$@\" > '%s'\ncat '%s'\n", argsFile, outputFile)
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
 // --- Constructor tests ---
 
 func TestNewClaudeCliProvider(t *testing.T) {
@@ -424,6 +443,125 @@ func TestChat_EmptyWorkspaceDoesNotSetDir(t *testing.T) {
 	}
 	if resp.Content != "ok" {
 		t.Errorf("Content = %q, want %q", resp.Content, "ok")
+	}
+}
+
+// --- ChatStream() tests ---
+
+func TestChatStream_StreamsTextAndReturnsTerminalResultUsage(t *testing.T) {
+	output := strings.Join([]string{
+		`{"type":"system","subtype":"init"}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"ignored"}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hel"}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"lo"}}}`,
+		`{"type":"result","subtype":"success","is_error":false,"result":" Hello ","usage":{"input_tokens":3,"output_tokens":2,"cache_creation_input_tokens":4,"cache_read_input_tokens":5}}`,
+	}, "\n")
+	script := createMockCLI(t, output, "", 0)
+	p := NewClaudeCliProvider(t.TempDir())
+	p.command = script
+
+	var chunks []string
+	resp, err := p.ChatStream(context.Background(), []Message{{Role: "user", Content: "Hi"}}, nil, "", nil, func(chunk string) {
+		chunks = append(chunks, chunk)
+	})
+	if err != nil {
+		t.Fatalf("ChatStream() error = %v", err)
+	}
+	if got, want := strings.Join(chunks, ","), "Hel,Hello"; got != want {
+		t.Errorf("chunks = %q, want %q", got, want)
+	}
+	if resp.Content != "Hello" {
+		t.Errorf("Content = %q, want %q", resp.Content, "Hello")
+	}
+	if resp.Usage == nil {
+		t.Fatal("Usage should not be nil")
+	}
+	if resp.Usage.PromptTokens != 12 || resp.Usage.CompletionTokens != 2 || resp.Usage.TotalTokens != 14 {
+		t.Errorf("Usage = %+v, want prompt=12 completion=2 total=14", resp.Usage)
+	}
+}
+
+func TestChatStreamEvents_MalformedLine(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock CLI scripts not supported on Windows")
+	}
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "claude")
+	content := `#!/bin/sh
+printf '%s\n' '{"type":"stream_event"'
+exec sleep 10
+`
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := NewClaudeCliProvider(t.TempDir())
+	p.command = script
+
+	started := time.Now()
+	_, err := p.ChatStreamEvents(context.Background(), []Message{{Role: "user", Content: "Hi"}}, nil, "", nil, nil)
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("ChatStreamEvents() took %s; want it to return promptly after malformed NDJSON", elapsed)
+	}
+	if err == nil {
+		t.Fatal("ChatStreamEvents() expected error for malformed NDJSON")
+	}
+	if !strings.Contains(err.Error(), "failed to parse claude cli stream record") {
+		t.Errorf("error = %q, want malformed stream record error", err)
+	}
+}
+
+func TestChatStreamEvents_NoTerminalResult(t *testing.T) {
+	script := createMockCLI(t, `{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"partial"}}}`+"\n", "", 0)
+	p := NewClaudeCliProvider(t.TempDir())
+	p.command = script
+
+	_, err := p.ChatStreamEvents(context.Background(), []Message{{Role: "user", Content: "Hi"}}, nil, "", nil, nil)
+	if err == nil {
+		t.Fatal("ChatStreamEvents() expected error without terminal result")
+	}
+	if !strings.Contains(err.Error(), "without terminal result") {
+		t.Errorf("error = %q, want missing terminal result error", err)
+	}
+}
+
+func TestChatStreamEvents_TerminalError(t *testing.T) {
+	script := createMockCLI(t, `{"type":"result","subtype":"error","is_error":true,"result":"Rate limit exceeded"}`+"\n", "", 0)
+	p := NewClaudeCliProvider(t.TempDir())
+	p.command = script
+
+	_, err := p.ChatStreamEvents(context.Background(), []Message{{Role: "user", Content: "Hi"}}, nil, "", nil, nil)
+	if err == nil {
+		t.Fatal("ChatStreamEvents() expected terminal error")
+	}
+	if !strings.Contains(err.Error(), "Rate limit exceeded") {
+		t.Errorf("error = %q, want terminal result error", err)
+	}
+}
+
+func TestChatStreamEvents_PassesStreamingArguments(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "args.txt")
+	script := createStreamArgCaptureCLI(t, argsFile, `{"type":"result","result":"ok"}`+"\n")
+	p := NewClaudeCliProvider(t.TempDir())
+	p.command = script
+
+	_, err := p.ChatStreamEvents(context.Background(), []Message{
+		{Role: "system", Content: "Be helpful."},
+		{Role: "user", Content: "Hi"},
+	}, nil, "claude-sonnet-4.6", nil, nil)
+	if err != nil {
+		t.Fatalf("ChatStreamEvents() error = %v", err)
+	}
+
+	argsBytes, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("failed to read args file: %v", err)
+	}
+	args := string(argsBytes)
+	for _, want := range []string{"-p", "--verbose", "--output-format stream-json", "--include-partial-messages", "--no-chrome", "--system-prompt", "--model claude-sonnet-4.6"} {
+		if !strings.Contains(args, want) {
+			t.Errorf("CLI args missing %q, got: %s", want, args)
+		}
 	}
 }
 
