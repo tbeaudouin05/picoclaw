@@ -1075,6 +1075,48 @@ func TestConfiguredStreamingUpdateFailureThenStreamSuccessIsTerminal(t *testing.
 	}
 }
 
+func TestConfiguredStreamingTelegramDraftFailureFallsBackToNormalResponse(t *testing.T) {
+	cfg := newConfiguredStreamingTestConfig(t, true, true, nil)
+	msgBus := bus.NewMessageBus()
+	streamer := &failingUpdateStreamer{err: errors.New("Bad Request: TEXTDRAFT_PEER_INVALID")}
+	msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: streamer})
+	provider := &configuredStreamingProvider{
+		streamPlan: []configuredStreamingCall{{
+			chunks:   []string{"partial answer"},
+			response: &providers.LLMResponse{Content: "completed answer"},
+		}},
+	}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	opts := configuredStreamingProcessOptions("telegram")
+	opts.SendResponse = true
+
+	got, err := al.runAgentLoop(context.Background(), al.GetRegistry().GetDefaultAgent(), opts)
+	if err != nil {
+		t.Fatalf("runAgentLoop() error = %v", err)
+	}
+	if got != "completed answer" {
+		t.Fatalf("response = %q, want completed answer", got)
+	}
+	if provider.streamCalls != 1 || provider.chatCalls != 0 {
+		t.Fatalf("calls = stream:%d chat:%d, want stream:1 chat:0", provider.streamCalls, provider.chatCalls)
+	}
+	if streamer.canceled != 1 {
+		t.Fatalf("streamer canceled = %d, want 1", streamer.canceled)
+	}
+
+	select {
+	case outbound := <-msgBus.OutboundChan():
+		if outbound.Content != "completed answer" {
+			t.Fatalf("outbound content = %q, want completed answer", outbound.Content)
+		}
+		if outbound.Context.Channel != "telegram" {
+			t.Fatalf("outbound channel = %q, want telegram", outbound.Context.Channel)
+		}
+	default:
+		t.Fatal("expected normal outbound response after Telegram draft failure")
+	}
+}
+
 func TestConfiguredStreamingLaterUpdateFailureThenStreamSuccessReturnsVisibleError(t *testing.T) {
 	cfg := newConfiguredStreamingTestConfig(t, true, true, nil)
 	msgBus := bus.NewMessageBus()

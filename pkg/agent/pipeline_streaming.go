@@ -134,6 +134,21 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 	}
 	logConfiguredStreamingSummary(ts, exec, streamStart, chunkCount, firstChunkAt, lastChunkAt, streamErr)
 	if deliveryErr := firstError(publisher.Err(), nativeToolFeedbackErr); deliveryErr != nil {
+		// Telegram drafts are only a streaming preview. If sendMessageDraft fails
+		// after the provider has produced a complete response, discard the failed
+		// streamer and let the normal outbound path deliver that response instead.
+		// Treating this as an LLM failure loses valid answers (notably when Telegram
+		// returns TEXTDRAFT_PEER_INVALID for a draft).
+		if ts.channel == "telegram" && publisher.Err() != nil && nativeToolFeedbackErr == nil && !nativeToolFeedbackPublished && streamErr == nil && response != nil {
+			logger.WarnCF("agent", "Telegram draft streaming failed; falling back to normal response", map[string]any{
+				"agent_id": ts.agent.ID,
+				"channel":  ts.channel,
+				"model":    exec.llmModel,
+				"error":    deliveryErr.Error(),
+			})
+			publisher.Cancel(ctx)
+			return response, true, nil
+		}
 		logger.WarnCF("agent", "ChatStream channel delivery failed", map[string]any{
 			"agent_id": ts.agent.ID,
 			"channel":  ts.channel,
