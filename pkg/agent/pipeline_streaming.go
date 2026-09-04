@@ -20,6 +20,7 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 	exec *turnExecution,
 	messagesForCall []providers.Message,
 	toolDefsForCall []providers.ToolDefinition,
+	retryPrimaryChat bool,
 ) (*providers.LLMResponse, bool, error) {
 	exec.streamingPublisher = nil
 	exec.streamingFallback = false
@@ -79,6 +80,7 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 	var response *providers.LLMResponse
 	var streamErr error
 	nativeToolFeedbackPublished := false
+	var nativeToolFeedbackErr error
 	if eventProvider, ok := exec.activeProvider.(providers.StreamingEventProvider); ok {
 		response, streamErr = eventProvider.ChatStreamEvents(
 			ctx,
@@ -92,15 +94,21 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 				// happened inside the provider, so publish it for the client but
 				// never add it to the agent tool-execution loop.
 				if p.al != nil && len(chunk.ToolCalls) > 0 {
+					var published bool
+					var deliveryErr error
 					switch ts.channel {
 					case "pico":
-						nativeToolFeedbackPublished = p.al.publishPicoToolCallInterim(
+						published, deliveryErr = p.al.publishPicoToolCallInterim(
 							ctx, ts, exec.llmModelName, "", "", chunk.ToolCalls,
-						) || nativeToolFeedbackPublished
+						)
 					case "telegram":
-						nativeToolFeedbackPublished = p.al.publishNativeToolCallFeedback(
+						published, deliveryErr = p.al.publishNativeToolCallFeedback(
 							ctx, ts, exec.llmModelName, chunk.ToolCalls,
-						) || nativeToolFeedbackPublished
+						)
+					}
+					nativeToolFeedbackPublished = published || nativeToolFeedbackPublished
+					if nativeToolFeedbackErr == nil && deliveryErr != nil {
+						nativeToolFeedbackErr = deliveryErr
 					}
 				}
 				if !exec.suppressReasoning && strings.TrimSpace(chunk.ReasoningContent) != "" {
@@ -125,41 +133,32 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 		)
 	}
 	logConfiguredStreamingSummary(ts, exec, streamStart, chunkCount, firstChunkAt, lastChunkAt, streamErr)
-	if streamErr == nil {
-		if updateErr := publisher.Err(); updateErr != nil {
+	if deliveryErr := firstError(publisher.Err(), nativeToolFeedbackErr); deliveryErr != nil {
+		logger.WarnCF("agent", "ChatStream channel delivery failed", map[string]any{
+			"agent_id": ts.agent.ID,
+			"channel":  ts.channel,
+			"model":    exec.llmModel,
+			"error":    deliveryErr.Error(),
+		})
+		if !publisher.UserVisible() && !nativeToolFeedbackPublished {
+			publisher.Cancel(ctx)
+		}
+		return nil, true, providers.AbortFallback(configuredStreamingVisibleError{err: deliveryErr})
+	}
+	if streamErr != nil {
+		if !publisher.UserVisible() && !nativeToolFeedbackPublished {
 			logFields := map[string]any{
 				"agent_id": ts.agent.ID,
 				"channel":  ts.channel,
 				"model":    exec.llmModel,
-				"error":    updateErr.Error(),
-			}
-			if publisher.Published() || nativeToolFeedbackPublished {
-				logger.WarnCF("agent", "ChatStream update failed after visible output", logFields)
-				return nil, true, configuredStreamingVisibleError{err: updateErr}
-			}
-			logger.WarnCF("agent", "ChatStream update failed before visible output; retrying with Chat", logFields)
-			publisher.Cancel(ctx)
-			fallbackResponse, err := exec.activeProvider.Chat(
-				ctx,
-				messagesForCall,
-				toolDefsForCall,
-				exec.llmModel,
-				exec.llmOpts,
-			)
-			if err == nil && fallbackResponse != nil {
-				exec.streamingFallback = true
-			}
-			return fallbackResponse, true, err
-		}
-	}
-	if streamErr != nil {
-		if !publisher.Published() && !nativeToolFeedbackPublished {
-			logger.WarnCF("agent", "ChatStream failed before visible output; retrying with Chat", map[string]any{
-				"agent_id": ts.agent.ID,
-				"channel":  ts.channel,
-				"model":    exec.llmModel,
 				"error":    streamErr.Error(),
-			})
+			}
+			if !retryPrimaryChat {
+				logger.WarnCF("agent", "ChatStream failed before visible output; continuing fallback chain", logFields)
+				publisher.Cancel(ctx)
+				return nil, true, streamErr
+			}
+			logger.WarnCF("agent", "ChatStream failed before visible output; retrying with Chat", logFields)
 			publisher.Cancel(ctx)
 			fallbackResponse, err := exec.activeProvider.Chat(
 				ctx,
@@ -173,7 +172,7 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 			}
 			return fallbackResponse, true, err
 		}
-		return nil, true, configuredStreamingVisibleError{err: streamErr}
+		return nil, true, providers.AbortFallback(configuredStreamingVisibleError{err: streamErr})
 	}
 
 	if response != nil {
@@ -232,6 +231,15 @@ func (e configuredStreamingVisibleError) Unwrap() error {
 	return e.err
 }
 
+func firstError(errs ...error) error {
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func isConfiguredStreamingVisibleError(err error) bool {
 	var visibleErr configuredStreamingVisibleError
 	return errors.As(err, &visibleErr)
@@ -249,7 +257,7 @@ func finalizeConfiguredStreamingLLM(
 	}
 	publisher := exec.streamingPublisher
 	exec.streamingPublisher = nil
-	visibleBeforeFinalize := publisher.Published()
+	visibleBeforeFinalize := publisher.UserVisible()
 	if err := publisher.Finalize(ctx, content, contextUsage); err != nil {
 		if visibleBeforeFinalize {
 			logger.WarnCF("agent", "stream final flush failed after visible output", map[string]any{
@@ -267,7 +275,7 @@ func finalizeConfiguredStreamingLLM(
 			"model":    exec.llmModel,
 			"error":    err.Error(),
 		})
-		return err
+		return configuredStreamingVisibleError{err: err}
 	}
 	return nil
 }
@@ -305,16 +313,6 @@ func (p *Pipeline) configuredStreamingEligible(ts *turnState, exec *turnExecutio
 			"chat_id":  ts.chatID,
 			"model":    exec.activeModel,
 			"reason":   "turn_output_disabled",
-		})
-		return false
-	}
-	if len(exec.activeCandidates) != 1 {
-		logger.DebugCF("agent", "configured streaming not used", map[string]any{
-			"agent_id":   ts.agent.ID,
-			"channel":    ts.channel,
-			"model":      exec.activeModel,
-			"candidates": len(exec.activeCandidates),
-			"reason":     "fallback_candidates_enabled",
 		})
 		return false
 	}
@@ -452,6 +450,10 @@ func (p *streamingChunkPublisher) Published() bool {
 
 func (p *streamingChunkPublisher) ReasoningPublished() bool {
 	return p != nil && p.reasoningPublished
+}
+
+func (p *streamingChunkPublisher) UserVisible() bool {
+	return p != nil && (p.published || p.reasoningPublished)
 }
 
 func (p *streamingChunkPublisher) Err() error {

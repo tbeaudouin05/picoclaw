@@ -271,6 +271,13 @@ func (fc *FallbackChain) ExecuteCandidate(
 			return nil, context.Canceled
 		}
 
+		// Some callback failures are terminal orchestration/delivery errors, not
+		// provider failures. Return them unchanged without classification,
+		// cooldown mutation, or trying another candidate.
+		if isFallbackAbortError(err) {
+			return nil, err
+		}
+
 		// Classify the error.
 		failErr := ClassifyError(err, candidate.Provider, candidate.Model)
 
@@ -413,6 +420,13 @@ func (fc *FallbackChain) ExecuteImageCandidate(
 			return nil, context.Canceled
 		}
 
+		// Some callback failures are terminal orchestration/delivery errors, not
+		// provider failures. Return them unchanged without classification or
+		// trying another candidate.
+		if isFallbackAbortError(err) {
+			return nil, err
+		}
+
 		// Image dimension/size errors are non-retriable.
 		errMsg := strings.ToLower(err.Error())
 		if IsImageDimensionError(errMsg) || IsImageSizeError(errMsg) {
@@ -451,6 +465,28 @@ func (fc *FallbackChain) ExecuteImageCandidate(
 	}
 
 	return nil, &FallbackExhaustedError{Attempts: result.Attempts}
+}
+
+type fallbackAbortError struct {
+	err error
+}
+
+func (e *fallbackAbortError) Error() string { return e.err.Error() }
+func (e *fallbackAbortError) Unwrap() error { return e.err }
+
+// AbortFallback marks a non-provider orchestration error as terminal for the
+// chat fallback chain. Callers should use it only after work outside a provider
+// request (for example, channel delivery) has failed.
+func AbortFallback(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &fallbackAbortError{err: err}
+}
+
+func isFallbackAbortError(err error) bool {
+	var terminal *fallbackAbortError
+	return errors.As(err, &terminal)
 }
 
 func nextFallbackCandidate(candidates []FallbackCandidate, index int) *FallbackCandidate {

@@ -73,6 +73,32 @@ func TestFallback_SecondCandidateSuccess(t *testing.T) {
 	}
 }
 
+type abortFallbackLikeError struct{}
+
+func (abortFallbackLikeError) Error() string       { return "rate limit exceeded" }
+func (abortFallbackLikeError) AbortFallback() bool { return true }
+
+func TestFallback_AbortFallbackLikeMethodStillUsesNormalClassification(t *testing.T) {
+	fc := NewFallbackChain(NewCooldownTracker(), nil)
+	attempts := 0
+	result, err := fc.ExecuteCandidate(context.Background(), []FallbackCandidate{
+		makeCandidate("openai", "primary"),
+		makeCandidate("anthropic", "fallback"),
+	}, func(context.Context, FallbackCandidate) (*LLMResponse, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, abortFallbackLikeError{}
+		}
+		return &LLMResponse{Content: "fallback response"}, nil
+	})
+	if err != nil {
+		t.Fatalf("ExecuteCandidate() error = %v", err)
+	}
+	if attempts != 2 || result.Response.Content != "fallback response" {
+		t.Fatalf("attempts = %d, response = %#v; want classified fallback success", attempts, result.Response)
+	}
+}
+
 func TestFallback_AllFail(t *testing.T) {
 	ct := NewCooldownTracker()
 	fc := NewFallbackChain(ct, nil)
@@ -581,6 +607,29 @@ func TestImageFallbackCandidate_PreservesConfigIdentity(t *testing.T) {
 	}
 	if result.IdentityKey != candidates[1].StableKey() {
 		t.Fatalf("IdentityKey = %q, want %q", result.IdentityKey, candidates[1].StableKey())
+	}
+}
+
+func TestExecuteImageCandidate_AbortFallbackDoesNotTryNextCandidate(t *testing.T) {
+	fc := NewFallbackChain(NewCooldownTracker(), nil)
+	abortErr := AbortFallback(errors.New("image delivery failed"))
+	attempts := 0
+
+	_, err := fc.ExecuteImageCandidate(context.Background(), []FallbackCandidate{
+		makeCandidate("openai", "primary-image"),
+		makeCandidate("anthropic", "fallback-image"),
+	}, func(context.Context, FallbackCandidate) (*LLMResponse, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, abortErr
+		}
+		return &LLMResponse{Content: "must not be used"}, nil
+	})
+	if err != abortErr {
+		t.Fatalf("ExecuteImageCandidate() error = %v, want unchanged abort error", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
 	}
 }
 

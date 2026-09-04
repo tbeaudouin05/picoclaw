@@ -152,10 +152,11 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 	reasoningContent string,
 	content string,
 	toolCalls []providers.ToolCall,
-) bool {
+) (bool, error) {
 	if ts == nil || ts.chatID == "" || al == nil || al.bus == nil {
-		return false
+		return false, nil
 	}
+	var deliveryErr error
 
 	if strings.TrimSpace(reasoningContent) != "" {
 		pubCtx, pubCancel := context.WithTimeout(ctx, 3*time.Second)
@@ -171,6 +172,9 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 			),
 		)
 		pubCancel()
+		if err != nil {
+			deliveryErr = err
+		}
 		if err != nil && !errors.Is(err, context.DeadlineExceeded) &&
 			!errors.Is(err, context.Canceled) &&
 			!errors.Is(err, bus.ErrBusClosed) {
@@ -183,7 +187,7 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 	}
 
 	if !ts.opts.AllowInterimPicoPublish {
-		return false
+		return false, deliveryErr
 	}
 
 	visibleToolCalls := utils.BuildVisibleToolCalls(
@@ -202,6 +206,9 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 			}),
 		)
 		pubCancel()
+		if deliveryErr == nil && err != nil {
+			deliveryErr = err
+		}
 		if err != nil && !errors.Is(err, context.DeadlineExceeded) &&
 			!errors.Is(err, context.Canceled) &&
 			!errors.Is(err, bus.ErrBusClosed) {
@@ -214,7 +221,7 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 	}
 
 	if len(visibleToolCalls) == 0 {
-		return false
+		return false, deliveryErr
 	}
 
 	rawToolCalls, err := json.Marshal(visibleToolCalls)
@@ -224,7 +231,7 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 			"chat_id": ts.chatID,
 			"error":   err.Error(),
 		})
-		return false
+		return false, deliveryErr
 	}
 
 	msg := outboundMessageForTurnWithOptions(ts, "", outboundTurnMessageOptions{
@@ -247,7 +254,10 @@ func (al *AgentLoop) publishPicoToolCallInterim(
 			"error":   err.Error(),
 		})
 	}
-	return err == nil
+	if deliveryErr == nil && err != nil {
+		deliveryErr = err
+	}
+	return err == nil, deliveryErr
 }
 
 // publishNativeToolCallFeedback renders native provider tool-call activity as
@@ -258,16 +268,17 @@ func (al *AgentLoop) publishNativeToolCallFeedback(
 	ts *turnState,
 	modelName string,
 	toolCalls []providers.ToolCall,
-) bool {
+) (bool, error) {
 	if ts == nil || ts.chatID == "" || al == nil || al.bus == nil || len(toolCalls) == 0 {
-		return false
+		return false, nil
 	}
 	if !shouldPublishToolFeedback(al.cfg, ts) {
-		return false
+		return false, nil
 	}
 
 	maxArgsLen := al.cfg.Agents.Defaults.GetToolFeedbackMaxArgsLength()
 	published := false
+	var deliveryErr error
 	for _, tc := range toolCalls {
 		name, _ := utils.VisibleToolCallNameAndArguments(tc)
 		argsPreview := utils.VisibleToolCallArgumentsPreview(tc, maxArgsLen)
@@ -287,6 +298,9 @@ func (al *AgentLoop) publishNativeToolCallFeedback(
 		}))
 		pubCancel()
 		if err != nil {
+			if deliveryErr == nil {
+				deliveryErr = err
+			}
 			if !errors.Is(err, context.DeadlineExceeded) &&
 				!errors.Is(err, context.Canceled) &&
 				!errors.Is(err, bus.ErrBusClosed) {
@@ -300,7 +314,7 @@ func (al *AgentLoop) publishNativeToolCallFeedback(
 		}
 		published = true
 	}
-	return published
+	return published, deliveryErr
 }
 
 func (al *AgentLoop) handleReasoning(

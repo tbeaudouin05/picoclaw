@@ -22,9 +22,10 @@ type configuredStreamingProvider struct {
 	chatModels   []string
 	streamModels []string
 
-	chatResponse *providers.LLMResponse
-	streamPlan   []configuredStreamingCall
-	eventPlan    []configuredStreamingEventCall
+	chatResponse  *providers.LLMResponse
+	chatResponses map[string]*providers.LLMResponse
+	streamPlan    []configuredStreamingCall
+	eventPlan     []configuredStreamingEventCall
 }
 
 type configuredStreamingCall struct {
@@ -48,6 +49,9 @@ func (p *configuredStreamingProvider) Chat(
 ) (*providers.LLMResponse, error) {
 	p.chatCalls++
 	p.chatModels = append(p.chatModels, model)
+	if response := p.chatResponses[model]; response != nil {
+		return response, nil
+	}
 	if p.chatResponse != nil {
 		return p.chatResponse, nil
 	}
@@ -330,14 +334,14 @@ func TestConfiguredStreamingEligibilityGates(t *testing.T) {
 			wantChatCalls:    1,
 		},
 		{
-			name:              "multi candidate fallback uses chat",
+			name:              "multi candidate fallback streams primary",
 			channel:           "pico",
 			channelStreaming:  true,
 			modelStreaming:    true,
 			fallbacks:         []string{"fallback-model"},
 			streamingProvider: true,
 			streamDelegate:    true,
-			wantChatCalls:     1,
+			wantStreamCalls:   1,
 		},
 		{
 			name:              "missing streamer uses chat",
@@ -414,6 +418,178 @@ func TestConfiguredStreamingPreChunkFailureFallsBackToChat(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("expected fallback outbound after pre-chunk stream failure")
+	}
+}
+
+func TestConfiguredStreamingWithFallbackCandidatesStreamsPrimary(t *testing.T) {
+	cfg := newConfiguredStreamingTestConfig(t, true, true, []string{"fallback-model"})
+	streamer := &recordingStreamer{}
+	msgBus := bus.NewMessageBus()
+	msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: streamer})
+	provider := &configuredStreamingProvider{
+		streamPlan: []configuredStreamingCall{{
+			chunks:   []string{"primary partial"},
+			response: &providers.LLMResponse{Content: "primary streamed response"},
+		}},
+	}
+	al := NewAgentLoop(cfg, msgBus, provider)
+
+	got := runConfiguredStreamingTurn(t, al, "pico")
+
+	if got != "primary streamed response" {
+		t.Fatalf("response = %q, want primary streamed response", got)
+	}
+	if provider.streamCalls != 1 || provider.chatCalls != 0 {
+		t.Fatalf("calls = stream:%d chat:%d, want stream:1 chat:0", provider.streamCalls, provider.chatCalls)
+	}
+	if len(provider.streamModels) != 1 || provider.streamModels[0] != "openai/test-model" {
+		t.Fatalf("stream models = %v, want [openai/test-model]", provider.streamModels)
+	}
+	if len(streamer.finalized) != 1 || streamer.finalized[0] != "primary streamed response" {
+		t.Fatalf("stream finalized = %v, want [primary streamed response]", streamer.finalized)
+	}
+}
+
+func TestConfiguredStreamingPreVisibleFailureContinuesFallbackChain(t *testing.T) {
+	cfg := newConfiguredStreamingTestConfig(t, true, true, []string{"fallback-model"})
+	streamer := &recordingStreamer{}
+	msgBus := bus.NewMessageBus()
+	msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: streamer})
+	provider := &configuredStreamingProvider{
+		streamPlan: []configuredStreamingCall{{
+			err: errors.New("status: 429 - primary stream rate limited"),
+		}},
+		chatResponses: map[string]*providers.LLMResponse{
+			"openai/fallback-model": {Content: "fallback response"},
+		},
+	}
+	al := NewAgentLoop(cfg, msgBus, provider)
+
+	got := runConfiguredStreamingTurn(t, al, "pico")
+
+	if got != "fallback response" {
+		t.Fatalf("response = %q, want fallback response", got)
+	}
+	if provider.streamCalls != 1 || provider.chatCalls != 1 {
+		t.Fatalf("calls = stream:%d chat:%d, want stream:1 chat:1", provider.streamCalls, provider.chatCalls)
+	}
+	if len(provider.chatModels) != 1 || provider.chatModels[0] != "openai/fallback-model" {
+		t.Fatalf("chat models = %v, want [openai/fallback-model]", provider.chatModels)
+	}
+	if streamer.canceled != 1 {
+		t.Fatalf("streamer canceled = %d, want 1", streamer.canceled)
+	}
+}
+
+func TestConfiguredStreamingVisibleFailureDoesNotUseFallbackCandidate(t *testing.T) {
+	cfg := newConfiguredStreamingTestConfig(t, true, true, []string{"fallback-model"})
+	streamer := &recordingStreamer{}
+	msgBus := bus.NewMessageBus()
+	msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: streamer})
+	provider := &configuredStreamingProvider{
+		streamPlan: []configuredStreamingCall{{
+			chunks: []string{"visible primary output"},
+			err:    errors.New("status: 429 - stream failed after output"),
+		}},
+		chatResponses: map[string]*providers.LLMResponse{
+			"openai/fallback-model": {Content: "must not be used"},
+		},
+	}
+	al := NewAgentLoop(cfg, msgBus, provider)
+
+	_, err := al.runAgentLoop(
+		context.Background(),
+		al.GetRegistry().GetDefaultAgent(),
+		configuredStreamingProcessOptions("pico"),
+	)
+	if err == nil {
+		t.Fatal("expected visible stream failure to return an error")
+	}
+	if provider.streamCalls != 1 || provider.chatCalls != 0 {
+		t.Fatalf("calls = stream:%d chat:%d, want stream:1 chat:0", provider.streamCalls, provider.chatCalls)
+	}
+	if len(streamer.updates) != 1 || streamer.updates[0] != "visible primary output" {
+		t.Fatalf("stream updates = %v, want [visible primary output]", streamer.updates)
+	}
+	if streamer.canceled != 0 {
+		t.Fatalf("streamer canceled = %d, want 0", streamer.canceled)
+	}
+}
+
+func TestConfiguredStreamingReasoningVisibleFailureDoesNotUseFallbackCandidate(t *testing.T) {
+	cfg := newConfiguredStreamingTestConfig(t, true, true, []string{"fallback-model"})
+	streamer := &recordingStreamer{}
+	msgBus := bus.NewMessageBus()
+	msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: streamer})
+	provider := &configuredStreamingProvider{
+		eventPlan: []configuredStreamingEventCall{{
+			chunks: []providers.StreamChunk{{ReasoningContent: "visible reasoning"}},
+			err:    errors.New("status: 429 - stream failed after reasoning"),
+		}},
+		chatResponses: map[string]*providers.LLMResponse{
+			"openai/fallback-model": {Content: "must not be used"},
+		},
+	}
+	al := NewAgentLoop(cfg, msgBus, provider)
+
+	_, err := al.runAgentLoop(context.Background(), al.GetRegistry().GetDefaultAgent(), configuredStreamingProcessOptions("pico"))
+	if err == nil {
+		t.Fatal("expected stream failure after visible reasoning")
+	}
+	if provider.streamCalls != 1 || provider.chatCalls != 0 {
+		t.Fatalf("calls = stream:%d chat:%d, want stream:1 chat:0", provider.streamCalls, provider.chatCalls)
+	}
+	if len(streamer.reasoningUpdates) != 1 || streamer.reasoningUpdates[0] != "visible reasoning" {
+		t.Fatalf("reasoning updates = %v, want [visible reasoning]", streamer.reasoningUpdates)
+	}
+}
+
+func TestConfiguredStreamingPrimaryParticipatesInFallbackRoutingLimits(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		setup func(*providers.CooldownTracker, *providers.RateLimiterRegistry, string)
+	}{
+		{
+			name: "cooldown",
+			setup: func(cooldown *providers.CooldownTracker, _ *providers.RateLimiterRegistry, key string) {
+				cooldown.MarkFailure(key, providers.FailoverRateLimit)
+			},
+		},
+		{
+			name: "rpm token",
+			setup: func(_ *providers.CooldownTracker, rateLimits *providers.RateLimiterRegistry, key string) {
+				rateLimits.Register(key, 1)
+				if !rateLimits.TryAcquire(key) {
+					t.Fatal("failed to consume initial rate-limit token")
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := newConfiguredStreamingTestConfig(t, true, true, []string{"fallback-model"})
+			msgBus := bus.NewMessageBus()
+			msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: &recordingStreamer{}})
+			provider := &configuredStreamingProvider{chatResponses: map[string]*providers.LLMResponse{
+				"openai/fallback-model": {Content: "fallback response"},
+			}}
+			al := NewAgentLoop(cfg, msgBus, provider)
+			agent := al.GetRegistry().GetDefaultAgent()
+			if len(agent.Candidates) < 2 {
+				t.Fatalf("candidates = %v, want primary and fallback", agent.Candidates)
+			}
+			cooldown := providers.NewCooldownTracker()
+			rateLimits := providers.NewRateLimiterRegistry()
+			test.setup(cooldown, rateLimits, agent.Candidates[0].StableKey())
+			al.fallback = providers.NewFallbackChain(cooldown, rateLimits)
+
+			got := runConfiguredStreamingTurn(t, al, "pico")
+			if got != "fallback response" {
+				t.Fatalf("response = %q, want fallback response", got)
+			}
+			if provider.streamCalls != 0 || provider.chatCalls != 1 {
+				t.Fatalf("calls = stream:%d chat:%d, want stream:0 chat:1", provider.streamCalls, provider.chatCalls)
+			}
+		})
 	}
 }
 
@@ -676,6 +852,42 @@ func TestConfiguredStreamingNativeToolFeedbackThenUpdateErrorDoesNotFallBackToCh
 	}
 }
 
+func TestConfiguredStreamingNativeToolFeedbackDeliveryFailureIsTerminal(t *testing.T) {
+	for _, channel := range []string{"pico", "telegram"} {
+		t.Run(channel, func(t *testing.T) {
+			cfg := newConfiguredStreamingTestConfig(t, true, true, []string{"fallback-model"})
+			msgBus := bus.NewMessageBus()
+			msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: &recordingStreamer{}})
+			msgBus.Close()
+			provider := &configuredStreamingProvider{
+				eventPlan: []configuredStreamingEventCall{{
+					chunks: []providers.StreamChunk{{ToolCalls: []providers.ToolCall{{
+						ID:        "toolu_1",
+						Type:      "function",
+						Name:      "Bash",
+						Arguments: map[string]any{"command": "touch side-effect"},
+					}}}},
+					err: errors.New("provider failed after native tool delivery"),
+				}},
+				chatResponse: &providers.LLMResponse{Content: "must not be used"},
+			}
+			al := NewAgentLoop(cfg, msgBus, provider)
+
+			_, err := al.runAgentLoop(
+				context.Background(),
+				al.GetRegistry().GetDefaultAgent(),
+				configuredStreamingProcessOptions(channel),
+			)
+			if !errors.Is(err, bus.ErrBusClosed) {
+				t.Fatalf("error = %v, want native tool delivery error", err)
+			}
+			if provider.streamCalls != 1 || provider.chatCalls != 0 {
+				t.Fatalf("calls = stream:%d chat:%d, want stream:1 chat:0", provider.streamCalls, provider.chatCalls)
+			}
+		})
+	}
+}
+
 func TestConfiguredStreamingSuppressesPicoReasoningWhenThinkingOff(t *testing.T) {
 	cfg := newConfiguredStreamingTestConfig(t, true, true, nil)
 	cfg.ModelList[0].ThinkingLevel = "off"
@@ -747,7 +959,7 @@ func TestConfiguredStreamingFinalFlushFailureAfterVisibleOutputReturnsErrorWitho
 	}
 }
 
-func TestConfiguredStreamingFinalFlushFailureBeforeVisibleOutputPublishesFallback(t *testing.T) {
+func TestConfiguredStreamingFinalFlushFailureBeforeVisibleOutputIsTerminal(t *testing.T) {
 	cfg := newConfiguredStreamingTestConfig(t, true, true, nil)
 	streamer := &failingFinalizeStreamer{err: errors.New("final failed")}
 	msgBus := bus.NewMessageBus()
@@ -759,28 +971,21 @@ func TestConfiguredStreamingFinalFlushFailureBeforeVisibleOutputPublishesFallbac
 	}
 	al := NewAgentLoop(cfg, msgBus, provider)
 
-	got := runConfiguredStreamingTurn(t, al, "pico")
-
-	if got != "stream response" {
-		t.Fatalf("response = %q, want stream response", got)
+	_, err := al.runAgentLoop(context.Background(), al.GetRegistry().GetDefaultAgent(), configuredStreamingProcessOptions("pico"))
+	if err == nil {
+		t.Fatal("expected final delivery failure to return an error")
 	}
 	select {
 	case outbound := <-msgBus.OutboundChan():
-		if outbound.Content != "stream response" {
-			t.Fatalf("fallback outbound content = %q, want stream response", outbound.Content)
-		}
-		if got := outbound.Context.Raw["model_name"]; got != "test-model" {
-			t.Fatalf("fallback outbound model_name = %q, want %q", got, "test-model")
-		}
-	case <-time.After(time.Second):
-		t.Fatal("expected fallback outbound after invisible final stream flush failure")
+		t.Fatalf("unexpected fallback outbound after final delivery failure: %#v", outbound)
+	default:
 	}
 	if streamer.canceled != 1 {
 		t.Fatalf("streamer canceled = %d, want 1", streamer.canceled)
 	}
 }
 
-func TestConfiguredStreamingFinalFlushFailureBeforeVisibleOutputKeepsNormalOutbound(t *testing.T) {
+func TestConfiguredStreamingFinalFlushFailureWithNormalOutboundIsTerminal(t *testing.T) {
 	cfg := newConfiguredStreamingTestConfig(t, true, true, nil)
 	streamer := &failingFinalizeStreamer{err: errors.New("final failed")}
 	msgBus := bus.NewMessageBus()
@@ -794,28 +999,22 @@ func TestConfiguredStreamingFinalFlushFailureBeforeVisibleOutputKeepsNormalOutbo
 	opts := configuredStreamingProcessOptions("pico")
 	opts.SendResponse = true
 
-	got, err := al.runAgentLoop(context.Background(), al.GetRegistry().GetDefaultAgent(), opts)
-	if err != nil {
-		t.Fatalf("runAgentLoop() error = %v", err)
-	}
-	if got != "stream response" {
-		t.Fatalf("response = %q, want stream response", got)
+	_, err := al.runAgentLoop(context.Background(), al.GetRegistry().GetDefaultAgent(), opts)
+	if err == nil {
+		t.Fatal("expected final delivery failure to return an error")
 	}
 	select {
 	case outbound := <-msgBus.OutboundChan():
-		if outbound.Content != "stream response" {
-			t.Fatalf("normal outbound content = %q, want stream response", outbound.Content)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("expected normal outbound after invisible final stream flush failure")
+		t.Fatalf("unexpected normal outbound after final delivery failure: %#v", outbound)
+	default:
 	}
 	if streamer.canceled != 1 {
 		t.Fatalf("streamer canceled = %d, want 1", streamer.canceled)
 	}
 }
 
-func TestConfiguredStreamingUpdateFailureThenStreamErrorFallsBackToChat(t *testing.T) {
-	cfg := newConfiguredStreamingTestConfig(t, true, true, nil)
+func TestConfiguredStreamingUpdateFailureThenStreamErrorIsTerminal(t *testing.T) {
+	cfg := newConfiguredStreamingTestConfig(t, true, true, []string{"fallback-model"})
 	msgBus := bus.NewMessageBus()
 	streamer := &failingUpdateStreamer{err: errors.New("draft failed")}
 	msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: streamer})
@@ -828,28 +1027,24 @@ func TestConfiguredStreamingUpdateFailureThenStreamErrorFallsBackToChat(t *testi
 	}
 	al := NewAgentLoop(cfg, msgBus, provider)
 
-	got := runConfiguredStreamingTurn(t, al, "pico")
-
-	if got != "chat fallback after invisible update" {
-		t.Fatalf("response = %q, want chat fallback", got)
+	_, err := al.runAgentLoop(context.Background(), al.GetRegistry().GetDefaultAgent(), configuredStreamingProcessOptions("pico"))
+	if err == nil || !strings.Contains(err.Error(), "draft failed") {
+		t.Fatalf("error = %v, want delivery error", err)
 	}
-	if provider.streamCalls != 1 || provider.chatCalls != 1 {
-		t.Fatalf("calls = stream:%d chat:%d, want stream:1 chat:1", provider.streamCalls, provider.chatCalls)
+	if provider.streamCalls != 1 || provider.chatCalls != 0 {
+		t.Fatalf("calls = stream:%d chat:%d, want stream:1 chat:0", provider.streamCalls, provider.chatCalls)
 	}
 	if streamer.canceled != 1 {
 		t.Fatalf("streamer canceled = %d, want 1", streamer.canceled)
 	}
 	select {
 	case outbound := <-msgBus.OutboundChan():
-		if outbound.Content != "chat fallback after invisible update" {
-			t.Fatalf("fallback outbound content = %q, want chat fallback after invisible update", outbound.Content)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("expected fallback outbound after update failure and stream error")
+		t.Fatalf("unexpected fallback outbound after delivery failure: %#v", outbound)
+	default:
 	}
 }
 
-func TestConfiguredStreamingUpdateFailureThenStreamSuccessFallsBackToChat(t *testing.T) {
+func TestConfiguredStreamingUpdateFailureThenStreamSuccessIsTerminal(t *testing.T) {
 	cfg := newConfiguredStreamingTestConfig(t, true, true, nil)
 	msgBus := bus.NewMessageBus()
 	streamer := &failingUpdateStreamer{err: errors.New("draft failed")}
@@ -863,24 +1058,20 @@ func TestConfiguredStreamingUpdateFailureThenStreamSuccessFallsBackToChat(t *tes
 	}
 	al := NewAgentLoop(cfg, msgBus, provider)
 
-	got := runConfiguredStreamingTurn(t, al, "pico")
-
-	if got != "chat fallback after invisible update" {
-		t.Fatalf("response = %q, want chat fallback", got)
+	_, err := al.runAgentLoop(context.Background(), al.GetRegistry().GetDefaultAgent(), configuredStreamingProcessOptions("pico"))
+	if err == nil {
+		t.Fatal("expected delivery failure after provider success to return an error")
 	}
-	if provider.streamCalls != 1 || provider.chatCalls != 1 {
-		t.Fatalf("calls = stream:%d chat:%d, want stream:1 chat:1", provider.streamCalls, provider.chatCalls)
+	if provider.streamCalls != 1 || provider.chatCalls != 0 {
+		t.Fatalf("calls = stream:%d chat:%d, want stream:1 chat:0", provider.streamCalls, provider.chatCalls)
 	}
 	if len(streamer.finalized) != 0 {
 		t.Fatalf("stream finalized = %v, want none", streamer.finalized)
 	}
 	select {
 	case outbound := <-msgBus.OutboundChan():
-		if outbound.Content != "chat fallback after invisible update" {
-			t.Fatalf("fallback outbound content = %q, want chat fallback after invisible update", outbound.Content)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("expected fallback outbound after update failure and stream success")
+		t.Fatalf("unexpected fallback outbound after delivery failure: %#v", outbound)
+	default:
 	}
 }
 

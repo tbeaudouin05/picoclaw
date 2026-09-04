@@ -215,20 +215,17 @@ func (p *Pipeline) CallLLM(
 		)
 		defer close(watchdogDone)
 
-		if response, handled, streamErr := p.tryConfiguredStreamingLLM(
-			providerCtx,
-			ts,
-			exec,
-			messagesForCall,
-			toolDefsForCall,
-		); handled {
-			return response, streamErr
-		}
-
 		runCandidate := func(
 			ctx context.Context,
 			candidate providers.FallbackCandidate,
 		) (*providers.LLMResponse, error) {
+			if len(exec.activeCandidates) > 0 && candidate.StableKey() == exec.activeCandidates[0].StableKey() {
+				if response, handled, err := p.tryConfiguredStreamingLLM(
+					ctx, ts, exec, messagesForCall, toolDefsForCall, false,
+				); handled {
+					return response, err
+				}
+			}
 			candidateProvider, err := providerForFallbackCandidate(
 				ts.agent,
 				exec.activeProvider,
@@ -316,6 +313,11 @@ func (p *Pipeline) CallLLM(
 				break
 			}
 			return fbResult.Response, nil
+		}
+		if response, handled, err := p.tryConfiguredStreamingLLM(
+			providerCtx, ts, exec, messagesForCall, toolDefsForCall, true,
+		); handled {
+			return response, err
 		}
 		return exec.activeProvider.Chat(providerCtx, messagesForCall, toolDefsForCall, exec.llmModel, exec.llmOpts)
 	}
@@ -740,7 +742,7 @@ func (p *Pipeline) CallLLM(
 		ts.ingestMessage(turnCtx, al, assistantMsg)
 	}
 	if shouldPublishPicoToolCallInterim {
-		al.publishPicoToolCallInterim(
+		_, _ = al.publishPicoToolCallInterim(
 			turnCtx,
 			ts,
 			exec.llmModelName,
