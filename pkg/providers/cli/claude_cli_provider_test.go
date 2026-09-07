@@ -180,6 +180,30 @@ func TestChat_Success(t *testing.T) {
 	}
 }
 
+func TestChat_PassesRestrictedNativeToolPolicy(t *testing.T) {
+	argsFile := filepath.Join(t.TempDir(), "args.txt")
+	p := NewClaudeCliProvider(t.TempDir())
+	p.command = createArgCaptureCLI(t, argsFile)
+
+	if _, err := p.Chat(context.Background(), []Message{{Role: "user", Content: "Hi"}}, nil, "", nil); err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+
+	argsBytes, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("failed to read args file: %v", err)
+	}
+	args := strings.Fields(string(argsBytes))
+	for _, flag := range []string{"--restricted", "--strict-mcp-config"} {
+		if !cliArgPresent(args, flag) {
+			t.Errorf("CLI args missing %q: %s", flag, strings.Join(args, " "))
+		}
+	}
+	if got := cliArgValue(t, args, "--tools"); got != "Read,Glob,Grep,LS,WebFetch,WebSearch" {
+		t.Errorf("--tools = %q, want %q", got, "Read,Glob,Grep,LS,WebFetch,WebSearch")
+	}
+}
+
 func TestChat_IsErrorResponse(t *testing.T) {
 	mockJSON := `{"type":"result","subtype":"error","is_error":true,"result":"Rate limit exceeded","session_id":"s1","total_cost_usd":0}`
 	script := createMockCLI(t, mockJSON, "", 0)
@@ -620,6 +644,38 @@ func TestChatStreamEvents_PassesStreamingArguments(t *testing.T) {
 			t.Errorf("CLI args missing %q, got: %s", want, args)
 		}
 	}
+	argFields := strings.Fields(args)
+	for _, flag := range []string{"--restricted", "--strict-mcp-config"} {
+		if !cliArgPresent(argFields, flag) {
+			t.Errorf("CLI args missing %q: %s", flag, args)
+		}
+	}
+	if got := cliArgValue(t, argFields, "--tools"); got != "Read,Glob,Grep,LS,WebFetch,WebSearch" {
+		t.Errorf("--tools = %q, want %q", got, "Read,Glob,Grep,LS,WebFetch,WebSearch")
+	}
+}
+
+func cliArgPresent(args []string, flag string) bool {
+	for _, arg := range args {
+		if arg == flag {
+			return true
+		}
+	}
+	return false
+}
+
+func cliArgValue(t *testing.T, args []string, flag string) string {
+	t.Helper()
+	for i, arg := range args {
+		if arg == flag {
+			if i+1 == len(args) {
+				t.Fatalf("CLI arg %q has no value", flag)
+			}
+			return args[i+1]
+		}
+	}
+	t.Fatalf("CLI args missing %q: %s", flag, strings.Join(args, " "))
+	return ""
 }
 
 // --- messagesToPrompt tests ---

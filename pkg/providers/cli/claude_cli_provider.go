@@ -12,6 +12,19 @@ import (
 	"github.com/sipeed/picoclaw/pkg/isolation"
 )
 
+const claudeAllowedNativeTools = "Read,Glob,Grep,LS,WebFetch,WebSearch"
+
+// claudeNativeToolPolicyArgs confines Claude's native tools to a closed,
+// read/search-only built-in allowlist. PicoClaw tools remain available through
+// the text protocol in the system prompt.
+func claudeNativeToolPolicyArgs() []string {
+	return []string{
+		"--restricted",
+		"--strict-mcp-config",
+		"--tools", claudeAllowedNativeTools,
+	}
+}
+
 // ClaudeCliProvider implements LLMProvider using the claude CLI as a subprocess.
 type ClaudeCliProvider struct {
 	command   string
@@ -33,9 +46,8 @@ func (p *ClaudeCliProvider) Chat(
 	systemPrompt := p.buildSystemPrompt(messages, tools)
 	prompt := p.messagesToPrompt(messages)
 
-	// Claude CLI rejects --dangerously-skip-permissions when PicoClaw runs as root.
-	// Root-safe permission allowlists are configured narrowly in /root/.claude/settings.json.
 	args := []string{"-p", "--output-format", "json", "--no-chrome"}
+	args = append(args, claudeNativeToolPolicyArgs()...)
 	if systemPrompt != "" {
 		args = append(args, "--system-prompt", systemPrompt)
 	}
@@ -105,6 +117,7 @@ func (p *ClaudeCliProvider) ChatStreamEvents(
 	prompt := p.messagesToPrompt(messages)
 
 	args := []string{"-p", "--verbose", "--output-format", "stream-json", "--include-partial-messages", "--no-chrome"}
+	args = append(args, claudeNativeToolPolicyArgs()...)
 	if systemPrompt != "" {
 		args = append(args, "--system-prompt", systemPrompt)
 	}
