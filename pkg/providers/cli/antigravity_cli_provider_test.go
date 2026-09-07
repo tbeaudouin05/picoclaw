@@ -61,8 +61,15 @@ func TestAntigravityCliChatUsesSafeScopedInvocationAndTextProtocol(t *testing.T)
 	if err != nil {
 		t.Fatalf("Chat() error = %v", err)
 	}
-	if resp.FinishReason != "tool_calls" || len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Name != "cron" {
-		t.Fatalf("response = %#v, want only advertised cron call", resp)
+	if resp.FinishReason != "tool_calls" || len(resp.ToolCalls) != 2 || resp.ToolCalls[0].Name != "cron" {
+		t.Fatalf("response = %#v, want advertised cron and corrective terminal calls", resp)
+	}
+	if resp.ToolCalls[0].NonExecutableReason != "" {
+		t.Fatalf("advertised cron call marked non-executable: %#v", resp.ToolCalls[0])
+	}
+	if resp.ToolCalls[1].ID != "call_bad" || resp.ToolCalls[1].Name != "terminal" ||
+		resp.ToolCalls[1].NonExecutableReason == "" {
+		t.Fatalf("native terminal call = %#v, want correlated corrective call", resp.ToolCalls[1])
 	}
 	if resp.Content != "" {
 		t.Fatalf("Content = %q, want empty terminal tool call response", resp.Content)
@@ -125,7 +132,34 @@ func TestAntigravityCliParseResponseDoesNotExecuteProseEmbeddedTextCall(t *testi
 	}
 }
 
-func TestAntigravityCliChatDoesNotExecuteUnadvertisedTextCall(t *testing.T) {
+func TestAntigravityCliParseResponseReturnsExactUnknownTerminalCall(t *testing.T) {
+	const result = `{"tool_calls":[{"id":"call_missing","type":"function","function":{"name":"missing_tool","arguments":"{\"path\":\"notes.txt\",\"limit\":3}"}}]}`
+	p := NewAntigravityCliProvider("")
+	resp, err := p.parseResponse(fmt.Sprintf(`{"result":%q}`, result), []ToolDefinition{{
+		Type: "function", Function: ToolFunctionDefinition{Name: "cron"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.FinishReason != "tool_calls" || resp.Content != "" || len(resp.ToolCalls) != 1 {
+		t.Fatalf("response = %#v, want one terminal tool call", resp)
+	}
+	call := resp.ToolCalls[0]
+	if call.ID != "call_missing" || call.Name != "missing_tool" {
+		t.Fatalf("tool call = %#v, want preserved ID and name", call)
+	}
+	if call.NonExecutableReason != `requested tool "missing_tool" is not available for this request; use only advertised PicoClaw tools` {
+		t.Fatalf("NonExecutableReason = %q", call.NonExecutableReason)
+	}
+	if call.Function == nil || call.Function.Arguments != `{"path":"notes.txt","limit":3}` {
+		t.Fatalf("tool call function = %#v, want preserved arguments", call.Function)
+	}
+	if call.Arguments["path"] != "notes.txt" || call.Arguments["limit"] != float64(3) {
+		t.Fatalf("tool call arguments = %#v, want decoded arguments", call.Arguments)
+	}
+}
+
+func TestAntigravityCliChatMarksNativeTerminalCallNonExecutable(t *testing.T) {
 	stateDir := t.TempDir()
 	p := NewAntigravityCliProvider(t.TempDir())
 	p.command = createMockAntigravityCLI(t,
@@ -138,8 +172,11 @@ func TestAntigravityCliChatDoesNotExecuteUnadvertisedTextCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.FinishReason != "stop" || len(resp.ToolCalls) != 0 {
-		t.Fatalf("response = %#v, want no executable calls", resp)
+	if resp.FinishReason != "tool_calls" || len(resp.ToolCalls) != 1 {
+		t.Fatalf("response = %#v, want one corrective-feedback call", resp)
+	}
+	if resp.ToolCalls[0].ID != "native" || resp.ToolCalls[0].NonExecutableReason == "" {
+		t.Fatalf("tool call = %#v, want correlated non-executable call", resp.ToolCalls[0])
 	}
 }
 

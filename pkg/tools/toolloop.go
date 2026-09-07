@@ -162,6 +162,10 @@ func RunToolLoop(
 
 		for i, tc := range normalizedToolCalls {
 			results[i].tc = tc
+			if tc.NonExecutableReason != "" {
+				results[i].result = ErrorResult(tc.NonExecutableReason)
+				continue
+			}
 
 			wg.Add(1)
 			go func(idx int, tc providers.ToolCall) {

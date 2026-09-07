@@ -120,7 +120,7 @@ func (p *AntigravityCliProvider) parseResponse(output string, tools []ToolDefini
 		return nil, fmt.Errorf("antigravity cli returned error: %s", result.Result)
 	}
 
-	toolCalls := filterPicoClawToolCalls(extractTerminalToolCallsFromText(result.Result), tools)
+	toolCalls := filterAntigravityTerminalToolCalls(extractTerminalToolCallsFromText(result.Result), tools)
 	content := result.Result
 	finishReason := "stop"
 	if len(toolCalls) > 0 {
@@ -138,6 +138,21 @@ func (p *AntigravityCliProvider) parseResponse(output string, tools []ToolDefini
 	return &LLMResponse{
 		Content: strings.TrimSpace(content), ToolCalls: toolCalls, FinishReason: finishReason, Usage: usage,
 	}, nil
+}
+
+// filterAntigravityTerminalToolCalls marks terminal-protocol calls that were
+// not advertised for this request as non-executable. ToolLoop returns the
+// reason to agy on its next iteration without consulting ToolRegistry.
+func filterAntigravityTerminalToolCalls(toolCalls []ToolCall, tools []ToolDefinition) []ToolCall {
+	for i := range toolCalls {
+		if !isAdvertisedPicoClawTool(toolCalls[i].Name, tools) {
+			toolCalls[i].NonExecutableReason = fmt.Sprintf(
+				"requested tool %q is not available for this request; use only advertised PicoClaw tools",
+				toolCalls[i].Name,
+			)
+		}
+	}
+	return toolCalls
 }
 
 // extractTerminalToolCallsFromText accepts a text-protocol call only when the

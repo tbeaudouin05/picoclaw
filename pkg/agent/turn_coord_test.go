@@ -12,6 +12,7 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/routing"
 	"github.com/sipeed/picoclaw/pkg/session"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
 // =============================================================================
@@ -111,6 +112,81 @@ type toolCallRespProvider struct {
 	response  string
 	callCount int
 	mu        sync.Mutex
+}
+
+type nonExecutableToolCallProvider struct {
+	reason         string
+	callCount      int
+	secondMessages []providers.Message
+}
+
+func (p *nonExecutableToolCallProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	toolDefs []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	p.callCount++
+	if p.callCount == 1 {
+		return &providers.LLMResponse{
+			ToolCalls: []providers.ToolCall{{
+				ID:                  "call-hidden",
+				Name:                "hidden_tool",
+				Arguments:           map[string]any{"value": "must not execute"},
+				NonExecutableReason: p.reason,
+			}},
+			FinishReason: "tool_calls",
+		}, nil
+	}
+	p.secondMessages = append([]providers.Message(nil), messages...)
+	return &providers.LLMResponse{Content: "corrected", FinishReason: "stop"}, nil
+}
+
+func (p *nonExecutableToolCallProvider) GetDefaultModel() string {
+	return "non-executable-tool-call-model"
+}
+
+type countingHiddenTool struct {
+	executions int
+}
+
+func (t *countingHiddenTool) Name() string               { return "hidden_tool" }
+func (t *countingHiddenTool) Description() string        { return "hidden test tool" }
+func (t *countingHiddenTool) Parameters() map[string]any { return map[string]any{"type": "object"} }
+func (t *countingHiddenTool) Execute(context.Context, map[string]any) *tools.ToolResult {
+	t.executions++
+	return tools.SilentResult("executed")
+}
+
+type countingToolHooks struct {
+	beforeCalls   int
+	approvalCalls int
+	afterCalls    int
+}
+
+func (h *countingToolHooks) BeforeTool(
+	context.Context,
+	*ToolCallHookRequest,
+) (*ToolCallHookRequest, HookDecision, error) {
+	h.beforeCalls++
+	return nil, HookDecision{Action: HookActionContinue}, nil
+}
+
+func (h *countingToolHooks) ApproveTool(
+	context.Context,
+	*ToolApprovalRequest,
+) (ApprovalDecision, error) {
+	h.approvalCalls++
+	return ApprovalDecision{Approved: true}, nil
+}
+
+func (h *countingToolHooks) AfterTool(
+	context.Context,
+	*ToolResultHookResponse,
+) (*ToolResultHookResponse, HookDecision, error) {
+	h.afterCalls++
+	return nil, HookDecision{Action: HookActionContinue}, nil
 }
 
 func (p *toolCallRespProvider) Chat(
@@ -906,6 +982,62 @@ func TestPipeline_ExecuteTools_NoTools(t *testing.T) {
 		t.Fatalf("expected ControlBreak, got %v", ctrl)
 	}
 	// No tools to execute, Finalize should be called directly
+}
+
+func TestPipeline_ExecuteTools_NonExecutableHiddenToolReturnsCorrelatedFeedback(t *testing.T) {
+	const reason = `requested tool "hidden_tool" is not available for this request; use only advertised tools`
+	provider := &nonExecutableToolCallProvider{reason: reason}
+	al, agent, cleanup := newTurnCoordTestLoop(t, provider)
+	defer cleanup()
+
+	hiddenTool := &countingHiddenTool{}
+	agent.Tools.RegisterHidden(hiddenTool)
+	hooks := &countingToolHooks{}
+	if err := al.MountHook(NamedHook("count-tool-hooks", hooks)); err != nil {
+		t.Fatalf("MountHook() error = %v", err)
+	}
+
+	pipeline := NewPipeline(al)
+	ts := newTurnState(agent, makeTestProcessOpts("test-non-executable-hidden-tool"), turnEventScope{
+		turnID:  "turn-non-executable-hidden-tool",
+		context: newTurnContext(nil, nil, nil),
+	})
+	result, err := al.runTurn(context.Background(), ts, pipeline)
+	if err != nil {
+		t.Fatalf("runTurn() error = %v", err)
+	}
+	if result.finalContent != "corrected" {
+		t.Fatalf("final content = %q, want corrected", result.finalContent)
+	}
+	if provider.callCount != 2 {
+		t.Fatalf("provider calls = %d, want 2", provider.callCount)
+	}
+	if hiddenTool.executions != 0 {
+		t.Fatalf("hidden tool executions = %d, want 0", hiddenTool.executions)
+	}
+	if hooks.beforeCalls != 0 || hooks.approvalCalls != 0 || hooks.afterCalls != 0 {
+		t.Fatalf(
+			"tool hook calls = before:%d approval:%d after:%d, want all zero",
+			hooks.beforeCalls,
+			hooks.approvalCalls,
+			hooks.afterCalls,
+		)
+	}
+
+	var correlatedFeedback *providers.Message
+	for i := range provider.secondMessages {
+		msg := &provider.secondMessages[i]
+		if msg.Role == "tool" && msg.ToolCallID == "call-hidden" {
+			correlatedFeedback = msg
+			break
+		}
+	}
+	if correlatedFeedback == nil {
+		t.Fatalf("second provider iteration messages = %#v, want correlated tool feedback", provider.secondMessages)
+	}
+	if correlatedFeedback.Content != reason {
+		t.Fatalf("correlated feedback = %q, want exact reason %q", correlatedFeedback.Content, reason)
+	}
 }
 
 // =============================================================================

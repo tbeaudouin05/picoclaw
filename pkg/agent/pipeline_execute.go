@@ -129,6 +129,29 @@ toolLoop:
 			return ToolControlBreak
 		}
 
+		if tc.NonExecutableReason != "" {
+			exec.allResponsesHandled = false
+			al.emitEvent(
+				runtimeevents.KindAgentToolExecSkipped,
+				ts.eventMeta("runTurn", "turn.tool.skipped"),
+				ToolExecSkippedPayload{
+					Tool:   tc.Name,
+					Reason: tc.NonExecutableReason,
+				},
+			)
+			skippedMsg := providers.Message{
+				Role:       "tool",
+				Content:    tc.NonExecutableReason,
+				ToolCallID: tc.ID,
+			}
+			messages = append(messages, skippedMsg)
+			if !ts.opts.NoHistory {
+				ts.agent.Sessions.AddFullMessage(ts.sessionKey, skippedMsg)
+				ts.recordPersistedMessage(skippedMsg)
+			}
+			continue
+		}
+
 		toolName := tc.Name
 		toolArgs := cloneStringAnyMap(tc.Arguments)
 		denyByTurnProfile := func() bool {

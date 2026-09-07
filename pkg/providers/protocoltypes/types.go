@@ -10,6 +10,9 @@ type ToolCall struct {
 	Arguments        map[string]any `json:"-"`
 	ThoughtSignature string         `json:"-"` // Internal use only
 	ExtraContent     *ExtraContent  `json:"extra_content,omitempty"`
+	// NonExecutableReason marks a provider-produced tool call that must be
+	// returned to the model as an error without invoking the tool registry.
+	NonExecutableReason string `json:"-"`
 }
 
 type ExtraContent struct {
