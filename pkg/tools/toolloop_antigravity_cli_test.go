@@ -46,9 +46,9 @@ for arg do
 done
 if [ ! -f "` + countFile + `" ]; then
 	: > "` + countFile + `"
-	printf '%s' '{"result":"{\"tool_calls\":[{\"id\":\"call_missing\",\"type\":\"function\",\"function\":{\"name\":\"missing_tool\",\"arguments\":\"{\\\"query\\\":\\\"status\\\"}\"}}]}"}'
+	printf '%s' '{"status":"SUCCESS","response":"{\"tool_calls\":[{\"id\":\"call_missing\",\"type\":\"function\",\"function\":{\"name\":\"missing_tool\",\"arguments\":\"{\\\"query\\\":\\\"status\\\"}\"}}]}"}'
 else
-	printf '%s' '{"result":"Handled missing tool."}'
+	printf '%s' '{"status":"SUCCESS","response":"Handled missing tool."}'
 fi
 `
 	if err := os.WriteFile(script, []byte(contents), 0o755); err != nil {
@@ -156,9 +156,9 @@ for arg do
 done
 if [ ! -f "` + countFile + `" ]; then
 	: > "` + countFile + `"
-	printf '%s' ` + strconv.Quote(`{"result":`+strconv.Quote(response)+`}`) + `
+	printf '%s' ` + strconv.Quote(`{"status":"SUCCESS","response":`+strconv.Quote(response)+`}`) + `
 else
-	printf '%s' '{"result":"Handled tool result."}'
+	printf '%s' '{"status":"SUCCESS","response":"Handled tool result."}'
 fi
 `
 	if err := os.WriteFile(script, []byte(contents), 0o755); err != nil {

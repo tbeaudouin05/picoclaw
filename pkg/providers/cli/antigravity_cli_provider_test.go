@@ -45,7 +45,7 @@ func TestAntigravityCliChatUsesSafeScopedInvocationAndTextProtocol(t *testing.T)
 	argsFile := filepath.Join(stateDir, "args")
 	printFile := filepath.Join(stateDir, "print")
 	cwdFile := filepath.Join(stateDir, "cwd")
-	output := `{"result":"{\"tool_calls\":[{\"id\":\"call_ok\",\"type\":\"function\",\"function\":{\"name\":\"cron\",\"arguments\":\"{\\\"action\\\":\\\"list\\\"}\"}},{\"id\":\"call_bad\",\"type\":\"function\",\"function\":{\"name\":\"terminal\",\"arguments\":\"{\\\"command\\\":\\\"touch nope\\\"}\"}}]}","usage":{"input_tokens":7,"output_tokens":5}}`
+	output := `{"status":"SUCCESS","response":"{\"tool_calls\":[{\"id\":\"call_ok\",\"type\":\"function\",\"function\":{\"name\":\"cron\",\"arguments\":\"{\\\"action\\\":\\\"list\\\"}\"}},{\"id\":\"call_bad\",\"type\":\"function\",\"function\":{\"name\":\"terminal\",\"arguments\":\"{\\\"command\\\":\\\"touch nope\\\"}\"}}]}","usage":{"input_tokens":7,"output_tokens":5,"thinking_tokens":3,"cache_read_tokens":2,"total_tokens":17}}`
 
 	p := NewAntigravityCliProvider(workspace)
 	p.command = createMockAntigravityCLI(t, argsFile, printFile, cwdFile, output)
@@ -74,8 +74,8 @@ func TestAntigravityCliChatUsesSafeScopedInvocationAndTextProtocol(t *testing.T)
 	if resp.Content != "" {
 		t.Fatalf("Content = %q, want empty terminal tool call response", resp.Content)
 	}
-	if resp.Usage == nil || resp.Usage.TotalTokens != 12 {
-		t.Fatalf("Usage = %#v, want total 12", resp.Usage)
+	if resp.Usage == nil || resp.Usage.TotalTokens != 17 {
+		t.Fatalf("Usage = %#v, want total 17", resp.Usage)
 	}
 
 	argsBytes, err := os.ReadFile(argsFile)
@@ -118,7 +118,7 @@ func TestAntigravityCliParseResponseDoesNotExecuteProseEmbeddedTextCall(t *testi
 	result := "I will list the jobs.\n" +
 		`{"tool_calls":[{"id":"call_ok","type":"function","function":{"name":"cron","arguments":"{\"action\":\"list\"}"}}]}`
 	p := NewAntigravityCliProvider("")
-	resp, err := p.parseResponse(fmt.Sprintf(`{"result":%q}`, result), []ToolDefinition{{
+	resp, err := p.parseResponse(fmt.Sprintf(`{"status":"SUCCESS","response":%q}`, result), []ToolDefinition{{
 		Type: "function", Function: ToolFunctionDefinition{Name: "cron"},
 	}})
 	if err != nil {
@@ -135,7 +135,7 @@ func TestAntigravityCliParseResponseDoesNotExecuteProseEmbeddedTextCall(t *testi
 func TestAntigravityCliParseResponseReturnsExactUnknownTerminalCall(t *testing.T) {
 	const result = `{"tool_calls":[{"id":"call_missing","type":"function","function":{"name":"missing_tool","arguments":"{\"path\":\"notes.txt\",\"limit\":3}"}}]}`
 	p := NewAntigravityCliProvider("")
-	resp, err := p.parseResponse(fmt.Sprintf(`{"result":%q}`, result), []ToolDefinition{{
+	resp, err := p.parseResponse(fmt.Sprintf(`{"status":"SUCCESS","response":%q}`, result), []ToolDefinition{{
 		Type: "function", Function: ToolFunctionDefinition{Name: "cron"},
 	}})
 	if err != nil {
@@ -164,7 +164,7 @@ func TestAntigravityCliChatMarksNativeTerminalCallNonExecutable(t *testing.T) {
 	p := NewAntigravityCliProvider(t.TempDir())
 	p.command = createMockAntigravityCLI(t,
 		filepath.Join(stateDir, "args"), filepath.Join(stateDir, "print"), filepath.Join(stateDir, "cwd"),
-		`{"result":"{\"tool_calls\":[{\"id\":\"native\",\"type\":\"function\",\"function\":{\"name\":\"terminal\",\"arguments\":\"{}\"}}]}"}`)
+		`{"status":"SUCCESS","response":"{\"tool_calls\":[{\"id\":\"native\",\"type\":\"function\",\"function\":{\"name\":\"terminal\",\"arguments\":\"{}\"}}]}"}`)
 
 	resp, err := p.Chat(context.Background(), []Message{{Role: "user", Content: "hello"}}, []ToolDefinition{{
 		Type: "function", Function: ToolFunctionDefinition{Name: "cron"},
@@ -177,6 +177,83 @@ func TestAntigravityCliChatMarksNativeTerminalCallNonExecutable(t *testing.T) {
 	}
 	if resp.ToolCalls[0].ID != "native" || resp.ToolCalls[0].NonExecutableReason == "" {
 		t.Fatalf("tool call = %#v, want correlated non-executable call", resp.ToolCalls[0])
+	}
+}
+
+func TestAntigravityCliChatRejectsTerminalError(t *testing.T) {
+	p := NewAntigravityCliProvider("")
+	_, err := p.parseResponse(`{"status":"ERROR","response":"request failed","error":"model unavailable"}`, nil)
+	if err == nil || !strings.Contains(err.Error(), "ERROR") || !strings.Contains(err.Error(), "model unavailable") {
+		t.Fatalf("parseResponse() error = %v, want useful terminal error", err)
+	}
+}
+
+func TestAntigravityCliChatStreamEventsUsesCurrentNDJSONAndDoesNotDuplicateFinalResponse(t *testing.T) {
+	workspace := t.TempDir()
+	stateDir := t.TempDir()
+	argsFile := filepath.Join(stateDir, "args")
+	output := "{\"event\":\"init\"}\n" +
+		"{\"event\":\"step_update\",\"step_update\":{\"text_delta\":\"Hello\"}}\n" +
+		"{\"event\":\"step_update\",\"step_update\":{\"text_delta\":\" world\"}}\n" +
+		"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"Hello world\",\"usage\":{\"input_tokens\":4,\"output_tokens\":2,\"thinking_tokens\":1,\"cache_read_tokens\":1,\"total_tokens\":8}}}\n"
+	p := NewAntigravityCliProvider(workspace)
+	p.command = createMockAntigravityCLI(t, argsFile, filepath.Join(stateDir, "print"), filepath.Join(stateDir, "cwd"), output)
+
+	var chunks []string
+	resp, err := p.ChatStreamEvents(context.Background(), []Message{{Role: "user", Content: "hello"}}, nil, "gemini-test", nil, func(chunk StreamChunk) {
+		chunks = append(chunks, chunk.Content)
+	})
+	if err != nil {
+		t.Fatalf("ChatStreamEvents() error = %v", err)
+	}
+	if got, want := strings.Join(chunks, "|"), "Hello|Hello world"; got != want {
+		t.Fatalf("chunks = %q, want %q", got, want)
+	}
+	if resp.Content != "Hello world" || resp.FinishReason != "stop" || resp.Usage == nil || resp.Usage.TotalTokens != 8 {
+		t.Fatalf("response = %#v, want parsed terminal result", resp)
+	}
+	argsBytes, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Split(strings.TrimSpace(string(argsBytes)), "\n")
+	for _, want := range []string{"--output-format", "stream-json", "--sandbox", "--mode", "plan", "--disable-slash-commands", "--add-dir", workspace, "--model", "gemini-test"} {
+		if !containsString(args, want) {
+			t.Errorf("args missing %q: %q", want, args)
+		}
+	}
+}
+
+func TestAntigravityCliChatStreamEventsFallsBackToTerminalResponse(t *testing.T) {
+	stateDir := t.TempDir()
+	p := NewAntigravityCliProvider("")
+	p.command = createMockAntigravityCLI(t,
+		filepath.Join(stateDir, "args"), filepath.Join(stateDir, "print"), filepath.Join(stateDir, "cwd"),
+		"{\"event\":\"init\"}\n{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"final only\"}}\n")
+	var chunks []string
+	resp, err := p.ChatStream(context.Background(), []Message{{Role: "user", Content: "hello"}}, nil, "", nil, func(chunk string) {
+		chunks = append(chunks, chunk)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(chunks, "|"); got != "final only" {
+		t.Fatalf("chunks = %q, want final fallback", got)
+	}
+	if resp.Content != "final only" {
+		t.Fatalf("response content = %q", resp.Content)
+	}
+}
+
+func TestAntigravityCliChatStreamEventsRejectsTerminalError(t *testing.T) {
+	stateDir := t.TempDir()
+	p := NewAntigravityCliProvider("")
+	p.command = createMockAntigravityCLI(t,
+		filepath.Join(stateDir, "args"), filepath.Join(stateDir, "print"), filepath.Join(stateDir, "cwd"),
+		"{\"event\":\"result\",\"result\":{\"status\":\"ERROR\",\"response\":\"failed\",\"error\":\"quota exceeded\"}}\n")
+	_, err := p.ChatStreamEvents(context.Background(), []Message{{Role: "user", Content: "hello"}}, nil, "", nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "quota exceeded") {
+		t.Fatalf("ChatStreamEvents() error = %v, want terminal error", err)
 	}
 }
 

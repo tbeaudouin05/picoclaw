@@ -1,6 +1,7 @@
 package cliprovider
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -28,19 +29,7 @@ func (p *AntigravityCliProvider) Chat(
 	ctx context.Context, messages []Message, tools []ToolDefinition, model string, options map[string]any,
 ) (*LLMResponse, error) {
 	prompt := p.buildPrompt(messages, tools)
-	args := []string{
-		"--print=" + prompt,
-		"--output-format", "json",
-		"--sandbox",
-		"--mode", "plan",
-		"--disable-slash-commands",
-	}
-	if p.workspace != "" {
-		args = append(args, "--add-dir", p.workspace)
-	}
-	if model != "" && model != "antigravity-cli" {
-		args = append(args, "--model", model)
-	}
+	args := p.args(prompt, "json", model)
 
 	cmd := exec.CommandContext(ctx, p.command, args...)
 	if p.workspace != "" {
@@ -103,12 +92,26 @@ func (p *AntigravityCliProvider) buildPrompt(messages []Message, tools []ToolDef
 }
 
 type antigravityCliJSONResponse struct {
-	IsError bool   `json:"is_error"`
-	Result  string `json:"result"`
-	Usage   struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
-	} `json:"usage"`
+	Status   string              `json:"status"`
+	Response string              `json:"response"`
+	Error    string              `json:"error"`
+	Usage    antigravityCliUsage `json:"usage"`
+}
+
+type antigravityCliUsage struct {
+	InputTokens     int `json:"input_tokens"`
+	OutputTokens    int `json:"output_tokens"`
+	ThinkingTokens  int `json:"thinking_tokens"`
+	CacheReadTokens int `json:"cache_read_tokens"`
+	TotalTokens     int `json:"total_tokens"`
+}
+
+type antigravityCliStreamRecord struct {
+	Event      string `json:"event"`
+	StepUpdate struct {
+		TextDelta string `json:"text_delta"`
+	} `json:"step_update"`
+	Result *antigravityCliJSONResponse `json:"result"`
 }
 
 func (p *AntigravityCliProvider) parseResponse(output string, tools []ToolDefinition) (*LLMResponse, error) {
@@ -116,12 +119,137 @@ func (p *AntigravityCliProvider) parseResponse(output string, tools []ToolDefini
 	if err := json.Unmarshal([]byte(output), &result); err != nil {
 		return nil, fmt.Errorf("failed to parse antigravity cli response: %w", err)
 	}
-	if result.IsError {
-		return nil, fmt.Errorf("antigravity cli returned error: %s", result.Result)
+	return p.parseJSONResponse(result, tools)
+}
+
+// ChatStream emits accumulated text as agy produces step updates, then returns
+// the parsed terminal result for tool-call handling.
+func (p *AntigravityCliProvider) ChatStream(
+	ctx context.Context, messages []Message, tools []ToolDefinition, model string, options map[string]any,
+	onChunk func(accumulated string),
+) (*LLMResponse, error) {
+	return p.ChatStreamEvents(ctx, messages, tools, model, options, func(chunk StreamChunk) {
+		if onChunk != nil && chunk.Content != "" {
+			onChunk(chunk.Content)
+		}
+	})
+}
+
+// ChatStreamEvents reads agy's stream-json NDJSON protocol. Only step_update
+// text deltas are emitted before the terminal result; the result itself is
+// emitted as a fallback only when no text delta was received.
+func (p *AntigravityCliProvider) ChatStreamEvents(
+	ctx context.Context, messages []Message, tools []ToolDefinition, model string, options map[string]any,
+	onChunk func(StreamChunk),
+) (*LLMResponse, error) {
+	prompt := p.buildPrompt(messages, tools)
+	args := p.args(prompt, "stream-json", model)
+
+	cmd := exec.CommandContext(ctx, p.command, args...)
+	if p.workspace != "" {
+		cmd.Dir = p.workspace
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create antigravity cli stdout pipe: %w", err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := isolation.Start(cmd); err != nil {
+		return nil, fmt.Errorf("antigravity cli error: %w", err)
+	}
+	terminateAndWait := func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
 	}
 
-	toolCalls := filterAntigravityTerminalToolCalls(extractTerminalToolCallsFromText(result.Result), tools)
-	content := result.Result
+	var content strings.Builder
+	gotDelta := false
+	var terminalResult *antigravityCliJSONResponse
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
+	for scanner.Scan() {
+		var record antigravityCliStreamRecord
+		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+			terminateAndWait()
+			return nil, fmt.Errorf("failed to parse antigravity cli stream record: %w", err)
+		}
+		switch record.Event {
+		case "step_update":
+			if record.StepUpdate.TextDelta == "" {
+				continue
+			}
+			gotDelta = true
+			content.WriteString(record.StepUpdate.TextDelta)
+			if onChunk != nil {
+				onChunk(StreamChunk{Content: content.String()})
+			}
+		case "result":
+			if record.Result == nil {
+				terminateAndWait()
+				return nil, fmt.Errorf("antigravity cli stream result missing result payload")
+			}
+			terminalResult = record.Result
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		terminateAndWait()
+		return nil, fmt.Errorf("failed to read antigravity cli stream: %w", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if stderrText := strings.TrimSpace(stderr.String()); stderrText != "" {
+			return nil, fmt.Errorf("antigravity cli error: %s", stderrText)
+		}
+		return nil, fmt.Errorf("antigravity cli error: %w", err)
+	}
+	if terminalResult == nil {
+		return nil, fmt.Errorf("antigravity cli stream ended without terminal result")
+	}
+
+	response, err := p.parseJSONResponse(*terminalResult, tools)
+	if err != nil {
+		return nil, err
+	}
+	if !gotDelta && response.Content != "" && onChunk != nil {
+		onChunk(StreamChunk{Content: response.Content})
+	}
+	return response, nil
+}
+
+func (p *AntigravityCliProvider) args(prompt, outputFormat, model string) []string {
+	args := []string{
+		"--print=" + prompt,
+		"--output-format", outputFormat,
+		"--sandbox",
+		"--mode", "plan",
+		"--disable-slash-commands",
+	}
+	if p.workspace != "" {
+		args = append(args, "--add-dir", p.workspace)
+	}
+	if model != "" && model != "antigravity-cli" {
+		args = append(args, "--model", model)
+	}
+	return args
+}
+
+func (p *AntigravityCliProvider) parseJSONResponse(result antigravityCliJSONResponse, tools []ToolDefinition) (*LLMResponse, error) {
+	if result.Status != "SUCCESS" {
+		errText := strings.TrimSpace(result.Error)
+		if errText == "" {
+			errText = strings.TrimSpace(result.Response)
+		}
+		if errText == "" {
+			errText = "unknown error"
+		}
+		return nil, fmt.Errorf("antigravity cli returned %s: %s", result.Status, errText)
+	}
+
+	toolCalls := filterAntigravityTerminalToolCalls(extractTerminalToolCallsFromText(result.Response), tools)
+	content := result.Response
 	finishReason := "stop"
 	if len(toolCalls) > 0 {
 		content = ""
@@ -129,10 +257,14 @@ func (p *AntigravityCliProvider) parseResponse(output string, tools []ToolDefini
 	}
 
 	var usage *UsageInfo
-	if result.Usage.InputTokens > 0 || result.Usage.OutputTokens > 0 {
+	if result.Usage.InputTokens > 0 || result.Usage.OutputTokens > 0 || result.Usage.TotalTokens > 0 {
+		totalTokens := result.Usage.TotalTokens
+		if totalTokens == 0 {
+			totalTokens = result.Usage.InputTokens + result.Usage.OutputTokens
+		}
 		usage = &UsageInfo{
 			PromptTokens: result.Usage.InputTokens, CompletionTokens: result.Usage.OutputTokens,
-			TotalTokens: result.Usage.InputTokens + result.Usage.OutputTokens,
+			TotalTokens: totalTokens,
 		}
 	}
 	return &LLMResponse{
