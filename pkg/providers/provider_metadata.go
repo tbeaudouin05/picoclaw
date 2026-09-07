@@ -309,6 +309,17 @@ var modelProviderOptionsByName = map[string]ModelProviderOption{
 		Priority:            53,
 		Aliases:             []string{"claudecli"},
 	},
+	"antigravity-cli": {
+		ID:                  "antigravity-cli",
+		DisplayName:         "Antigravity CLI",
+		Domain:              "antigravity.google",
+		EmptyAPIKeyAllowed:  true,
+		CreateAllowed:       true,
+		DefaultModelAllowed: true,
+		Local:               true,
+		Priority:            52.5,
+		Aliases:             []string{"antigravitycli"},
+	},
 	"codex-cli": {
 		ID:                  "codex-cli",
 		DisplayName:         "Codex CLI",

@@ -180,7 +180,7 @@ func createAllowedForProvider(provider string) bool {
 		// Keep it creatable in the catalog and let provider construction/runtime
 		// return the concrete AWS error when the environment is incomplete.
 		return true
-	case "claude-cli", "codex-cli":
+	case "antigravity-cli", "claude-cli", "codex-cli":
 		return cliProviderCreateAllowedFromCurrentStatus(normalized)
 	default:
 		return providers.IsCreatableModelProvider(normalized)
@@ -1599,6 +1599,8 @@ func probeModelConnectivity(m *config.ModelConfig) bool {
 		return probeTCPService(apiBase)
 	case "claude-cli":
 		return probeCommandAvailable("claude")
+	case "antigravity-cli":
+		return probeCommandAvailable("agy")
 	case "codex-cli":
 		return probeCommandAvailable("codex")
 	default:

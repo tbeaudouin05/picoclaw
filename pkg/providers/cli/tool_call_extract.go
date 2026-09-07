@@ -19,8 +19,11 @@ func extractToolCallsFromText(text string) []ToolCall {
 		return nil
 	}
 
-	jsonStr := text[start:end]
+	return extractToolCallsFromJSON(text[start:end])
+}
 
+// extractToolCallsFromJSON parses one tool_calls JSON object.
+func extractToolCallsFromJSON(jsonStr string) []ToolCall {
 	var wrapper struct {
 		ToolCalls []struct {
 			ID       string `json:"id"`

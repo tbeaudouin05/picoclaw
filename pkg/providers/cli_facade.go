@@ -7,16 +7,21 @@ import (
 )
 
 type (
-	ClaudeCliProvider     = cliprovider.ClaudeCliProvider
-	CodexCliProvider      = cliprovider.CodexCliProvider
-	CodexCliAuth          = cliprovider.CodexCliAuth
-	GitHubCopilotProvider = cliprovider.GitHubCopilotProvider
+	ClaudeCliProvider      = cliprovider.ClaudeCliProvider
+	AntigravityCliProvider = cliprovider.AntigravityCliProvider
+	CodexCliProvider       = cliprovider.CodexCliProvider
+	CodexCliAuth           = cliprovider.CodexCliAuth
+	GitHubCopilotProvider  = cliprovider.GitHubCopilotProvider
 )
 
 const CodexHomeEnvVar = cliprovider.CodexHomeEnvVar
 
 func NewClaudeCliProvider(workspace string) *ClaudeCliProvider {
 	return cliprovider.NewClaudeCliProvider(workspace)
+}
+
+func NewAntigravityCliProvider(workspace string) *AntigravityCliProvider {
+	return cliprovider.NewAntigravityCliProvider(workspace)
 }
 
 func NewCodexCliProvider(workspace string) *CodexCliProvider {

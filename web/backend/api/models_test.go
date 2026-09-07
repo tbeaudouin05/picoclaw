@@ -568,6 +568,8 @@ func TestHandleListModels_CLIProvidersRequireInstalledCommands(t *testing.T) {
 
 	probeCommandAvailableFunc = func(command string) bool {
 		switch command {
+		case "agy":
+			return true
 		case "claude":
 			return false
 		case "codex":
@@ -582,6 +584,11 @@ func TestHandleListModels_CLIProvidersRequireInstalledCommands(t *testing.T) {
 		t.Fatalf("LoadConfig() error = %v", err)
 	}
 	cfg.ModelList = []*config.ModelConfig{
+		{
+			ModelName: "antigravity-cli-model",
+			Provider:  "antigravity-cli",
+			Model:     "antigravity-cli",
+		},
 		{
 			ModelName: "claude-cli-model",
 			Provider:  "claude-cli",
@@ -623,6 +630,15 @@ func TestHandleListModels_CLIProvidersRequireInstalledCommands(t *testing.T) {
 	for _, model := range resp.Models {
 		modelsByName[model.ModelName] = model
 	}
+	if model := modelsByName["antigravity-cli-model"]; !model.Available || model.Status != modelStatusAvailable {
+		t.Fatalf(
+			"antigravity-cli status = (%t, %q), want (%t, %q)",
+			model.Available,
+			model.Status,
+			true,
+			modelStatusAvailable,
+		)
+	}
 	if model := modelsByName["claude-cli-model"]; model.Available || model.Status != modelStatusUnreachable {
 		t.Fatalf(
 			"claude-cli status = (%t, %q), want (%t, %q)",
@@ -645,6 +661,11 @@ func TestHandleListModels_CLIProvidersRequireInstalledCommands(t *testing.T) {
 	optionsByID := make(map[string]providers.ModelProviderOption, len(resp.ProviderOptions))
 	for _, option := range resp.ProviderOptions {
 		optionsByID[option.ID] = option
+	}
+	if option, ok := optionsByID["antigravity-cli"]; !ok {
+		t.Fatal("antigravity-cli provider option missing")
+	} else if !option.CreateAllowed {
+		t.Fatal("antigravity-cli should be creatable when the agy command is available")
 	}
 	if option, ok := optionsByID["claude-cli"]; !ok {
 		t.Fatal("claude-cli provider option missing")

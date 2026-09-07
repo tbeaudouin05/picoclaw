@@ -185,7 +185,7 @@ func requiresRuntimeProbe(m *config.ModelConfig) bool {
 	protocol := modelProtocol(m)
 
 	switch protocol {
-	case "claude-cli", "codex-cli", "github-copilot":
+	case "antigravity-cli", "claude-cli", "codex-cli", "github-copilot":
 		return true
 	}
 
@@ -244,6 +244,8 @@ func runLocalModelProbe(m *config.ModelConfig) bool {
 		return probeTCPServiceFunc(apiBase)
 	case "claude-cli":
 		return probeCommandAvailableFunc("claude")
+	case "antigravity-cli":
+		return probeCommandAvailableFunc("agy")
 	case "codex-cli":
 		return probeCommandAvailableFunc("codex")
 	default:

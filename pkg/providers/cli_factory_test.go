@@ -44,6 +44,27 @@ func TestCreateProvider_ClaudeCli(t *testing.T) {
 	}
 }
 
+func TestCreateProvider_AntigravityCliAlongsideDirectProvider(t *testing.T) {
+	for _, tc := range []struct {
+		model string
+		want  any
+	}{
+		{model: "antigravity-cli/gemini-test", want: (*AntigravityCliProvider)(nil)},
+		{model: "antigravity/gemini-test", want: (*AntigravityProvider)(nil)},
+	} {
+		cfg := config.DefaultConfig()
+		cfg.ModelList = []*config.ModelConfig{{ModelName: "test", Model: tc.model, Workspace: "/test/ws"}}
+		cfg.Agents.Defaults.ModelName = "test"
+		provider, _, err := CreateProvider(cfg)
+		if err != nil {
+			t.Fatalf("CreateProvider(%q) error = %v", tc.model, err)
+		}
+		if reflect.TypeOf(provider) != reflect.TypeOf(tc.want) {
+			t.Fatalf("CreateProvider(%q) = %T, want %T", tc.model, provider, tc.want)
+		}
+	}
+}
+
 func TestCreateProvider_ClaudeCode(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.ModelList = []*config.ModelConfig{
