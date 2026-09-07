@@ -224,6 +224,30 @@ func TestAntigravityCliChatStreamEventsUsesCurrentNDJSONAndDoesNotDuplicateFinal
 	}
 }
 
+func TestAntigravityCliChatStreamEventsUsesDeltasWhenSuccessfulTerminalResponseIsEmpty(t *testing.T) {
+	stateDir := t.TempDir()
+	p := NewAntigravityCliProvider("")
+	p.command = createMockAntigravityCLI(t,
+		filepath.Join(stateDir, "args"), filepath.Join(stateDir, "print"), filepath.Join(stateDir, "cwd"),
+		"{\"event\":\"step_update\",\"step_update\":{\"text_delta\":\"Hello\"}}\n"+
+			"{\"event\":\"step_update\",\"step_update\":{\"text_delta\":\"world\"}}\n"+
+			"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"\"}}\n")
+
+	var chunks []string
+	resp, err := p.ChatStreamEvents(context.Background(), []Message{{Role: "user", Content: "hello"}}, nil, "", nil, func(chunk StreamChunk) {
+		chunks = append(chunks, chunk.Content)
+	})
+	if err != nil {
+		t.Fatalf("ChatStreamEvents() error = %v", err)
+	}
+	if got, want := strings.Join(chunks, "|"), "Hello|Helloworld"; got != want {
+		t.Fatalf("chunks = %q, want accumulated deltas without a final duplicate %q", got, want)
+	}
+	if resp.Content != "Helloworld" || resp.FinishReason != "stop" || len(resp.ToolCalls) != 0 {
+		t.Fatalf("response = %#v, want delta-backed stop response without tool calls", resp)
+	}
+}
+
 func TestAntigravityCliChatStreamEventsFallsBackToTerminalResponse(t *testing.T) {
 	stateDir := t.TempDir()
 	p := NewAntigravityCliProvider("")

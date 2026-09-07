@@ -213,6 +213,9 @@ func (p *AntigravityCliProvider) ChatStreamEvents(
 	if err != nil {
 		return nil, err
 	}
+	if gotDelta && response.Content == "" && len(response.ToolCalls) == 0 {
+		response.Content = content.String()
+	}
 	if !gotDelta && response.Content != "" && onChunk != nil {
 		onChunk(StreamChunk{Content: response.Content})
 	}
