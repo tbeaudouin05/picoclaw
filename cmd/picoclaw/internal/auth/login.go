@@ -12,7 +12,7 @@ func newLoginCommand() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "login",
-		Short: "Login via OAuth or paste token",
+		Short: "Login via OAuth, token, or local CLI",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return authLoginCmd(provider, useDeviceCode, useOauth, noBrowser)
@@ -20,7 +20,7 @@ func newLoginCommand() *cobra.Command {
 	}
 
 	cmd.Flags().StringVarP(
-		&provider, "provider", "p", "", "Provider to login with (openai, anthropic, google-antigravity, antigravity)",
+		&provider, "provider", "p", "", "Provider to login with (openai, anthropic, google-antigravity, antigravity, antigravity-cli)",
 	)
 	cmd.Flags().BoolVar(&useDeviceCode, "device-code", false, "Use device code flow (for headless environments)")
 	cmd.Flags().BoolVar(&noBrowser, "no-browser", false, "Do not auto-open a browser during OAuth login")

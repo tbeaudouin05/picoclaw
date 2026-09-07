@@ -2,11 +2,14 @@ package auth
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -17,9 +20,82 @@ import (
 )
 
 const (
-	supportedProvidersMsg = "supported providers: openai, anthropic, google-antigravity, antigravity"
+	supportedProvidersMsg = "supported providers: openai, anthropic, google-antigravity, antigravity, antigravity-cli"
 	defaultAnthropicModel = "claude-sonnet-4.6"
 )
+
+var (
+	antigravityCLILookPath = exec.LookPath
+	antigravityCLIRun      = runAntigravityCLI
+	antigravityCLICheck    = checkAntigravityCLIAuthentication
+)
+
+const (
+	antigravityCLIAuthenticationCheckTimeout = time.Minute
+	antigravityCLIAuthenticationMaxResponse  = 64 * 1024
+)
+
+func runAntigravityCLI(path string, args ...string) error {
+	cmd := exec.Command(path, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func checkAntigravityCLIAuthentication(path string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), antigravityCLIAuthenticationCheckTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, path,
+		"--print=Reply only with: authenticated",
+		"--output-format", "json",
+		"--sandbox",
+		"--mode", "plan",
+		"--disable-slash-commands",
+	)
+	cmd.WaitDelay = 5 * time.Second
+	var stdout bytes.Buffer
+	cmd.Stdout = &limitedBuffer{Buffer: &stdout, max: antigravityCLIAuthenticationMaxResponse}
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("timed out after %s: %w", antigravityCLIAuthenticationCheckTimeout, ctx.Err())
+		}
+		return err
+	}
+	return validateAntigravityCLIAuthenticationResponse(stdout.Bytes())
+}
+
+type limitedBuffer struct {
+	Buffer *bytes.Buffer
+	max    int
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	remaining := b.max - b.Buffer.Len()
+	if remaining <= 0 || len(p) > remaining {
+		return 0, fmt.Errorf("agy authentication response exceeds %d bytes", b.max)
+	}
+	return b.Buffer.Write(p)
+}
+
+func validateAntigravityCLIAuthenticationResponse(output []byte) error {
+	var response struct {
+		IsError bool   `json:"is_error"`
+		Result  string `json:"result"`
+	}
+	if err := json.Unmarshal(output, &response); err != nil {
+		return fmt.Errorf("invalid agy authentication response: %w", err)
+	}
+	if response.IsError {
+		return fmt.Errorf("agy authentication response: %s", response.Result)
+	}
+	if response.Result != "authenticated" {
+		return fmt.Errorf("unexpected agy authentication response: %q", response.Result)
+	}
+	return nil
+}
 
 func authLoginCmd(provider string, useDeviceCode bool, useOauth bool, noBrowser bool) error {
 	switch provider {
@@ -29,9 +105,30 @@ func authLoginCmd(provider string, useDeviceCode bool, useOauth bool, noBrowser 
 		return authLoginAnthropic(useOauth)
 	case "google-antigravity", "antigravity":
 		return authLoginGoogleAntigravity(noBrowser)
+	case "antigravity-cli":
+		return authLoginAntigravityCLI()
 	default:
 		return fmt.Errorf("unsupported provider: %s (%s)", provider, supportedProvidersMsg)
 	}
+}
+
+func authLoginAntigravityCLI() error {
+	path, err := antigravityCLILookPath("agy")
+	if err != nil {
+		return fmt.Errorf("antigravity-cli requires the agy command; install agy and authenticate it first: %w", err)
+	}
+
+	fmt.Println("Opening agy. Complete its sign-in flow if prompted, then exit agy to continue.")
+	if err := antigravityCLIRun(path); err != nil {
+		return fmt.Errorf("antigravity-cli sign-in session failed: %w", err)
+	}
+
+	if err := antigravityCLICheck(path); err != nil {
+		return fmt.Errorf("antigravity-cli authentication check failed: %w", err)
+	}
+
+	fmt.Println("Antigravity CLI authentication verified. Credentials are managed by agy.")
+	return nil
 }
 
 func authLoginOpenAI(useDeviceCode bool, noBrowser bool) error {
