@@ -232,7 +232,10 @@ func TestChat_WithToolCallsInResponse(t *testing.T) {
 
 	resp, err := p.Chat(context.Background(), []Message{
 		{Role: "user", Content: "What's the weather?"},
-	}, nil, "", nil)
+	}, []ToolDefinition{{
+		Type:     "function",
+		Function: ToolFunctionDefinition{Name: "get_weather"},
+	}}, "", nil)
 	if err != nil {
 		t.Fatalf("Chat() error = %v", err)
 	}
@@ -247,6 +250,43 @@ func TestChat_WithToolCallsInResponse(t *testing.T) {
 	}
 	if resp.ToolCalls[0].Arguments["location"] != "NYC" {
 		t.Errorf("ToolCalls[0].Arguments[location] = %v, want NYC", resp.ToolCalls[0].Arguments["location"])
+	}
+}
+
+func TestChat_FinalJSONExecutesAdvertisedCronAndExcludesUnadvertisedBash(t *testing.T) {
+	mockJSON := `{"type":"result","subtype":"success","is_error":false,"result":"{\"tool_calls\":[{\"id\":\"call_cron\",\"type\":\"function\",\"function\":{\"name\":\"cron\",\"arguments\":\"{\\\"action\\\":\\\"list\\\"}\"}},{\"id\":\"call_bash\",\"type\":\"function\",\"function\":{\"name\":\"Bash\",\"arguments\":\"{\\\"command\\\":\\\"touch /tmp/nope\\\"}\"}}]}"}`
+	p := NewClaudeCliProvider(t.TempDir())
+	p.command = createMockCLI(t, mockJSON, "", 0)
+
+	resp, err := p.Chat(context.Background(), []Message{{Role: "user", Content: "List my cron jobs"}}, []ToolDefinition{{
+		Type:     "function",
+		Function: ToolFunctionDefinition{Name: "cron"},
+	}}, "claude-sonnet-4.6", nil)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if resp.FinishReason != "tool_calls" || len(resp.ToolCalls) != 1 {
+		t.Fatalf("response = %#v, want one executable PicoClaw tool call", resp)
+	}
+	if got := resp.ToolCalls[0]; got.Name != "cron" || got.Arguments["action"] != "list" {
+		t.Fatalf("tool call = %#v, want cron list", got)
+	}
+}
+
+func TestChat_UnadvertisedBashTextCallIsNotExecutable(t *testing.T) {
+	mockJSON := `{"type":"result","subtype":"success","is_error":false,"result":"{\"tool_calls\":[{\"id\":\"call_bash\",\"type\":\"function\",\"function\":{\"name\":\"Bash\",\"arguments\":\"{\\\"command\\\":\\\"touch /tmp/nope\\\"}\"}}]}"}`
+	p := NewClaudeCliProvider(t.TempDir())
+	p.command = createMockCLI(t, mockJSON, "", 0)
+
+	resp, err := p.Chat(context.Background(), []Message{{Role: "user", Content: "Run this"}}, []ToolDefinition{{
+		Type:     "function",
+		Function: ToolFunctionDefinition{Name: "cron"},
+	}}, "", nil)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if resp.FinishReason != "stop" || len(resp.ToolCalls) != 0 {
+		t.Fatalf("response = %#v, want no executable tool calls", resp)
 	}
 }
 
@@ -531,6 +571,9 @@ func TestChatStreamEvents_StreamsCompletedNativeToolUsesWithInterleavedArguments
 	}
 	if resp.Content != "done" {
 		t.Fatalf("response content = %q, want done", resp.Content)
+	}
+	if len(resp.ToolCalls) != 0 {
+		t.Fatalf("response tool calls = %#v, want native Claude tool uses excluded from PicoClaw execution", resp.ToolCalls)
 	}
 	if len(chunks) != 3 {
 		t.Fatalf("chunks = %#v, want text plus two completed tool calls", chunks)
@@ -832,6 +875,34 @@ func TestBuildSystemPrompt_WithTools(t *testing.T) {
 	}
 }
 
+func TestBuildSystemPrompt_AdvertisedCronRequiresFinalJSONTextProtocol(t *testing.T) {
+	p := NewClaudeCliProvider("/workspace")
+	tools := []ToolDefinition{{
+		Type: "function",
+		Function: ToolFunctionDefinition{
+			Name:        "cron",
+			Description: "Schedule a task",
+		},
+	}}
+
+	got := p.buildSystemPrompt(nil, tools)
+	for _, want := range []string{
+		"PicoClaw-provided tools use a text protocol",
+		"emit it only in the final response",
+		"never emit it as a Claude-native tool_use",
+		"Claude-native tool use is UI-only here and cannot schedule tasks, execute commands, or substitute for PicoClaw functions",
+		"Only call PicoClaw functions advertised below for this request",
+		"final response MUST contain ONLY this JSON object",
+		"with no prose or Markdown fences",
+		`{"tool_calls":[{"id":"call_xxx","type":"function","function":{"name":"tool_name","arguments":"{...}"}}]}`,
+		"#### cron",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("buildSystemPrompt() missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestBuildSystemPrompt_ToolsOnlyNoSystem(t *testing.T) {
 	p := NewClaudeCliProvider("/workspace")
 	tools := []ToolDefinition{
@@ -897,7 +968,7 @@ func TestParseClaudeCliResponse_TextOnly(t *testing.T) {
 	p := NewClaudeCliProvider("/workspace")
 	output := `{"type":"result","subtype":"success","is_error":false,"result":"Hello, world!","session_id":"abc123","total_cost_usd":0.01,"duration_ms":500,"usage":{"input_tokens":10,"output_tokens":20,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}`
 
-	resp, err := p.parseClaudeCliResponse(output)
+	resp, err := p.parseClaudeCliResponse(output, nil)
 	if err != nil {
 		t.Fatalf("parseClaudeCliResponse() error = %v", err)
 	}
@@ -925,7 +996,7 @@ func TestParseClaudeCliResponse_EmptyResult(t *testing.T) {
 	p := NewClaudeCliProvider("/workspace")
 	output := `{"type":"result","subtype":"success","is_error":false,"result":"","session_id":"abc"}`
 
-	resp, err := p.parseClaudeCliResponse(output)
+	resp, err := p.parseClaudeCliResponse(output, nil)
 	if err != nil {
 		t.Fatalf("error = %v", err)
 	}
@@ -941,7 +1012,7 @@ func TestParseClaudeCliResponse_IsError(t *testing.T) {
 	p := NewClaudeCliProvider("/workspace")
 	output := `{"type":"result","subtype":"error","is_error":true,"result":"Something went wrong","session_id":"abc"}`
 
-	_, err := p.parseClaudeCliResponse(output)
+	_, err := p.parseClaudeCliResponse(output, nil)
 	if err == nil {
 		t.Fatal("expected error when is_error=true")
 	}
@@ -954,7 +1025,7 @@ func TestParseClaudeCliResponse_NoUsage(t *testing.T) {
 	p := NewClaudeCliProvider("/workspace")
 	output := `{"type":"result","subtype":"success","is_error":false,"result":"hi","session_id":"s"}`
 
-	resp, err := p.parseClaudeCliResponse(output)
+	resp, err := p.parseClaudeCliResponse(output, nil)
 	if err != nil {
 		t.Fatalf("error = %v", err)
 	}
@@ -965,7 +1036,7 @@ func TestParseClaudeCliResponse_NoUsage(t *testing.T) {
 
 func TestParseClaudeCliResponse_InvalidJSON(t *testing.T) {
 	p := NewClaudeCliProvider("/workspace")
-	_, err := p.parseClaudeCliResponse("not json")
+	_, err := p.parseClaudeCliResponse("not json", nil)
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
@@ -978,7 +1049,10 @@ func TestParseClaudeCliResponse_WithToolCalls(t *testing.T) {
 	p := NewClaudeCliProvider("/workspace")
 	output := `{"type":"result","subtype":"success","is_error":false,"result":"Let me check.\n{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"location\\\":\\\"Tokyo\\\"}\"}}]}","session_id":"abc123","total_cost_usd":0.01}`
 
-	resp, err := p.parseClaudeCliResponse(output)
+	resp, err := p.parseClaudeCliResponse(output, []ToolDefinition{{
+		Type:     "function",
+		Function: ToolFunctionDefinition{Name: "get_weather"},
+	}})
 	if err != nil {
 		t.Fatalf("error = %v", err)
 	}
@@ -1013,7 +1087,7 @@ func TestParseClaudeCliResponse_WhitespaceResult(t *testing.T) {
 	p := NewClaudeCliProvider("/workspace")
 	output := `{"type":"result","subtype":"success","is_error":false,"result":"  hello  \n  ","session_id":"s"}`
 
-	resp, err := p.parseClaudeCliResponse(output)
+	resp, err := p.parseClaudeCliResponse(output, nil)
 	if err != nil {
 		t.Fatalf("error = %v", err)
 	}

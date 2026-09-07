@@ -105,7 +105,7 @@ func TestIntegration_RealClaudeCLI_ParsesRealJSON(t *testing.T) {
 
 	// Verify our parser can handle real output
 	p := NewClaudeCliProvider("")
-	resp, err := p.parseClaudeCliResponse(string(output))
+	resp, err := p.parseClaudeCliResponse(string(output), nil)
 	if err != nil {
 		t.Fatalf("parseClaudeCliResponse() failed on real CLI output: %v", err)
 	}

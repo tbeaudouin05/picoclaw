@@ -83,7 +83,7 @@ func (p *ClaudeCliProvider) Chat(
 		}
 	}
 
-	return p.parseClaudeCliResponse(stdout.String())
+	return p.parseClaudeCliResponse(stdout.String(), tools)
 }
 
 // ChatStream streams accumulated text from the Claude CLI while returning the
@@ -251,7 +251,7 @@ func (p *ClaudeCliProvider) ChatStreamEvents(
 		return nil, fmt.Errorf("claude cli stream ended without terminal result")
 	}
 
-	return p.parseClaudeCliJSONResponse(*terminalResult)
+	return p.parseClaudeCliJSONResponse(*terminalResult, tools)
 }
 
 // GetDefaultModel returns the default model identifier.
@@ -295,27 +295,39 @@ func (p *ClaudeCliProvider) buildSystemPrompt(messages []Message, tools []ToolDe
 	}
 
 	if len(tools) > 0 {
-		parts = append(parts, buildCLIToolsPrompt(tools))
+		parts = append(parts, buildClaudeCLIToolsPrompt(tools))
 	}
 
 	return strings.Join(parts, "\n\n")
 }
 
+func buildClaudeCLIToolsPrompt(tools []ToolDefinition) string {
+	return "PicoClaw-provided tools use a text protocol and are separate from Claude-native tools. " +
+		"To call a PicoClaw tool, emit it only in the final response using the JSON object format below; " +
+		"never emit it as a Claude-native tool_use. Claude-native tool use is UI-only here and cannot " +
+		"schedule tasks, execute commands, or substitute for PicoClaw functions. Only call PicoClaw functions advertised below " +
+		"for this request.\n\n" + buildCLIToolsPrompt(tools)
+}
+
 // parseClaudeCliResponse parses the JSON output from the claude CLI.
-func (p *ClaudeCliProvider) parseClaudeCliResponse(output string) (*LLMResponse, error) {
+func (p *ClaudeCliProvider) parseClaudeCliResponse(
+	output string, tools []ToolDefinition,
+) (*LLMResponse, error) {
 	var resp claudeCliJSONResponse
 	if err := json.Unmarshal([]byte(output), &resp); err != nil {
 		return nil, fmt.Errorf("failed to parse claude cli response: %w", err)
 	}
-	return p.parseClaudeCliJSONResponse(resp)
+	return p.parseClaudeCliJSONResponse(resp, tools)
 }
 
-func (p *ClaudeCliProvider) parseClaudeCliJSONResponse(resp claudeCliJSONResponse) (*LLMResponse, error) {
+func (p *ClaudeCliProvider) parseClaudeCliJSONResponse(
+	resp claudeCliJSONResponse, tools []ToolDefinition,
+) (*LLMResponse, error) {
 	if resp.IsError {
 		return nil, fmt.Errorf("claude cli returned error: %s", resp.Result)
 	}
 
-	toolCalls := p.extractToolCalls(resp.Result)
+	toolCalls := filterPicoClawToolCalls(p.extractToolCalls(resp.Result), tools)
 
 	finishReason := "stop"
 	content := resp.Result
@@ -339,6 +351,28 @@ func (p *ClaudeCliProvider) parseClaudeCliJSONResponse(resp claudeCliJSONRespons
 		FinishReason: finishReason,
 		Usage:        usage,
 	}, nil
+}
+
+// filterPicoClawToolCalls keeps the Claude CLI's native tool surface separate
+// from PicoClaw's execution loop. Only text-protocol calls naming a function
+// advertised by PicoClaw for this request may become executable ToolCalls.
+func filterPicoClawToolCalls(toolCalls []ToolCall, tools []ToolDefinition) []ToolCall {
+	filtered := make([]ToolCall, 0, len(toolCalls))
+	for _, toolCall := range toolCalls {
+		if isAdvertisedPicoClawTool(toolCall.Name, tools) {
+			filtered = append(filtered, toolCall)
+		}
+	}
+	return filtered
+}
+
+func isAdvertisedPicoClawTool(name string, tools []ToolDefinition) bool {
+	for _, tool := range tools {
+		if tool.Type == "function" && tool.Function.Name == name && name != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // extractToolCalls delegates to the shared extractToolCallsFromText function.

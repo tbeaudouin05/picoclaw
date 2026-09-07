@@ -16,12 +16,11 @@ func buildCLIToolsPrompt(tools []ToolDefinition) string {
 	var sb strings.Builder
 
 	sb.WriteString("## Available Tools\n\n")
-	sb.WriteString("When you need to use a tool, respond with ONLY a JSON object:\n\n")
-	sb.WriteString("```json\n")
+	sb.WriteString("When you need to use one of these tools, your final response MUST contain ONLY this JSON object, with no prose or Markdown fences:\n\n")
 	sb.WriteString(
 		`{"tool_calls":[{"id":"call_xxx","type":"function","function":{"name":"tool_name","arguments":"{...}"}}]}`,
 	)
-	sb.WriteString("\n```\n\n")
+	sb.WriteString("\n\n")
 	sb.WriteString("CRITICAL: The 'arguments' field MUST be a JSON-encoded STRING.\n\n")
 	sb.WriteString("Escaping rules (what to type in `function.arguments`):\n")
 	sb.WriteString("- Use `\\n` to represent a real newline character.\n")
