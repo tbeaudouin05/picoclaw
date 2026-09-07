@@ -253,7 +253,7 @@ func TestChat_WithToolCallsInResponse(t *testing.T) {
 	}
 }
 
-func TestChat_FinalJSONExecutesAdvertisedCronAndExcludesUnadvertisedBash(t *testing.T) {
+func TestChat_FinalJSONExecutesAdvertisedCronAndPreservesUnadvertisedBash(t *testing.T) {
 	mockJSON := `{"type":"result","subtype":"success","is_error":false,"result":"{\"tool_calls\":[{\"id\":\"call_cron\",\"type\":\"function\",\"function\":{\"name\":\"cron\",\"arguments\":\"{\\\"action\\\":\\\"list\\\"}\"}},{\"id\":\"call_bash\",\"type\":\"function\",\"function\":{\"name\":\"Bash\",\"arguments\":\"{\\\"command\\\":\\\"touch /tmp/nope\\\"}\"}}]}"}`
 	p := NewClaudeCliProvider(t.TempDir())
 	p.command = createMockCLI(t, mockJSON, "", 0)
@@ -265,15 +265,18 @@ func TestChat_FinalJSONExecutesAdvertisedCronAndExcludesUnadvertisedBash(t *test
 	if err != nil {
 		t.Fatalf("Chat() error = %v", err)
 	}
-	if resp.FinishReason != "tool_calls" || len(resp.ToolCalls) != 1 {
-		t.Fatalf("response = %#v, want one executable PicoClaw tool call", resp)
+	if resp.FinishReason != "tool_calls" || len(resp.ToolCalls) != 2 {
+		t.Fatalf("response = %#v, want two preserved tool calls", resp)
 	}
 	if got := resp.ToolCalls[0]; got.Name != "cron" || got.Arguments["action"] != "list" {
-		t.Fatalf("tool call = %#v, want cron list", got)
+		t.Fatalf("tool call[0] = %#v, want cron list", got)
+	}
+	if got := resp.ToolCalls[1]; got.Name != "Bash" || got.Arguments["command"] != "touch /tmp/nope" {
+		t.Fatalf("tool call[1] = %#v, want Bash touch", got)
 	}
 }
 
-func TestChat_UnadvertisedBashTextCallIsNotExecutable(t *testing.T) {
+func TestChat_UnadvertisedBashTextCallIsPreservedForToolRegistry(t *testing.T) {
 	mockJSON := `{"type":"result","subtype":"success","is_error":false,"result":"{\"tool_calls\":[{\"id\":\"call_bash\",\"type\":\"function\",\"function\":{\"name\":\"Bash\",\"arguments\":\"{\\\"command\\\":\\\"touch /tmp/nope\\\"}\"}}]}"}`
 	p := NewClaudeCliProvider(t.TempDir())
 	p.command = createMockCLI(t, mockJSON, "", 0)
@@ -285,8 +288,11 @@ func TestChat_UnadvertisedBashTextCallIsNotExecutable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Chat() error = %v", err)
 	}
-	if resp.FinishReason != "stop" || len(resp.ToolCalls) != 0 {
-		t.Fatalf("response = %#v, want no executable tool calls", resp)
+	if resp.FinishReason != "tool_calls" || len(resp.ToolCalls) != 1 {
+		t.Fatalf("response = %#v, want unadvertised tool call preserved for ToolRegistry execution", resp)
+	}
+	if got := resp.ToolCalls[0]; got.Name != "Bash" || got.Arguments["command"] != "touch /tmp/nope" {
+		t.Fatalf("tool call = %#v, want Bash touch", got)
 	}
 }
 
@@ -602,6 +608,41 @@ func TestChatStreamEvents_StreamsCompletedNativeToolUsesWithInterleavedArguments
 		if got.Arguments[want.argKey] != want.argValue {
 			t.Errorf("tool chunk %d arguments = %#v, want %s=%q", i, got.Arguments, want.argKey, want.argValue)
 		}
+	}
+}
+
+func TestChatStreamEvents_NativeToolUsesRemainUIOnlyWhileTerminalTextToolCallsArePreserved(t *testing.T) {
+	output := strings.Join([]string{
+		`{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_read","name":"Read"}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\":\"test.txt\"}"}}}`,
+		`{"type":"stream_event","event":{"type":"content_block_stop","index":1}}`,
+		`{"type":"result","subtype":"success","is_error":false,"result":"{\"tool_calls\":[{\"id\":\"call_unadv\",\"type\":\"function\",\"function\":{\"name\":\"custom_tool\",\"arguments\":\"{}\"}}]}"}`,
+	}, "\n")
+	script := createMockCLI(t, output, "", 0)
+	p := NewClaudeCliProvider(t.TempDir())
+	p.command = script
+
+	var streamedToolCalls []ToolCall
+	resp, err := p.ChatStreamEvents(context.Background(), []Message{{Role: "user", Content: "Hi"}}, nil, "", nil, func(chunk StreamChunk) {
+		if len(chunk.ToolCalls) > 0 {
+			streamedToolCalls = append(streamedToolCalls, chunk.ToolCalls...)
+		}
+	})
+	if err != nil {
+		t.Fatalf("ChatStreamEvents() error = %v", err)
+	}
+
+	// Native tool uses remain UI-only in stream chunks
+	if len(streamedToolCalls) != 1 || streamedToolCalls[0].Name != "Read" {
+		t.Fatalf("streamedToolCalls = %#v, want one native Read tool call for UI", streamedToolCalls)
+	}
+
+	// Native tool use must NOT become a PicoClaw execution; terminal text tool call MUST be preserved
+	if len(resp.ToolCalls) != 1 || resp.ToolCalls[0].Name != "custom_tool" {
+		t.Fatalf("resp.ToolCalls = %#v, want only terminal text tool call custom_tool", resp.ToolCalls)
+	}
+	if resp.FinishReason != "tool_calls" {
+		t.Errorf("FinishReason = %q, want tool_calls", resp.FinishReason)
 	}
 }
 
@@ -1093,6 +1134,58 @@ func TestParseClaudeCliResponse_WhitespaceResult(t *testing.T) {
 	}
 	if resp.Content != "hello" {
 		t.Errorf("Content = %q, want %q (should be trimmed)", resp.Content, "hello")
+	}
+}
+
+func TestParseClaudeCliResponse_PreservesUnadvertisedToolCalls(t *testing.T) {
+	p := NewClaudeCliProvider("/workspace")
+	output := `{"type":"result","subtype":"success","is_error":false,"result":"{\"tool_calls\":[{\"id\":\"call_unknown\",\"type\":\"function\",\"function\":{\"name\":\"non_advertised_tool\",\"arguments\":\"{\\\"foo\\\":\\\"bar\\\"}\"}}]}","session_id":"s1"}`
+
+	resp, err := p.parseClaudeCliResponse(output, []ToolDefinition{{
+		Type:     "function",
+		Function: ToolFunctionDefinition{Name: "cron"},
+	}})
+	if err != nil {
+		t.Fatalf("error = %v", err)
+	}
+	if resp.FinishReason != "tool_calls" {
+		t.Errorf("FinishReason = %q, want tool_calls", resp.FinishReason)
+	}
+	if len(resp.ToolCalls) != 1 {
+		t.Fatalf("ToolCalls len = %d, want 1", len(resp.ToolCalls))
+	}
+	if resp.ToolCalls[0].Name != "non_advertised_tool" {
+		t.Errorf("ToolCalls[0].Name = %q, want non_advertised_tool", resp.ToolCalls[0].Name)
+	}
+	if resp.ToolCalls[0].Arguments["foo"] != "bar" {
+		t.Errorf("ToolCalls[0].Arguments[foo] = %v, want bar", resp.ToolCalls[0].Arguments["foo"])
+	}
+}
+
+func TestFilterPicoClawToolCalls(t *testing.T) {
+	tools := []ToolDefinition{
+		{Type: "function", Function: ToolFunctionDefinition{Name: "cron"}},
+		{Type: "function", Function: ToolFunctionDefinition{Name: "bash"}},
+		{Type: "other", Function: ToolFunctionDefinition{Name: "ignored"}},
+	}
+	calls := []ToolCall{
+		{ID: "1", Name: "cron"},
+		{ID: "2", Name: "unadvertised"},
+		{ID: "3", Name: "bash"},
+		{ID: "4", Name: ""},
+		{ID: "5", Name: "ignored"},
+	}
+
+	filtered := filterPicoClawToolCalls(calls, tools)
+	if len(filtered) != 2 {
+		t.Fatalf("filterPicoClawToolCalls len = %d, want 2", len(filtered))
+	}
+	if filtered[0].Name != "cron" || filtered[1].Name != "bash" {
+		t.Errorf("filtered = %#v, want cron and bash", filtered)
+	}
+
+	if len(filterPicoClawToolCalls(nil, tools)) != 0 {
+		t.Error("filterPicoClawToolCalls(nil) should be empty")
 	}
 }
 

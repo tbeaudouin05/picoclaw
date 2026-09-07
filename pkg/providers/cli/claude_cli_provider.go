@@ -321,13 +321,16 @@ func (p *ClaudeCliProvider) parseClaudeCliResponse(
 }
 
 func (p *ClaudeCliProvider) parseClaudeCliJSONResponse(
-	resp claudeCliJSONResponse, tools []ToolDefinition,
+	resp claudeCliJSONResponse, _ []ToolDefinition,
 ) (*LLMResponse, error) {
 	if resp.IsError {
 		return nil, fmt.Errorf("claude cli returned error: %s", resp.Result)
 	}
 
-	toolCalls := filterPicoClawToolCalls(p.extractToolCalls(resp.Result), tools)
+	// Preserve each parsed tool call—whether advertised or unadvertised/unknown—
+	// so PicoClaw standard ToolRegistry execution returns its normal unknown-tool
+	// error as feedback to the model on the next turn.
+	toolCalls := p.extractToolCalls(resp.Result)
 
 	finishReason := "stop"
 	content := resp.Result
