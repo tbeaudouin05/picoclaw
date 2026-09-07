@@ -83,10 +83,13 @@ func TestAntigravityCliChatUsesSafeScopedInvocationAndTextProtocol(t *testing.T)
 		t.Fatal(err)
 	}
 	args := strings.Split(strings.TrimSpace(string(argsBytes)), "\n")
-	for _, want := range []string{"--sandbox", "--mode", "plan", "--disable-slash-commands", "--add-dir", workspace, "--model", "gemini-test"} {
+	for _, want := range []string{"--sandbox", "--disable-slash-commands", "--add-dir", workspace, "--model", "gemini-test"} {
 		if !containsString(args, want) {
 			t.Errorf("args missing %q: %q", want, args)
 		}
+	}
+	if containsString(args, "--mode") || containsString(args, "plan") {
+		t.Fatalf("incompatible plan mode flags present: %q", args)
 	}
 	if !containsStringPrefix(args, "--print=") {
 		t.Fatalf("args missing attached print prompt: %q", args)
@@ -188,6 +191,14 @@ func TestAntigravityCliChatRejectsTerminalError(t *testing.T) {
 	}
 }
 
+func TestAntigravityCliChatRejectsSuccessfulEmptyResponse(t *testing.T) {
+	p := NewAntigravityCliProvider("")
+	_, err := p.parseResponse(`{"status":"SUCCESS","response":" \t\n "}`, nil)
+	if err == nil || !strings.Contains(err.Error(), "antigravity cli returned an empty response") {
+		t.Fatalf("parseResponse() error = %v, want retryable empty-response error", err)
+	}
+}
+
 func TestAntigravityCliChatStreamEventsUsesCurrentNDJSONAndDoesNotDuplicateFinalResponse(t *testing.T) {
 	workspace := t.TempDir()
 	stateDir := t.TempDir()
@@ -217,10 +228,13 @@ func TestAntigravityCliChatStreamEventsUsesCurrentNDJSONAndDoesNotDuplicateFinal
 		t.Fatal(err)
 	}
 	args := strings.Split(strings.TrimSpace(string(argsBytes)), "\n")
-	for _, want := range []string{"--output-format", "stream-json", "--sandbox", "--mode", "plan", "--disable-slash-commands", "--add-dir", workspace, "--model", "gemini-test"} {
+	for _, want := range []string{"--output-format", "stream-json", "--sandbox", "--disable-slash-commands", "--add-dir", workspace, "--model", "gemini-test"} {
 		if !containsString(args, want) {
 			t.Errorf("args missing %q: %q", want, args)
 		}
+	}
+	if containsString(args, "--mode") || containsString(args, "plan") {
+		t.Fatalf("incompatible plan mode flags present: %q", args)
 	}
 }
 

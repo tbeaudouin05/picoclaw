@@ -73,6 +73,30 @@ func TestFallback_SecondCandidateSuccess(t *testing.T) {
 	}
 }
 
+func TestFallback_AntigravityCliEmptyResponseUsesNextCandidate(t *testing.T) {
+	fc := NewFallbackChain(NewCooldownTracker(), nil)
+	attempts := 0
+	result, err := fc.Execute(context.Background(), []FallbackCandidate{
+		makeCandidate("antigravity-cli", "antigravity-cli"),
+		makeCandidate("anthropic", "claude"),
+	}, func(context.Context, string, string) (*LLMResponse, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, errors.New("antigravity cli returned an empty response")
+		}
+		return &LLMResponse{Content: "fallback response", FinishReason: "stop"}, nil
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if attempts != 2 || result.Provider != "anthropic" || result.Response.Content != "fallback response" {
+		t.Fatalf("attempts = %d, result = %#v; want fallback success", attempts, result)
+	}
+	if len(result.Attempts) != 1 || result.Attempts[0].Reason != FailoverUnknown {
+		t.Fatalf("attempts = %#v, want classified empty-response failure", result.Attempts)
+	}
+}
+
 type abortFallbackLikeError struct{}
 
 func (abortFallbackLikeError) Error() string       { return "rate limit exceeded" }

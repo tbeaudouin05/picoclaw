@@ -320,6 +320,11 @@ func classifyByMessage(msg string) FailoverReason {
 	if matchesAny(msg, contextOverflowPatterns) {
 		return FailoverContextOverflow
 	}
+	// agy can exit successfully while yielding no terminal text or tool call.
+	// That is a provider failure, not a valid user response.
+	if strings.Contains(msg, "antigravity cli returned an empty response") {
+		return FailoverUnknown
+	}
 	return ""
 }
 

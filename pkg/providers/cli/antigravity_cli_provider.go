@@ -24,7 +24,7 @@ func NewAntigravityCliProvider(workspace string) *AntigravityCliProvider {
 	return &AntigravityCliProvider{command: "agy", workspace: workspace}
 }
 
-// Chat executes agy in its documented sandboxed, noninteractive plan mode.
+// Chat executes agy in sandboxed, noninteractive print mode.
 func (p *AntigravityCliProvider) Chat(
 	ctx context.Context, messages []Message, tools []ToolDefinition, model string, options map[string]any,
 ) (*LLMResponse, error) {
@@ -208,6 +208,12 @@ func (p *AntigravityCliProvider) ChatStreamEvents(
 	if terminalResult == nil {
 		return nil, fmt.Errorf("antigravity cli stream ended without terminal result")
 	}
+	// agy can put the final text entirely in step updates and leave the
+	// successful terminal response empty. Those updates are a valid response;
+	// only a response with neither terminal text nor deltas is retryable.
+	if gotDelta && strings.TrimSpace(terminalResult.Response) == "" {
+		terminalResult.Response = content.String()
+	}
 
 	response, err := p.parseJSONResponse(*terminalResult, tools)
 	if err != nil {
@@ -227,7 +233,6 @@ func (p *AntigravityCliProvider) args(prompt, outputFormat, model string) []stri
 		"--print=" + prompt,
 		"--output-format", outputFormat,
 		"--sandbox",
-		"--mode", "plan",
 		"--disable-slash-commands",
 	}
 	if p.workspace != "" {
@@ -253,6 +258,9 @@ func (p *AntigravityCliProvider) parseJSONResponse(result antigravityCliJSONResp
 
 	toolCalls := filterAntigravityTerminalToolCalls(extractTerminalToolCallsFromText(result.Response), tools)
 	content := result.Response
+	if strings.TrimSpace(content) == "" && len(toolCalls) == 0 {
+		return nil, fmt.Errorf("antigravity cli returned an empty response")
+	}
 	finishReason := "stop"
 	if len(toolCalls) > 0 {
 		content = ""

@@ -400,6 +400,16 @@ func TestClassifyError_UnknownError(t *testing.T) {
 	}
 }
 
+func TestClassifyError_AntigravityCliEmptyResponse(t *testing.T) {
+	result := ClassifyError(errors.New("antigravity cli returned an empty response"), "antigravity-cli", "antigravity-cli")
+	if result == nil {
+		t.Fatal("expected empty Antigravity CLI response to be classified")
+	}
+	if result.Reason != FailoverUnknown || !result.IsRetriable() {
+		t.Fatalf("result = %#v, want retriable unknown failure", result)
+	}
+}
+
 func TestClassifyError_ProviderModelPropagation(t *testing.T) {
 	err := errors.New("rate limit exceeded")
 	result := ClassifyError(err, "my-provider", "my-model")
