@@ -347,6 +347,58 @@ func TestInitChannelList_RejectsNegativeStreamingDeliveryValues(t *testing.T) {
 	}
 }
 
+func TestInitChannelList_SkipsDisabledWhatsAppSettingsValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		channelType string
+		enabled     bool
+		wantErr     bool
+	}{
+		{
+			name:        "whatsapp disabled",
+			channelType: ChannelWhatsApp,
+			enabled:     false,
+		},
+		{
+			name:        "whatsapp enabled",
+			channelType: ChannelWhatsApp,
+			enabled:     true,
+			wantErr:     true,
+		},
+		{
+			name:        "whatsapp native disabled",
+			channelType: ChannelWhatsAppNative,
+			enabled:     false,
+		},
+		{
+			name:        "whatsapp native enabled",
+			channelType: ChannelWhatsAppNative,
+			enabled:     true,
+			wantErr:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			channels := ChannelsConfig{
+				tt.channelType: {
+					Type:     tt.channelType,
+					Enabled:  tt.enabled,
+					Settings: RawNode(`{"use_native":"not-a-bool"}`),
+				},
+			}
+
+			err := InitChannelList(channels)
+			if tt.wantErr && err == nil {
+				t.Fatal("InitChannelList() error = nil, want WhatsApp settings validation error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("InitChannelList() error = %v, want nil for disabled WhatsApp", err)
+			}
+		})
+	}
+}
+
 // ═══════════════════════════════════════════════════
 //  JSON marshal: secure fields masked as [NOT_HERE]
 // ═══════════════════════════════════════════════════

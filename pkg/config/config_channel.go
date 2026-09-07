@@ -741,6 +741,13 @@ func InitChannelList(channels ChannelsConfig) error {
 		if !isValidChannelType(bc.Type) {
 			return fmt.Errorf("channel %q has unknown type %q", name, bc.Type)
 		}
+		// A disabled WhatsApp channel must not make a config/binary transition
+		// depend on native WhatsApp support or on its inactive settings. Leave
+		// those settings undecoded until the channel is enabled; enabled WhatsApp
+		// channels continue through the normal validation path below.
+		if !bc.Enabled && (bc.Type == ChannelWhatsApp || bc.Type == ChannelWhatsAppNative) {
+			continue
+		}
 		// Decode into the correct typed settings
 		if target := newChannelSettings(bc.Type); target != nil {
 			if err := bc.Decode(target); err != nil {
