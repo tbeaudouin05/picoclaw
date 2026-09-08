@@ -23,6 +23,13 @@ func switchCommand() Definition {
 					if nthToken(req.Text, 2) != "to" || value == "" {
 						return req.Reply("Usage: /switch model to <name>")
 					}
+					if (value == "default" || value == "clear") && rt.ClearModelOverride != nil {
+						oldModel, err := rt.ClearModelOverride()
+						if err != nil {
+							return req.Reply(err.Error())
+						}
+						return req.Reply(fmt.Sprintf("Cleared model override (was %s)", oldModel))
+					}
 					oldModel, err := rt.SwitchModel(value)
 					if err != nil {
 						return req.Reply(err.Error())

@@ -60,6 +60,7 @@ type Runtime struct {
 	GetActiveTurn      func() any // Returning any to avoid circular dependency with agent package
 	GetContextStats    func() *ContextStats
 	SwitchModel        func(value string) (oldModel string, err error)
+	ClearModelOverride func() (oldModel string, err error)
 	SwitchChannel      func(value string) error
 	ClearHistory       func() error
 	ReloadConfig       func() error

@@ -24,6 +24,7 @@ import (
 // session manager, context builder, and tool registry.
 type AgentInstance struct {
 	modelMu                   *sync.RWMutex
+	modelOverrideBase         *AgentInstance
 	ID                        string
 	Name                      string
 	Model                     string

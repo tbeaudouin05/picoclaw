@@ -3600,10 +3600,11 @@ func TestProcessMessage_SwitchModelShowModelConsistency(t *testing.T) {
 	}
 
 	showResp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
-		Channel:  "telegram",
-		SenderID: "user1",
-		ChatID:   "chat1",
-		Content:  "/show model",
+		Channel:    "telegram",
+		SenderID:   "user1",
+		ChatID:     "chat1",
+		SessionKey: "agent:main:telegram:direct:chat1",
+		Content:    "/show model",
 	})
 	if !strings.Contains(showResp, "Current Model: deepseek (Provider: openrouter)") {
 		t.Fatalf("unexpected /show model reply after switch: %q", showResp)
@@ -3611,6 +3612,63 @@ func TestProcessMessage_SwitchModelShowModelConsistency(t *testing.T) {
 
 	if provider.calls != 0 {
 		t.Fatalf("LLM should not be called for /switch and /show, calls=%d", provider.calls)
+	}
+
+	nonTelegramResp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
+		Channel:  "whatsapp",
+		SenderID: "user2",
+		ChatID:   "chat2",
+		Content:  "/switch model to deepseek",
+	})
+	if !strings.Contains(nonTelegramResp, "Switched model from local to deepseek") {
+		t.Fatalf("unexpected non-Telegram /switch reply: %q", nonTelegramResp)
+	}
+	if got := al.registry.GetDefaultAgent().Model; got != "deepseek" {
+		t.Fatalf("global model after non-Telegram switch = %q, want deepseek", got)
+	}
+}
+
+func TestAgentWithTelegramModelOverride_CachesTransitionOnRoutedAgent(t *testing.T) {
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{Defaults: config.AgentDefaults{
+			Workspace: t.TempDir(), Provider: "openai", ModelName: "local",
+		}},
+		ModelList: []*config.ModelConfig{
+			{ModelName: "local", Model: "openai/local"},
+			{ModelName: "model-a", Model: "openai/a"},
+			{ModelName: "model-b", Model: "openai/b"},
+		},
+	}
+	baseProvider := &countingMockProvider{response: "local"}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), baseProvider)
+	created := make(map[string]int)
+	al.providerFactory = func(modelCfg *config.ModelConfig) (providers.LLMProvider, string, error) {
+		created[modelCfg.ModelName]++
+		return &countingMockProvider{response: modelCfg.ModelName}, modelCfg.Model, nil
+	}
+
+	routed := al.registry.GetDefaultAgent()
+	viewA, err := al.agentWithTelegramModelOverride(routed, "model-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	viewB, err := al.agentWithTelegramModelOverride(viewA, "model-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	viewBAgain, err := al.agentWithTelegramModelOverride(routed, "model-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if created["model-a"] != 1 || created["model-b"] != 1 {
+		t.Fatalf("provider creations = %v, want model-a and model-b once each", created)
+	}
+	if viewB.Provider != viewBAgain.Provider {
+		t.Fatal("subsequent model-b view did not reuse routed agent's cached provider")
+	}
+	if routed.Model != "local" {
+		t.Fatalf("routed agent model = %q, want local", routed.Model)
 	}
 }
 
@@ -3689,6 +3747,7 @@ func TestProcessMessage_SwitchModelRoutesSubsequentRequestsToSelectedProvider(t 
 	defer remoteServer.Close()
 
 	cfg := &config.Config{
+		Session: config.SessionConfig{Dimensions: []string{"chat"}},
 		Agents: config.AgentsConfig{
 			Defaults: config.AgentDefaults{
 				Workspace:         tmpDir,
@@ -3756,6 +3815,9 @@ func TestProcessMessage_SwitchModelRoutesSubsequentRequestsToSelectedProvider(t 
 	if !strings.Contains(switchResp, "Switched model from local to deepseek") {
 		t.Fatalf("unexpected /switch reply: %q", switchResp)
 	}
+	if got := al.registry.GetDefaultAgent().Model; got != "local" {
+		t.Fatalf("global model after Telegram switch = %q, want local", got)
+	}
 	agent := al.registry.GetDefaultAgent()
 	for _, candidate := range agent.Candidates[1:] {
 		if agent.CandidateProviders[candidateProviderKey(candidate)] == nil {
@@ -3784,6 +3846,41 @@ func TestProcessMessage_SwitchModelRoutesSubsequentRequestsToSelectedProvider(t 
 			remoteModel,
 			"deepseek-v3.2",
 		)
+	}
+
+	otherChatResp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "user2",
+		ChatID:   "chat2",
+		Content:  "hello from another chat",
+	})
+	if otherChatResp != "local reply" {
+		t.Fatalf("response in other chat = %q, want local reply", otherChatResp)
+	}
+	if localCalls != 2 || remoteCalls != 1 {
+		t.Fatalf("calls after other chat: local=%d remote=%d, want 2 and 1", localCalls, remoteCalls)
+	}
+
+	clearResp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "user1",
+		ChatID:   "chat1",
+		Content:  "/switch model to default",
+	})
+	if clearResp != "Cleared model override (was deepseek)" {
+		t.Fatalf("unexpected clear reply: %q", clearResp)
+	}
+	afterClearResp := helper.executeAndGetResponse(t, context.Background(), bus.InboundMessage{
+		Channel:  "telegram",
+		SenderID: "user1",
+		ChatID:   "chat1",
+		Content:  "hello after clear",
+	})
+	if afterClearResp != "local reply" {
+		t.Fatalf("response after clear = %q, want local reply", afterClearResp)
+	}
+	if localCalls != 3 || remoteCalls != 1 {
+		t.Fatalf("calls after clear: local=%d remote=%d, want 3 and 1", localCalls, remoteCalls)
 	}
 }
 

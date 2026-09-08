@@ -41,14 +41,15 @@ const (
 // Scope is stored as raw JSON so pkg/memory can stay decoupled from the
 // higher-level session package while still preserving structured scope data.
 type SessionMeta struct {
-	Key       string          `json:"key"`
-	Summary   string          `json:"summary"`
-	Skip      int             `json:"skip"`
-	Count     int             `json:"count"`
-	CreatedAt time.Time       `json:"created_at"`
-	UpdatedAt time.Time       `json:"updated_at"`
-	Scope     json.RawMessage `json:"scope,omitempty"`
-	Aliases   []string        `json:"aliases,omitempty"`
+	Key           string          `json:"key"`
+	Summary       string          `json:"summary"`
+	Skip          int             `json:"skip"`
+	Count         int             `json:"count"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
+	Scope         json.RawMessage `json:"scope,omitempty"`
+	Aliases       []string        `json:"aliases,omitempty"`
+	ModelOverride string          `json:"model_override,omitempty"`
 }
 
 // JSONLStore implements Store using append-only JSONL files.
@@ -224,6 +225,25 @@ func (s *JSONLStore) UpsertSessionMeta(
 	}
 	meta.UpdatedAt = now
 
+	return s.writeMeta(sessionKey, meta)
+}
+
+// SetSessionModelOverride updates only the model selection in session metadata.
+func (s *JSONLStore) SetSessionModelOverride(_ context.Context, sessionKey, model string) error {
+	l := s.sessionLock(sessionKey)
+	l.Lock()
+	defer l.Unlock()
+
+	meta, err := s.readMeta(sessionKey)
+	if err != nil {
+		return err
+	}
+	meta.ModelOverride = strings.TrimSpace(model)
+	now := time.Now()
+	if meta.CreatedAt.IsZero() {
+		meta.CreatedAt = now
+	}
+	meta.UpdatedAt = now
 	return s.writeMeta(sessionKey, meta)
 }
 

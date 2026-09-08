@@ -159,6 +159,21 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 	// agent-scoped keys supplied by the caller.
 	scopeKey := resolveScopeKey(allocation.SessionKey, msg.SessionKey)
 	sessionKey := scopeKey
+	if model := telegramSessionModelOverride(agent, sessionKey, msg.Channel); model != "" {
+		var overrideErr error
+		agent, overrideErr = al.agentWithTelegramModelOverride(agent, model)
+		if overrideErr != nil {
+			logger.WarnCF("agent", "Ignoring invalid Telegram session model override", map[string]any{
+				"session_key": sessionKey,
+				"model":       model,
+				"error":       overrideErr.Error(),
+			})
+			_, agent, routeErr = al.resolveMessageRoute(msg)
+			if routeErr != nil {
+				return "", routeErr
+			}
+		}
+	}
 
 	// Reset message-tool state for this round so we don't skip publishing due to a previous round.
 	if tool, ok := agent.Tools.Get("message"); ok {

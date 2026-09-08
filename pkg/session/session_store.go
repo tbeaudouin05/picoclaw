@@ -32,3 +32,11 @@ type SessionStore interface {
 	// Close releases resources held by the store.
 	Close() error
 }
+
+// ModelOverrideStore persists an optional model selection alongside a session.
+// It is intentionally separate from SessionStore so callers can continue to
+// use lightweight session implementations that do not support metadata.
+type ModelOverrideStore interface {
+	GetModelOverride(sessionKey string) string
+	SetModelOverride(sessionKey, model string) error
+}

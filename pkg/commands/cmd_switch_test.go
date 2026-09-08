@@ -31,6 +31,40 @@ func TestSwitchModel_Success(t *testing.T) {
 	}
 }
 
+func TestSwitchModel_ClearOverride(t *testing.T) {
+	var switched bool
+	rt := &Runtime{
+		SwitchModel: func(value string) (string, error) {
+			switched = true
+			return "", nil
+		},
+		ClearModelOverride: func() (string, error) {
+			return "chat-model", nil
+		},
+	}
+	ex := NewExecutor(NewRegistry(BuiltinDefinitions()), rt)
+
+	for _, value := range []string{"default", "clear"} {
+		var reply string
+		res := ex.Execute(context.Background(), Request{
+			Text: "/switch model to " + value,
+			Reply: func(text string) error {
+				reply = text
+				return nil
+			},
+		})
+		if res.Outcome != OutcomeHandled {
+			t.Fatalf("%s outcome=%v, want=%v", value, res.Outcome, OutcomeHandled)
+		}
+		if reply != "Cleared model override (was chat-model)" {
+			t.Fatalf("%s reply=%q", value, reply)
+		}
+	}
+	if switched {
+		t.Fatal("SwitchModel was called while clearing an override")
+	}
+}
+
 func TestSwitchModel_MissingToKeyword(t *testing.T) {
 	rt := &Runtime{
 		SwitchModel: func(value string) (string, error) {

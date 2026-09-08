@@ -290,91 +290,137 @@ func (al *AgentLoop) buildCommandsRuntime(
 		return al.reloadFunc()
 	}
 	if agent != nil {
-		if agent.ContextBuilder != nil {
-			rt.ListSkillNames = agent.ContextBuilder.ListSkillNames
-		}
-		rt.GetModelInfo = func() (string, string) {
-			modelMu := agent.modelStateMutex()
-			modelMu.RLock()
-			defer modelMu.RUnlock()
-			return agent.Model, resolvedCandidateProvider(agent.Candidates, cfg.Agents.Defaults.Provider)
-		}
-		rt.SwitchModel = func(value string) (string, error) {
-			value = strings.TrimSpace(value)
-			modelMu := agent.modelStateMutex()
-			modelMu.Lock()
-			defer modelMu.Unlock()
-			modelFound := false
-			for _, modelCfg := range cfg.ModelList {
-				if modelCfg != nil && modelCfg.ModelName == value {
-					modelFound = true
-					break
+		isTelegram := opts != nil && strings.EqualFold(opts.Dispatch.Channel(), "telegram")
+		if isTelegram {
+			ensureOverrideSessionMetadata := func() {
+				ensureSessionMetadata(
+					agent.Sessions,
+					opts.Dispatch.SessionKey,
+					opts.Dispatch.SessionScope,
+					opts.Dispatch.SessionAliases,
+				)
+			}
+			rt.GetModelInfo = func() (string, string) {
+				return agent.Model, resolvedCandidateProvider(agent.Candidates, cfg.Agents.Defaults.Provider)
+			}
+			rt.ClearModelOverride = func() (string, error) {
+				store, ok := agent.Sessions.(sessionModelOverrideStore)
+				if !ok {
+					return "", fmt.Errorf("session model overrides are unavailable")
 				}
+				ensureOverrideSessionMetadata()
+				oldModel := telegramSessionModelOverride(agent, opts.Dispatch.SessionKey, "telegram")
+				if err := store.SetModelOverride(opts.Dispatch.SessionKey, ""); err != nil {
+					return "", fmt.Errorf("clear session model override: %w", err)
+				}
+				if oldModel == "" {
+					oldModel = agent.Model
+				}
+				return oldModel, nil
 			}
-			if !modelFound {
-				return "", fmt.Errorf("model %q not found in model_list or providers", value)
+			rt.SwitchModel = func(value string) (string, error) {
+				value = strings.TrimSpace(value)
+				if !configuredModel(cfg, value) {
+					return "", fmt.Errorf("model %q not found in model_list or providers", value)
+				}
+				if _, err := al.agentWithTelegramModelOverride(agent, value); err != nil {
+					return "", err
+				}
+				store, ok := agent.Sessions.(sessionModelOverrideStore)
+				if !ok {
+					return "", fmt.Errorf("session model overrides are unavailable")
+				}
+				ensureOverrideSessionMetadata()
+				oldModel := agent.Model
+				if err := store.SetModelOverride(opts.Dispatch.SessionKey, value); err != nil {
+					return "", fmt.Errorf("save session model override: %w", err)
+				}
+				return oldModel, nil
 			}
+		} else {
+			rt.GetModelInfo = func() (string, string) {
+				modelMu := agent.modelStateMutex()
+				modelMu.RLock()
+				defer modelMu.RUnlock()
+				return agent.Model, resolvedCandidateProvider(agent.Candidates, cfg.Agents.Defaults.Provider)
+			}
+			rt.SwitchModel = func(value string) (string, error) {
+				value = strings.TrimSpace(value)
+				modelMu := agent.modelStateMutex()
+				modelMu.Lock()
+				defer modelMu.Unlock()
+				modelFound := false
+				for _, modelCfg := range cfg.ModelList {
+					if modelCfg != nil && modelCfg.ModelName == value {
+						modelFound = true
+						break
+					}
+				}
+				if !modelFound {
+					return "", fmt.Errorf("model %q not found in model_list or providers", value)
+				}
 
-			nextCandidates := resolveModelCandidates(cfg, cfg.Agents.Defaults.Provider, value, agent.Fallbacks)
-			if len(nextCandidates) == 0 {
-				return "", fmt.Errorf("model %q did not resolve to any provider candidates", value)
-			}
-			modelCfg, err := resolvedCandidateModelConfig(cfg, nextCandidates[0], agent.Workspace)
-			if err != nil {
-				return "", err
-			}
-			nextProvider, _, err := providers.CreateProviderFromConfig(modelCfg)
-			if err != nil {
-				return "", fmt.Errorf("failed to initialize model %q: %w", value, err)
-			}
-			nextCandidateProviders := make(map[string]providers.LLMProvider)
-			copyInitializedCandidateProviders(
-				agent.CandidateProviders,
-				nextCandidateProviders,
-				agent.ImageCandidates,
-			)
-			copyInitializedCandidateProviders(
-				agent.CandidateProviders,
-				nextCandidateProviders,
-				agent.LightCandidates,
-			)
-			inheritPrimaryProviderForCandidates(
-				cfg,
-				agent.Workspace,
-				nextCandidates[0],
-				nextCandidates[1:],
-				nextProvider,
-				nextCandidateProviders,
-			)
-			populateCandidateProvidersFromCandidates(
-				cfg,
-				agent.Workspace,
-				nextCandidates[1:],
-				nextCandidateProviders,
-			)
+				nextCandidates := resolveModelCandidates(cfg, cfg.Agents.Defaults.Provider, value, agent.Fallbacks)
+				if len(nextCandidates) == 0 {
+					return "", fmt.Errorf("model %q did not resolve to any provider candidates", value)
+				}
+				modelCfg, err := resolvedCandidateModelConfig(cfg, nextCandidates[0], agent.Workspace)
+				if err != nil {
+					return "", err
+				}
+				nextProvider, _, err := providers.CreateProviderFromConfig(modelCfg)
+				if err != nil {
+					return "", fmt.Errorf("failed to initialize model %q: %w", value, err)
+				}
+				nextCandidateProviders := make(map[string]providers.LLMProvider)
+				copyInitializedCandidateProviders(
+					agent.CandidateProviders,
+					nextCandidateProviders,
+					agent.ImageCandidates,
+				)
+				copyInitializedCandidateProviders(
+					agent.CandidateProviders,
+					nextCandidateProviders,
+					agent.LightCandidates,
+				)
+				inheritPrimaryProviderForCandidates(
+					cfg,
+					agent.Workspace,
+					nextCandidates[0],
+					nextCandidates[1:],
+					nextProvider,
+					nextCandidateProviders,
+				)
+				populateCandidateProvidersFromCandidates(
+					cfg,
+					agent.Workspace,
+					nextCandidates[1:],
+					nextCandidateProviders,
+				)
 
-			oldModel := agent.Model
-			oldProvider := agent.Provider
-			oldCandidateProviders := agent.CandidateProviders
-			previousProviders := make(map[string]providers.LLMProvider, len(oldCandidateProviders)+1)
-			for key, provider := range oldCandidateProviders {
-				previousProviders[key] = provider
-			}
-			previousProviders["previous-primary"] = oldProvider
-			agent.Model = value
-			agent.Provider = nextProvider
-			agent.Candidates = nextCandidates
-			agent.CandidateProviders = nextCandidateProviders
-			agent.ThinkingLevel = parseThinkingLevel(modelCfg.ThinkingLevel)
-			agent.ThinkingLevelConfigured = isConfiguredThinkingLevel(modelCfg.ThinkingLevel)
+				oldModel := agent.Model
+				oldProvider := agent.Provider
+				oldCandidateProviders := agent.CandidateProviders
+				previousProviders := make(map[string]providers.LLMProvider, len(oldCandidateProviders)+1)
+				for key, provider := range oldCandidateProviders {
+					previousProviders[key] = provider
+				}
+				previousProviders["previous-primary"] = oldProvider
+				agent.Model = value
+				agent.Provider = nextProvider
+				agent.Candidates = nextCandidates
+				agent.CandidateProviders = nextCandidateProviders
+				agent.ThinkingLevel = parseThinkingLevel(modelCfg.ThinkingLevel)
+				agent.ThinkingLevelConfigured = isConfiguredThinkingLevel(modelCfg.ThinkingLevel)
 
-			closeUnreferencedStatefulProviders(
-				previousProviders,
-				nextCandidateProviders,
-				nextProvider,
-				agent.LightProvider,
-			)
-			return oldModel, nil
+				closeUnreferencedStatefulProviders(
+					previousProviders,
+					nextCandidateProviders,
+					nextProvider,
+					agent.LightProvider,
+				)
+				return oldModel, nil
+			}
 		}
 
 		rt.ClearHistory = func() error {

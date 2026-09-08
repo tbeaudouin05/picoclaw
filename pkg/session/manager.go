@@ -13,11 +13,34 @@ import (
 )
 
 type Session struct {
-	Key      string              `json:"key"`
-	Messages []providers.Message `json:"messages"`
-	Summary  string              `json:"summary,omitempty"`
-	Created  time.Time           `json:"created"`
-	Updated  time.Time           `json:"updated"`
+	Key           string              `json:"key"`
+	Messages      []providers.Message `json:"messages"`
+	Summary       string              `json:"summary,omitempty"`
+	ModelOverride string              `json:"model_override,omitempty"`
+	Created       time.Time           `json:"created"`
+	Updated       time.Time           `json:"updated"`
+}
+
+func (sm *SessionManager) GetModelOverride(key string) string {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	if stored := sm.sessions[key]; stored != nil {
+		return stored.ModelOverride
+	}
+	return ""
+}
+
+func (sm *SessionManager) SetModelOverride(key, model string) error {
+	sm.mu.Lock()
+	session, ok := sm.sessions[key]
+	if !ok {
+		session = &Session{Key: key, Messages: []providers.Message{}, Created: time.Now()}
+		sm.sessions[key] = session
+	}
+	session.ModelOverride = strings.TrimSpace(model)
+	session.Updated = time.Now()
+	sm.mu.Unlock()
+	return sm.Save(key)
 }
 
 type SessionManager struct {
@@ -213,10 +236,11 @@ func (sm *SessionManager) Save(key string) error {
 	}
 
 	snapshot := Session{
-		Key:     stored.Key,
-		Summary: stored.Summary,
-		Created: stored.Created,
-		Updated: stored.Updated,
+		Key:           stored.Key,
+		Summary:       stored.Summary,
+		ModelOverride: stored.ModelOverride,
+		Created:       stored.Created,
+		Updated:       stored.Updated,
 	}
 	if len(stored.Messages) > 0 {
 		snapshot.Messages = messageutil.FilterInvalidHistoryMessages(stored.Messages)

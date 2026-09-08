@@ -112,3 +112,25 @@ func TestLoadSessions_NormalizesMissingCreatedAt(t *testing.T) {
 		t.Fatalf("history[0].CreatedAt = %v, want non-zero timestamp", history[0].CreatedAt)
 	}
 }
+
+func TestSessionManagerModelOverridePersistsAndClears(t *testing.T) {
+	dir := t.TempDir()
+	sm := NewSessionManager(dir)
+	if err := sm.SetModelOverride("telegram:chat", " alternate "); err != nil {
+		t.Fatal(err)
+	}
+	if got := sm.GetModelOverride("telegram:chat"); got != "alternate" {
+		t.Fatalf("GetModelOverride() = %q, want alternate", got)
+	}
+
+	reopened := NewSessionManager(dir)
+	if got := reopened.GetModelOverride("telegram:chat"); got != "alternate" {
+		t.Fatalf("reopened GetModelOverride() = %q, want alternate", got)
+	}
+	if err := reopened.SetModelOverride("telegram:chat", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := NewSessionManager(dir).GetModelOverride("telegram:chat"); got != "" {
+		t.Fatalf("cleared GetModelOverride() = %q, want empty", got)
+	}
+}

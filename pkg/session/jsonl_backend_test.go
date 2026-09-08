@@ -236,6 +236,40 @@ func TestJSONLBackend_ResolveAliasAndPersistMetadata(t *testing.T) {
 	}
 }
 
+func TestJSONLBackend_ModelOverrideResolvesAliasAndPersists(t *testing.T) {
+	dir := t.TempDir()
+	store, err := memory.NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := session.NewJSONLBackend(store)
+	b.EnsureSessionMetadata("canonical", &session.SessionScope{AgentID: "main"}, []string{"alias"})
+	if err := b.SetModelOverride("alias", " alternate "); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.GetModelOverride("canonical"); got != "alternate" {
+		t.Fatalf("GetModelOverride() = %q, want alternate", got)
+	}
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := memory.NewJSONLStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b = session.NewJSONLBackend(reopened)
+	if got := b.GetModelOverride("alias"); got != "alternate" {
+		t.Fatalf("reopened GetModelOverride() = %q, want alternate", got)
+	}
+	if err := b.SetModelOverride("alias", ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.GetModelOverride("canonical"); got != "" {
+		t.Fatalf("cleared GetModelOverride() = %q, want empty", got)
+	}
+}
+
 func TestJSONLBackend_EnsureSessionMetadata_PromotesLegacyAliasHistory(t *testing.T) {
 	b := newBackend(t)
 

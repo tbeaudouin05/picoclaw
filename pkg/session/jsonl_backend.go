@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"strings"
 
@@ -21,6 +22,11 @@ type metaAwareStore interface {
 	GetSessionMeta(ctx context.Context, sessionKey string) (memory.SessionMeta, error)
 	UpsertSessionMeta(ctx context.Context, sessionKey string, scope json.RawMessage, aliases []string) error
 	ResolveSessionKey(ctx context.Context, sessionKey string) (string, bool, error)
+}
+
+type modelOverrideMetaStore interface {
+	metaAwareStore
+	SetSessionModelOverride(ctx context.Context, sessionKey, model string) error
 }
 
 type aliasPromotingStore interface {
@@ -116,6 +122,30 @@ func (b *JSONLBackend) GetSessionScope(sessionKey string) *SessionScope {
 		return nil
 	}
 	return CloneScope(&scope)
+}
+
+// GetModelOverride returns the model selected for this session, if any.
+func (b *JSONLBackend) GetModelOverride(sessionKey string) string {
+	metaStore, ok := b.store.(metaAwareStore)
+	if !ok {
+		return ""
+	}
+	meta, err := metaStore.GetSessionMeta(context.Background(), b.resolveSessionKey(sessionKey))
+	if err != nil {
+		log.Printf("session: get model override: %v", err)
+		return ""
+	}
+	return strings.TrimSpace(meta.ModelOverride)
+}
+
+// SetModelOverride atomically persists a model selection for this session.
+func (b *JSONLBackend) SetModelOverride(sessionKey, model string) error {
+	metaStore, ok := b.store.(modelOverrideMetaStore)
+	if !ok {
+		return fmt.Errorf("session store does not support model overrides")
+	}
+	sessionKey = b.resolveSessionKey(sessionKey)
+	return metaStore.SetSessionModelOverride(context.Background(), sessionKey, strings.TrimSpace(model))
 }
 
 func (b *JSONLBackend) AddMessage(sessionKey, role, content string) {
