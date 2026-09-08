@@ -2,6 +2,7 @@ package cliprovider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -33,6 +34,28 @@ done
 pwd > '%s'
 cat '%s'
 `, argsFile, printFile, cwdFile, outputFile)
+	if err := os.WriteFile(script, []byte(contents), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
+func createMockAntigravityFailingCLI(t *testing.T, stdout, stderr string, exitCode int) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("mock CLI scripts not supported on Windows")
+	}
+	dir := t.TempDir()
+	stdoutFile := filepath.Join(dir, "stdout")
+	stderrFile := filepath.Join(dir, "stderr")
+	if err := os.WriteFile(stdoutFile, []byte(stdout), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stderrFile, []byte(stderr), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(dir, "agy")
+	contents := fmt.Sprintf("#!/bin/sh\ncat %q\ncat %q >&2\nexit %d\n", stdoutFile, stderrFile, exitCode)
 	if err := os.WriteFile(script, []byte(contents), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -311,4 +334,59 @@ func containsStringPrefix(values []string, prefix string) bool {
 		}
 	}
 	return false
+}
+
+func TestAntigravityCliChatNonZeroExitUsesStderrWhenPresent(t *testing.T) {
+	p := NewAntigravityCliProvider("")
+	p.command = createMockAntigravityFailingCLI(t, "ignored output", "quota exceeded", 1)
+
+	_, err := p.Chat(context.Background(), []Message{{Role: "user", Content: "hello"}}, nil, "", nil)
+	if err == nil {
+		t.Fatal("Chat() expected error")
+	}
+	if got := err.Error(); !strings.Contains(got, "quota exceeded") || strings.Contains(got, "raw output") {
+		t.Fatalf("Chat() error = %q, want stderr-only error", got)
+	}
+}
+
+func TestAntigravityCliChatNonZeroExitWithoutStderrIncludesRawOutput(t *testing.T) {
+	p := NewAntigravityCliProvider("")
+	p.command = createMockAntigravityFailingCLI(t, "credit balance exhausted", "", 1)
+
+	_, err := p.Chat(context.Background(), []Message{{Role: "user", Content: "hello"}}, nil, "", nil)
+	if err == nil {
+		t.Fatal("Chat() expected error")
+	}
+	for _, want := range []string{"unclassified", "exit status 1", "raw output: credit balance exhausted"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("Chat() error = %q, want %q", err, want)
+		}
+	}
+}
+
+func TestAntigravityCliChatStreamEventsNonZeroExitWithoutStderrIncludesRawOutput(t *testing.T) {
+	p := NewAntigravityCliProvider("")
+	p.command = createMockAntigravityFailingCLI(t, `{"event":"notice","detail":"credit balance exhausted"}`, "", 1)
+
+	_, err := p.ChatStreamEvents(context.Background(), []Message{{Role: "user", Content: "hello"}}, nil, "", nil, nil)
+	if err == nil {
+		t.Fatal("ChatStreamEvents() expected error")
+	}
+	for _, want := range []string{"unclassified", "exit status 1", "credit balance exhausted"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("ChatStreamEvents() error = %q, want %q", err, want)
+		}
+	}
+}
+
+func TestAntigravityCliChatCancellationReturnsContextError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	p := NewAntigravityCliProvider("")
+	p.command = createMockAntigravityFailingCLI(t, "credit balance exhausted", "", 1)
+	_, err := p.Chat(ctx, []Message{{Role: "user", Content: "hello"}}, nil, "", nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Chat() error = %v, want context cancellation", err)
+	}
 }

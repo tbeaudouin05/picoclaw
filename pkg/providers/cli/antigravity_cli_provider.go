@@ -42,11 +42,7 @@ func (p *AntigravityCliProvider) Chat(
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		stderrText := strings.TrimSpace(stderr.String())
-		if stderrText != "" {
-			return nil, fmt.Errorf("antigravity cli error: %s", stderrText)
-		}
-		return nil, fmt.Errorf("antigravity cli error: %w", err)
+		return nil, antigravityCLIExecutionError(err, stdout.String(), stderr.String())
 	}
 
 	return p.parseResponse(stdout.String(), tools)
@@ -164,11 +160,14 @@ func (p *AntigravityCliProvider) ChatStreamEvents(
 	}
 
 	var content strings.Builder
+	var rawOutput strings.Builder
 	gotDelta := false
 	var terminalResult *antigravityCliJSONResponse
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
 	for scanner.Scan() {
+		rawOutput.Write(scanner.Bytes())
+		rawOutput.WriteByte('\n')
 		var record antigravityCliStreamRecord
 		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
 			terminateAndWait()
@@ -200,10 +199,7 @@ func (p *AntigravityCliProvider) ChatStreamEvents(
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if stderrText := strings.TrimSpace(stderr.String()); stderrText != "" {
-			return nil, fmt.Errorf("antigravity cli error: %s", stderrText)
-		}
-		return nil, fmt.Errorf("antigravity cli error: %w", err)
+		return nil, antigravityCLIExecutionError(err, rawOutput.String(), stderr.String())
 	}
 	if terminalResult == nil {
 		return nil, fmt.Errorf("antigravity cli stream ended without terminal result")
@@ -226,6 +222,19 @@ func (p *AntigravityCliProvider) ChatStreamEvents(
 		onChunk(StreamChunk{Content: response.Content})
 	}
 	return response, nil
+}
+
+// antigravityCLIExecutionError preserves the CLI's stderr when it provides a
+// classified failure. If stderr is empty, preserve both the original process
+// error and raw stdout so callers can diagnose otherwise-unclassified exits.
+func antigravityCLIExecutionError(err error, stdout, stderr string) error {
+	if stderrText := strings.TrimSpace(stderr); stderrText != "" {
+		return fmt.Errorf("antigravity cli error: %s", stderrText)
+	}
+	if stdoutText := strings.TrimSpace(stdout); stdoutText != "" {
+		return fmt.Errorf("antigravity cli unclassified error: %w\nraw output: %s", err, stdoutText)
+	}
+	return fmt.Errorf("antigravity cli unclassified error: %w", err)
 }
 
 func (p *AntigravityCliProvider) args(prompt, outputFormat, model string) []string {
