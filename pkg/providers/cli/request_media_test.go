@@ -25,6 +25,9 @@ func useTestMediaDir(t *testing.T) string {
 }
 
 func TestPrepareCLIImageInputsScopesAndRewritesRelevantImages(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "netbsd" {
+		t.Skip("managed CLI images fail closed without atomic no-follow platform support")
+	}
 	sourceDir := useTestMediaDir(t)
 	first := filepath.Join(sourceDir, "first.png")
 	second := filepath.Join(sourceDir, "second.jpg")
@@ -74,6 +77,9 @@ func TestPrepareCLIImageInputsLeavesPromptWithoutManagedMediaUnchanged(t *testin
 }
 
 func TestPrepareCLIImageInputsRejectsSymlinkedParentEscape(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "netbsd" {
+		t.Skip("managed CLI images fail closed without atomic no-follow platform support")
+	}
 	mediaDir := useTestMediaDir(t)
 	outside := t.TempDir()
 	if err := os.WriteFile(filepath.Join(outside, "secret.png"), []byte("secret"), 0o600); err != nil {
@@ -85,7 +91,7 @@ func TestPrepareCLIImageInputsRejectsSymlinkedParentEscape(t *testing.T) {
 	}
 
 	_, _, _, err := prepareCLIImageInputs("see [image:" + filepath.Join(link, "secret.png") + "]")
-	if err == nil || !strings.Contains(err.Error(), "symlinked path component") {
+	if err == nil || !strings.Contains(err.Error(), "non-symlink path component") {
 		t.Fatalf("prepareCLIImageInputs() error = %v, want symlinked-component rejection", err)
 	}
 }
