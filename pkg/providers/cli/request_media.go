@@ -35,6 +35,11 @@ func prepareCLIImageInputs(parts ...string) ([]string, string, func(), error) {
 	if len(paths) == 0 {
 		return parts, "", func() {}, nil
 	}
+	mediaFS, err := os.OpenRoot(mediaRoot)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("prepare CLI image inputs: open media root: %w", err)
+	}
+	defer mediaFS.Close()
 
 	dir, err := os.MkdirTemp("", "picoclaw-cli-media-")
 	if err != nil {
@@ -43,16 +48,12 @@ func prepareCLIImageInputs(parts ...string) ([]string, string, func(), error) {
 	cleanup := func() { _ = os.RemoveAll(dir) }
 	replacements := make([]string, 0, len(paths)*2)
 	for i, source := range paths {
-		info, statErr := os.Lstat(source)
-		if statErr != nil {
+		rel, relErr := filepath.Rel(mediaRoot, source)
+		if relErr != nil {
 			cleanup()
-			return nil, "", nil, fmt.Errorf("prepare CLI image input %q: %w", source, statErr)
+			return nil, "", nil, fmt.Errorf("prepare CLI image input %q: %w", source, relErr)
 		}
-		if !info.Mode().IsRegular() {
-			cleanup()
-			return nil, "", nil, fmt.Errorf("prepare CLI image input %q: not a regular file", source)
-		}
-		input, openErr := os.Open(source)
+		input, openErr := openRegularFileBelow(mediaFS, rel)
 		if openErr != nil {
 			cleanup()
 			return nil, "", nil, fmt.Errorf("prepare CLI image input %q: %w", source, openErr)
@@ -86,6 +87,44 @@ func prepareCLIImageInputs(parts ...string) ([]string, string, func(), error) {
 		rewritten[i] = replacer.Replace(part)
 	}
 	return rewritten, dir, cleanup, nil
+}
+
+// openRegularFileBelow rejects existing symlinks in every path component, then
+// opens through an anchored os.Root. The rooted open is the security boundary:
+// even if the tree changes after the component checks, the open cannot escape
+// the media root. Regularity is checked on the opened handle to avoid a
+// validation/open race on the final component.
+func openRegularFileBelow(root *os.Root, name string) (*os.File, error) {
+	current := ""
+	for _, component := range strings.Split(name, string(filepath.Separator)) {
+		if current == "" {
+			current = component
+		} else {
+			current = filepath.Join(current, component)
+		}
+		info, err := root.Lstat(current)
+		if err != nil {
+			return nil, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("symlinked path component %q is not allowed", current)
+		}
+	}
+
+	input, err := root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	info, err := input.Stat()
+	if err != nil {
+		_ = input.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = input.Close()
+		return nil, fmt.Errorf("not a regular file")
+	}
+	return input, nil
 }
 
 func pathWithin(path, root string) bool {
