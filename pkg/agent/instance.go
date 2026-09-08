@@ -24,6 +24,7 @@ import (
 // session manager, context builder, and tool registry.
 type AgentInstance struct {
 	modelMu                   *sync.RWMutex
+	candidateProvidersMu      *sync.Mutex
 	modelOverrideBase         *AgentInstance
 	ID                        string
 	Name                      string
@@ -323,6 +324,7 @@ func NewAgentInstance(
 
 	return &AgentInstance{
 		modelMu:                   &sync.RWMutex{},
+		candidateProvidersMu:      &sync.Mutex{},
 		ID:                        agentID,
 		Name:                      agentName,
 		Model:                     model,
@@ -685,6 +687,9 @@ func (a *AgentInstance) Close() error {
 	modelMu := a.modelStateMutex()
 	modelMu.Lock()
 	defer modelMu.Unlock()
+	candidateProvidersMu := a.candidateProviderCacheMutex()
+	candidateProvidersMu.Lock()
+	defer candidateProvidersMu.Unlock()
 	providerList := make([]providers.LLMProvider, 0, 2+len(a.CandidateProviders))
 	providerList = append(providerList, a.Provider, a.LightProvider)
 	for _, provider := range a.CandidateProviders {
@@ -702,6 +707,15 @@ func (a *AgentInstance) modelStateMutex() *sync.RWMutex {
 		return &fallbackAgentModelMu
 	}
 	return a.modelMu
+}
+
+var fallbackCandidateProvidersMu sync.Mutex
+
+func (a *AgentInstance) candidateProviderCacheMutex() *sync.Mutex {
+	if a.candidateProvidersMu == nil {
+		return &fallbackCandidateProvidersMu
+	}
+	return a.candidateProvidersMu
 }
 
 func closeUniqueStatefulProviders(providerList ...providers.LLMProvider) {

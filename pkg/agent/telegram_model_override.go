@@ -49,20 +49,20 @@ func (al *AgentLoop) agentWithTelegramModelOverride(agent *AgentInstance, model 
 	if agent.modelOverrideBase != nil {
 		base = agent.modelOverrideBase
 	}
-	if model == base.Model {
-		return base, nil
-	}
 	cfg := al.GetConfig()
 	if !configuredModel(cfg, model) {
 		return nil, fmt.Errorf("model %q not found in model_list or providers", model)
 	}
 
-	modelMu := base.modelStateMutex()
-	modelMu.Lock()
-	defer modelMu.Unlock()
 	nextCandidates := resolveModelCandidates(cfg, cfg.Agents.Defaults.Provider, model, base.Fallbacks)
 	if len(nextCandidates) == 0 {
 		return nil, fmt.Errorf("model %q did not resolve to any provider candidates", model)
+	}
+	cacheMu := base.candidateProviderCacheMutex()
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+	if model == base.Model {
+		return base, nil
 	}
 	if base.CandidateProviders == nil {
 		base.CandidateProviders = make(map[string]providers.LLMProvider)
@@ -94,6 +94,7 @@ func (al *AgentLoop) agentWithTelegramModelOverride(agent *AgentInstance, model 
 	}
 	view := *base
 	view.modelMu = &sync.RWMutex{}
+	view.candidateProvidersMu = &sync.Mutex{}
 	view.modelOverrideBase = base
 	view.Model = model
 	view.Provider = nextProvider

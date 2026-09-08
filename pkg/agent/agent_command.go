@@ -349,6 +349,9 @@ func (al *AgentLoop) buildCommandsRuntime(
 				modelMu := agent.modelStateMutex()
 				modelMu.Lock()
 				defer modelMu.Unlock()
+				candidateProvidersMu := agent.candidateProviderCacheMutex()
+				candidateProvidersMu.Lock()
+				defer candidateProvidersMu.Unlock()
 				modelFound := false
 				for _, modelCfg := range cfg.ModelList {
 					if modelCfg != nil && modelCfg.ModelName == value {

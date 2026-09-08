@@ -3672,6 +3672,93 @@ func TestAgentWithTelegramModelOverride_CachesTransitionOnRoutedAgent(t *testing
 	}
 }
 
+func TestAgentWithTelegramModelOverride_DoesNotRequireModelStateLock(t *testing.T) {
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{Defaults: config.AgentDefaults{
+			Workspace: t.TempDir(), Provider: "openai", ModelName: "local",
+		}},
+		ModelList: []*config.ModelConfig{
+			{ModelName: "local", Model: "openai/local"},
+			{ModelName: "override", Model: "openai/override"},
+		},
+	}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), &countingMockProvider{response: "local"})
+	al.providerFactory = func(modelCfg *config.ModelConfig) (providers.LLMProvider, string, error) {
+		return &countingMockProvider{response: modelCfg.ModelName}, modelCfg.Model, nil
+	}
+	base := al.registry.GetDefaultAgent()
+	modelMu := base.modelStateMutex()
+	modelMu.Lock()
+	defer modelMu.Unlock()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := al.agentWithTelegramModelOverride(base, "override")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("model override blocked on the base model-state lock")
+	}
+}
+
+func TestAgentWithTelegramModelOverride_ConcurrentCacheCreation(t *testing.T) {
+	cfg := &config.Config{
+		Agents: config.AgentsConfig{Defaults: config.AgentDefaults{
+			Workspace: t.TempDir(), Provider: "openai", ModelName: "local",
+		}},
+		ModelList: []*config.ModelConfig{
+			{ModelName: "local", Model: "openai/local"},
+			{ModelName: "override", Model: "openai/override"},
+		},
+	}
+	al := NewAgentLoop(cfg, bus.NewMessageBus(), &countingMockProvider{response: "local"})
+	var creations atomic.Int32
+	al.providerFactory = func(modelCfg *config.ModelConfig) (providers.LLMProvider, string, error) {
+		creations.Add(1)
+		return &countingMockProvider{response: modelCfg.ModelName}, modelCfg.Model, nil
+	}
+	base := al.registry.GetDefaultAgent()
+
+	const goroutines = 20
+	views := make(chan *AgentInstance, goroutines)
+	errs := make(chan error, goroutines)
+	var wg sync.WaitGroup
+	for range goroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			view, err := al.agentWithTelegramModelOverride(base, "override")
+			if err != nil {
+				errs <- err
+				return
+			}
+			views <- view
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	close(views)
+	for err := range errs {
+		t.Error(err)
+	}
+	var provider providers.LLMProvider
+	for view := range views {
+		if provider == nil {
+			provider = view.Provider
+		} else if view.Provider != provider {
+			t.Error("concurrent override views did not share the cached provider")
+		}
+	}
+	if got := creations.Load(); got != 1 {
+		t.Fatalf("provider creations = %d, want 1", got)
+	}
+}
+
 func TestProcessMessage_SwitchModelRejectsUnknownAlias(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "agent-test-*")
 	if err != nil {

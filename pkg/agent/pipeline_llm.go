@@ -794,7 +794,10 @@ func (p *Pipeline) applyBeforeLLMModelRewrite(ts *turnState, exec *turnExecution
 		return fmt.Errorf("hook-selected model %q could not be resolved", rawModel)
 	}
 	candidate := candidates[0]
+	candidateProvidersMu := ts.agent.candidateProviderCacheMutex()
+	candidateProvidersMu.Lock()
 	provider := ts.agent.CandidateProviders[candidateProviderKey(candidate)]
+	candidateProvidersMu.Unlock()
 	if provider == nil {
 		if candidate.ConfigKey == "" && candidate.ConfigIndex == 0 {
 			if len(exec.activeCandidates) > 0 &&
@@ -842,7 +845,11 @@ func providerForFallbackCandidate(
 	candidate providers.FallbackCandidate,
 ) (providers.LLMProvider, error) {
 	if agent != nil {
-		if cp, ok := agent.CandidateProviders[candidateProviderKey(candidate)]; ok && cp != nil {
+		candidateProvidersMu := agent.candidateProviderCacheMutex()
+		candidateProvidersMu.Lock()
+		cp, ok := agent.CandidateProviders[candidateProviderKey(candidate)]
+		candidateProvidersMu.Unlock()
+		if ok && cp != nil {
 			return cp, nil
 		}
 	}
