@@ -6,12 +6,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/isolation"
-	"github.com/sipeed/picoclaw/pkg/media"
 )
 
 const claudeAllowedNativeTools = "Read,Glob,Grep,LS,WebFetch,WebSearch"
@@ -25,22 +23,6 @@ func claudeNativeToolPolicyArgs() []string {
 		"--strict-mcp-config",
 		"--tools", claudeAllowedNativeTools,
 	}
-}
-
-// claudeExtraDirsArgs grants Claude's restricted native tools access to the
-// shared media temp directory, in addition to the workspace (already
-// reachable as the subprocess's working directory). Inbound images (e.g.
-// Telegram photos) and load_image results are exposed to the model as
-// [image:/abs/path] tags pointing into this directory; without --add-dir,
-// --restricted mode confines the native Read tool to the working directory
-// and Claude cannot open those files. If the directory cannot be created,
-// no extra dir is added and behavior falls back to the prior restricted scope.
-func claudeExtraDirsArgs() []string {
-	mediaDir := media.TempDir()
-	if err := os.MkdirAll(mediaDir, 0o700); err != nil {
-		return nil
-	}
-	return []string{"--add-dir", mediaDir}
 }
 
 // ClaudeCliProvider implements LLMProvider using the claude CLI as a subprocess.
@@ -63,9 +45,16 @@ func (p *ClaudeCliProvider) Chat(
 ) (*LLMResponse, error) {
 	systemPrompt := p.buildSystemPrompt(messages, tools)
 	prompt := p.messagesToPrompt(messages)
+	prepared, mediaDir, cleanup, err := prepareCLIImageInputs(systemPrompt, prompt)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	systemPrompt, prompt = prepared[0], prepared[1]
 
 	args := []string{"-p", "--output-format", "json", "--no-chrome"}
 	args = append(args, claudeNativeToolPolicyArgs()...)
+	args = appendAddDirs(args, mediaDir)
 	if systemPrompt != "" {
 		args = append(args, "--system-prompt", systemPrompt)
 	}
@@ -133,9 +122,16 @@ func (p *ClaudeCliProvider) ChatStreamEvents(
 ) (*LLMResponse, error) {
 	systemPrompt := p.buildSystemPrompt(messages, tools)
 	prompt := p.messagesToPrompt(messages)
+	prepared, mediaDir, cleanup, err := prepareCLIImageInputs(systemPrompt, prompt)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	systemPrompt, prompt = prepared[0], prepared[1]
 
 	args := []string{"-p", "--verbose", "--output-format", "stream-json", "--include-partial-messages", "--no-chrome"}
 	args = append(args, claudeNativeToolPolicyArgs()...)
+	args = appendAddDirs(args, mediaDir)
 	if systemPrompt != "" {
 		args = append(args, "--system-prompt", systemPrompt)
 	}

@@ -6,12 +6,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/isolation"
-	"github.com/sipeed/picoclaw/pkg/media"
 )
 
 // AntigravityCliProvider implements LLMProvider using the local agy CLI.
@@ -31,7 +29,13 @@ func (p *AntigravityCliProvider) Chat(
 	ctx context.Context, messages []Message, tools []ToolDefinition, model string, options map[string]any,
 ) (*LLMResponse, error) {
 	prompt := p.buildPrompt(messages, tools)
-	args := p.args(prompt, "json", model)
+	prepared, mediaDir, cleanup, err := prepareCLIImageInputs(prompt)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	prompt = prepared[0]
+	args := p.args(prompt, "json", model, mediaDir)
 
 	cmd := exec.CommandContext(ctx, p.command, args...)
 	if p.workspace != "" {
@@ -141,7 +145,13 @@ func (p *AntigravityCliProvider) ChatStreamEvents(
 	onChunk func(StreamChunk),
 ) (*LLMResponse, error) {
 	prompt := p.buildPrompt(messages, tools)
-	args := p.args(prompt, "stream-json", model)
+	prepared, mediaDir, cleanup, err := prepareCLIImageInputs(prompt)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	prompt = prepared[0]
+	args := p.args(prompt, "stream-json", model, mediaDir)
 
 	cmd := exec.CommandContext(ctx, p.command, args...)
 	if p.workspace != "" {
@@ -239,36 +249,18 @@ func antigravityCLIExecutionError(err error, stdout, stderr string) error {
 	return fmt.Errorf("antigravity cli unclassified error: %w", err)
 }
 
-func (p *AntigravityCliProvider) args(prompt, outputFormat, model string) []string {
+func (p *AntigravityCliProvider) args(prompt, outputFormat, model string, extraDirs ...string) []string {
 	args := []string{
 		"--print=" + prompt,
 		"--output-format", outputFormat,
 		"--sandbox",
 		"--disable-slash-commands",
 	}
-	if p.workspace != "" {
-		args = append(args, "--add-dir", p.workspace)
-	}
-	args = append(args, antigravityExtraDirsArgs()...)
+	args = appendAddDirs(args, append([]string{p.workspace}, extraDirs...)...)
 	if model != "" && model != "antigravity-cli" {
 		args = append(args, "--model", model)
 	}
 	return args
-}
-
-// antigravityExtraDirsArgs grants the sandboxed agy CLI access to the shared
-// media temp directory, in addition to the workspace. Inbound images (e.g.
-// Telegram photos) and load_image results are exposed to the model as
-// [image:/abs/path] tags pointing into this directory; without --add-dir, the
-// sandbox confines file access to the workspace and agy cannot open those
-// files. If the directory cannot be created, no extra dir is added and
-// behavior falls back to the prior sandboxed scope.
-func antigravityExtraDirsArgs() []string {
-	mediaDir := media.TempDir()
-	if err := os.MkdirAll(mediaDir, 0o700); err != nil {
-		return nil
-	}
-	return []string{"--add-dir", mediaDir}
 }
 
 func (p *AntigravityCliProvider) parseJSONResponse(result antigravityCliJSONResponse, tools []ToolDefinition) (*LLMResponse, error) {
