@@ -29,8 +29,37 @@ func TestOpenFileNoFollowRejectsSymlinkedRoot(t *testing.T) {
 		_ = input.Close()
 		t.Fatal("open succeeded through symlinked media root")
 	}
-	if err == nil || !strings.Contains(err.Error(), "non-symlink root component") {
+	if err == nil || !strings.Contains(err.Error(), "non-symlink media root") {
 		t.Fatalf("openFileNoFollow() error=%v, want symlinked-root rejection", err)
+	}
+}
+
+func TestOpenFileNoFollowAllowsSymlinkedAbsoluteAncestor(t *testing.T) {
+	parent := t.TempDir()
+	realParent := filepath.Join(parent, "real")
+	root := filepath.Join(realParent, "media")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "image"), []byte("wanted bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(parent, "alias")
+	if err := os.Symlink(realParent, alias); err != nil {
+		t.Skipf("symlinks are not supported: %v", err)
+	}
+
+	input, err := openFileNoFollow(filepath.Join(alias, "media"), "image", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	got, err := io.ReadAll(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "wanted bytes" {
+		t.Fatalf("openFileNoFollow() bytes=%q, want bytes through benign ancestor alias", got)
 	}
 }
 

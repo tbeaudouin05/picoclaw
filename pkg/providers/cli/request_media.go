@@ -13,10 +13,32 @@ import (
 
 var imagePathTagPattern = regexp.MustCompile(`\[image:([^\]]+)\]`)
 
+const (
+	// Bound the temporary disk used to expose managed images to one CLI request.
+	// Ten 10 MiB images fit within the byte ceiling, while fewer larger images
+	// remain supported up to the same 100 MiB aggregate limit.
+	maxCLIImageInputs     = 10
+	maxCLIImageInputBytes = int64(100 * 1024 * 1024)
+)
+
+type cliImageInputLimits struct {
+	maxFiles int
+	maxBytes int64
+}
+
 // prepareCLIImageInputs copies image paths referenced by prompt tags into a
 // request-scoped directory. CLI sandboxes can then be granted that directory
 // without exposing unrelated files in PicoClaw's shared media directory.
 func prepareCLIImageInputs(parts ...string) ([]string, string, func(), error) {
+	return prepareCLIImageInputsWithLimits(cliImageInputLimits{
+		maxFiles: maxCLIImageInputs,
+		maxBytes: maxCLIImageInputBytes,
+	}, parts...)
+}
+
+// prepareCLIImageInputsWithLimits exists so tests can exercise the byte limit
+// without creating production-sized files.
+func prepareCLIImageInputsWithLimits(limits cliImageInputLimits, parts ...string) ([]string, string, func(), error) {
 	paths := make([]string, 0)
 	seen := make(map[string]struct{})
 	rawTags := make(map[string][]string)
@@ -42,12 +64,16 @@ func prepareCLIImageInputs(parts ...string) ([]string, string, func(), error) {
 	if len(paths) == 0 {
 		return parts, "", func() {}, nil
 	}
+	if len(paths) > limits.maxFiles {
+		return nil, "", nil, fmt.Errorf("prepare CLI image inputs: %d unique images exceed the per-request limit of %d", len(paths), limits.maxFiles)
+	}
 	dir, err := os.MkdirTemp("", "picoclaw-cli-media-")
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("prepare CLI image inputs: create request directory: %w", err)
 	}
 	cleanup := func() { _ = os.RemoveAll(dir) }
 	replacements := make([]string, 0, len(paths)*2)
+	var copiedBytes int64
 	for i, source := range paths {
 		rel, relErr := filepath.Rel(mediaRoot, source)
 		if relErr != nil {
@@ -59,6 +85,18 @@ func prepareCLIImageInputs(parts ...string) ([]string, string, func(), error) {
 			cleanup()
 			return nil, "", nil, fmt.Errorf("prepare CLI image input %q: %w", source, openErr)
 		}
+		info, statErr := input.Stat()
+		if statErr != nil {
+			_ = input.Close()
+			cleanup()
+			return nil, "", nil, fmt.Errorf("prepare CLI image input %q: determine size: %w", source, statErr)
+		}
+		remaining := limits.maxBytes - copiedBytes
+		if info.Size() > remaining {
+			_ = input.Close()
+			cleanup()
+			return nil, "", nil, fmt.Errorf("prepare CLI image input %q: request images exceed the %d-byte total limit", source, limits.maxBytes)
+		}
 		target := filepath.Join(dir, fmt.Sprintf("%d-%s", i, filepath.Base(source)))
 		output, createErr := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if createErr != nil {
@@ -66,9 +104,12 @@ func prepareCLIImageInputs(parts ...string) ([]string, string, func(), error) {
 			cleanup()
 			return nil, "", nil, fmt.Errorf("prepare CLI image input %q: %w", source, createErr)
 		}
-		_, copyErr := io.Copy(output, input)
+		written, copyErr := io.Copy(output, io.LimitReader(input, remaining+1))
 		closeOutErr := output.Close()
 		closeInErr := input.Close()
+		if copyErr == nil && written > remaining {
+			copyErr = fmt.Errorf("request images exceed the %d-byte total limit", limits.maxBytes)
+		}
 		if copyErr != nil || closeOutErr != nil || closeInErr != nil {
 			cleanup()
 			if copyErr != nil {
@@ -79,6 +120,7 @@ func prepareCLIImageInputs(parts ...string) ([]string, string, func(), error) {
 			}
 			return nil, "", nil, fmt.Errorf("prepare CLI image input %q: %w", source, closeInErr)
 		}
+		copiedBytes += written
 		for _, rawTag := range rawTags[source] {
 			replacements = append(replacements, rawTag, "[image:"+target+"]")
 		}

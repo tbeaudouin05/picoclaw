@@ -121,6 +121,66 @@ func TestPrepareCLIImageInputsLeavesPromptWithoutManagedMediaUnchanged(t *testin
 	}
 }
 
+func TestPrepareCLIImageInputsRejectsImageCountLimit(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "netbsd" {
+		t.Skip("managed CLI images fail closed without atomic no-follow platform support")
+	}
+	mediaDir := useTestMediaDir(t)
+	var prompt strings.Builder
+	for i := 0; i < 3; i++ {
+		path := filepath.Join(mediaDir, fmt.Sprintf("%d.png", i))
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(&prompt, "[image:%s]", path)
+	}
+
+	_, dir, cleanup, err := prepareCLIImageInputsWithLimits(cliImageInputLimits{maxFiles: 2, maxBytes: 100}, prompt.String())
+	if err == nil || !strings.Contains(err.Error(), "3 unique images exceed the per-request limit of 2") {
+		t.Fatalf("prepareCLIImageInputsWithLimits() error=%v, want count-limit error", err)
+	}
+	if dir != "" || cleanup != nil {
+		t.Fatalf("count-limit failure returned dir=%q cleanup=%v, want no request directory", dir, cleanup != nil)
+	}
+}
+
+func TestPrepareCLIImageInputsRejectsTotalByteLimitAndCleansPartialCopy(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "netbsd" {
+		t.Skip("managed CLI images fail closed without atomic no-follow platform support")
+	}
+	tempRoot := t.TempDir()
+	t.Setenv("TMPDIR", tempRoot)
+	mediaDir := media.TempDir()
+	if err := os.MkdirAll(mediaDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	first := filepath.Join(mediaDir, "first.png")
+	second := filepath.Join(mediaDir, "second.png")
+	for _, path := range []string{first, second} {
+		if err := os.WriteFile(path, []byte("123"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, dir, cleanup, err := prepareCLIImageInputsWithLimits(
+		cliImageInputLimits{maxFiles: 2, maxBytes: 5},
+		"[image:"+first+"] [image:"+second+"]",
+	)
+	if err == nil || !strings.Contains(err.Error(), "5-byte total limit") {
+		t.Fatalf("prepareCLIImageInputsWithLimits() error=%v, want total-byte-limit error", err)
+	}
+	if dir != "" || cleanup != nil {
+		t.Fatalf("byte-limit failure returned dir=%q cleanup=%v", dir, cleanup != nil)
+	}
+	matches, globErr := filepath.Glob(filepath.Join(tempRoot, "picoclaw-cli-media-*"))
+	if globErr != nil {
+		t.Fatal(globErr)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("partial request directories remain after byte-limit failure: %q", matches)
+	}
+}
+
 func TestPrepareCLIImageInputsRejectsSymlinkedParentEscape(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "netbsd" {
 		t.Skip("managed CLI images fail closed without atomic no-follow platform support")
@@ -164,7 +224,16 @@ func TestCLIProviderImageCopyLifecycle(t *testing.T) {
 			if runtime.GOOS == "windows" {
 				t.Skip("mock CLI scripts not supported on Windows")
 			}
-			t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "temp root with spaces"))
+			tempParent := t.TempDir()
+			realTemp := filepath.Join(tempParent, "real temp root with spaces")
+			if err := os.Mkdir(realTemp, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			tempAlias := filepath.Join(tempParent, "temp-alias")
+			if err := os.Symlink(realTemp, tempAlias); err != nil {
+				t.Skipf("symlinks are not supported: %v", err)
+			}
+			t.Setenv("TMPDIR", tempAlias)
 			mediaDir := media.TempDir()
 			if err := os.MkdirAll(mediaDir, 0o700); err != nil {
 				t.Fatal(err)

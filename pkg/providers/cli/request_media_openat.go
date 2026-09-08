@@ -66,44 +66,40 @@ func openFileNoFollow(root, name string, beforeOpen func(string)) (*os.File, err
 	return os.NewFile(uintptr(fd), filepath.Base(name)), nil
 }
 
-// openAbsoluteDirectoryNoFollow pins an absolute directory by walking from the
-// filesystem root. No path component, including the terminal one, may be a
-// symlink, and each opened descriptor is checked against the name just stated.
+// openAbsoluteDirectoryNoFollow follows aliases in the absolute parent path so
+// platform-controlled spellings such as macOS /var can be used. The terminal
+// directory itself is opened without following a symlink, identity-checked,
+// and returned pinned. No stronger guarantee is made about absolute ancestors.
 func openAbsoluteDirectoryNoFollow(path string) (int, error) {
 	if !filepath.IsAbs(path) {
 		return -1, fmt.Errorf("root path %q is not absolute", path)
 	}
 	clean := filepath.Clean(path)
-	fd, err := unix.Open(string(filepath.Separator), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		return -1, err
-	}
 	if clean == string(filepath.Separator) {
-		return fd, nil
+		return unix.Open(clean, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	}
-	current := ""
-	for _, component := range strings.Split(strings.TrimPrefix(clean, string(filepath.Separator)), string(filepath.Separator)) {
-		current = filepath.Join(current, component)
-		var before unix.Stat_t
-		if statErr := unix.Fstatat(fd, component, &before, unix.AT_SYMLINK_NOFOLLOW); statErr != nil {
-			_ = unix.Close(fd)
-			return -1, fmt.Errorf("stat root component %q: %w", current, statErr)
-		}
-		next, openErr := unix.Openat(fd, component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	parent, base := filepath.Split(clean)
+	parentFD, err := unix.Open(filepath.Clean(parent), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, fmt.Errorf("open media root parent: %w", err)
+	}
+	defer unix.Close(parentFD)
+	var before unix.Stat_t
+	if err := unix.Fstatat(parentFD, base, &before, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return -1, fmt.Errorf("stat media root: %w", err)
+	}
+	fd, err := unix.Openat(parentFD, base, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return -1, fmt.Errorf("open non-symlink media root: %w", err)
+	}
+	var after unix.Stat_t
+	if err := unix.Fstat(fd, &after); err != nil {
 		_ = unix.Close(fd)
-		if openErr != nil {
-			return -1, fmt.Errorf("open non-symlink root component %q: %w", current, openErr)
-		}
-		var after unix.Stat_t
-		if statErr := unix.Fstat(next, &after); statErr != nil {
-			_ = unix.Close(next)
-			return -1, fmt.Errorf("stat opened root component %q: %w", current, statErr)
-		}
-		if before.Dev != after.Dev || before.Ino != after.Ino {
-			_ = unix.Close(next)
-			return -1, fmt.Errorf("root component %q changed while it was opened", current)
-		}
-		fd = next
+		return -1, fmt.Errorf("stat opened media root: %w", err)
+	}
+	if before.Dev != after.Dev || before.Ino != after.Ino {
+		_ = unix.Close(fd)
+		return -1, fmt.Errorf("media root changed while it was opened")
 	}
 	return fd, nil
 }
