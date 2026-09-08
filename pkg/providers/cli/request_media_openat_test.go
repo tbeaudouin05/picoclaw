@@ -10,6 +10,69 @@ import (
 	"testing"
 )
 
+func TestOpenFileNoFollowRejectsSymlinkedRoot(t *testing.T) {
+	parent := t.TempDir()
+	realRoot := filepath.Join(parent, "real")
+	if err := os.Mkdir(realRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(realRoot, "image"), []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(parent, "media")
+	if err := os.Symlink(realRoot, root); err != nil {
+		t.Skipf("symlinks are not supported: %v", err)
+	}
+
+	input, err := openFileNoFollow(root, "image", nil)
+	if input != nil {
+		_ = input.Close()
+		t.Fatal("open succeeded through symlinked media root")
+	}
+	if err == nil || !strings.Contains(err.Error(), "non-symlink root component") {
+		t.Fatalf("openFileNoFollow() error=%v, want symlinked-root rejection", err)
+	}
+}
+
+func TestOpenFileNoFollowPinsRootAcrossReplacement(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "media")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "image"), []byte("wanted bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	called := false
+	input, err := openFileNoFollow(root, "image", func(component string) {
+		if called || component != "image" {
+			return
+		}
+		called = true
+		if renameErr := os.Rename(root, root+".old"); renameErr != nil {
+			t.Fatal(renameErr)
+		}
+		if mkdirErr := os.Mkdir(root, 0o700); mkdirErr != nil {
+			t.Fatal(mkdirErr)
+		}
+		if writeErr := os.WriteFile(filepath.Join(root, "image"), []byte("unrelated bytes"), 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	got, err := io.ReadAll(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !called || string(got) != "wanted bytes" {
+		t.Fatalf("openFileNoFollow() called=%v bytes=%q, want bytes from pinned root", called, got)
+	}
+}
+
 func TestOpenFileNoFollowRejectsTerminalSymlinkSwap(t *testing.T) {
 	root := t.TempDir()
 	wanted := filepath.Join(root, "wanted")

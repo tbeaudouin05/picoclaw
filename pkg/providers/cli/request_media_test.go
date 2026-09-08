@@ -64,6 +64,51 @@ func TestPrepareCLIImageInputsScopesAndRewritesRelevantImages(t *testing.T) {
 	}
 }
 
+func TestPrepareCLIImageInputsRewritesRawSpellingsAndDeduplicatesCopy(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "netbsd" {
+		t.Skip("managed CLI images fail closed without atomic no-follow platform support")
+	}
+	sourceDir := useTestMediaDir(t)
+	subdir := filepath.Join(sourceDir, "sub")
+	if err := os.Mkdir(subdir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(sourceDir, "image.png")
+	if err := os.WriteFile(source, []byte("image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rawPaths := []string{
+		sourceDir + string(filepath.Separator) + "." + string(filepath.Separator) + "image.png",
+		subdir + string(filepath.Separator) + ".." + string(filepath.Separator) + "image.png",
+	}
+	if filepath.Separator == '/' {
+		rawPaths = append(rawPaths, sourceDir+"//image.png")
+	}
+	parts := make([]string, len(rawPaths))
+	for i, rawPath := range rawPaths {
+		parts[i] = "see [image:" + rawPath + "]"
+	}
+
+	prepared, dir, cleanup, err := prepareCLIImageInputs(parts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("scoped directory has %d files, want one deduplicated input", len(entries))
+	}
+	targetTag := "[image:" + filepath.Join(dir, entries[0].Name()) + "]"
+	for i, prompt := range prepared {
+		if !strings.Contains(prompt, targetTag) || strings.Contains(prompt, rawPaths[i]) {
+			t.Fatalf("prepared[%d] = %q, want rewritten tag %q", i, prompt, targetTag)
+		}
+	}
+}
+
 func TestPrepareCLIImageInputsLeavesPromptWithoutManagedMediaUnchanged(t *testing.T) {
 	parts := []string{"plain prompt", "placeholder [image: photo]", "workspace [image:/workspace/photo.png]"}
 	prepared, dir, cleanup, err := prepareCLIImageInputs(parts...)

@@ -19,6 +19,8 @@ var imagePathTagPattern = regexp.MustCompile(`\[image:([^\]]+)\]`)
 func prepareCLIImageInputs(parts ...string) ([]string, string, func(), error) {
 	paths := make([]string, 0)
 	seen := make(map[string]struct{})
+	rawTags := make(map[string][]string)
+	seenRawTags := make(map[string]map[string]struct{})
 	mediaRoot := filepath.Clean(media.TempDir())
 	for _, part := range parts {
 		for _, match := range imagePathTagPattern.FindAllStringSubmatch(part, -1) {
@@ -29,6 +31,11 @@ func prepareCLIImageInputs(parts ...string) ([]string, string, func(), error) {
 			if _, ok := seen[path]; !ok {
 				seen[path] = struct{}{}
 				paths = append(paths, path)
+				seenRawTags[path] = make(map[string]struct{})
+			}
+			if _, ok := seenRawTags[path][match[0]]; !ok {
+				seenRawTags[path][match[0]] = struct{}{}
+				rawTags[path] = append(rawTags[path], match[0])
 			}
 		}
 	}
@@ -72,7 +79,9 @@ func prepareCLIImageInputs(parts ...string) ([]string, string, func(), error) {
 			}
 			return nil, "", nil, fmt.Errorf("prepare CLI image input %q: %w", source, closeInErr)
 		}
-		replacements = append(replacements, "[image:"+source+"]", "[image:"+target+"]")
+		for _, rawTag := range rawTags[source] {
+			replacements = append(replacements, rawTag, "[image:"+target+"]")
+		}
 	}
 
 	replacer := strings.NewReplacer(replacements...)

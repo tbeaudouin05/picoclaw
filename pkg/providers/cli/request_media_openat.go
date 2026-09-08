@@ -24,7 +24,7 @@ func openFileNoFollow(root, name string, beforeOpen func(string)) (*os.File, err
 		return nil, err
 	}
 
-	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	fd, err := openAbsoluteDirectoryNoFollow(root)
 	if err != nil {
 		return nil, fmt.Errorf("open media root: %w", err)
 	}
@@ -64,6 +64,48 @@ func openFileNoFollow(root, name string, beforeOpen func(string)) (*os.File, err
 		fd = next
 	}
 	return os.NewFile(uintptr(fd), filepath.Base(name)), nil
+}
+
+// openAbsoluteDirectoryNoFollow pins an absolute directory by walking from the
+// filesystem root. No path component, including the terminal one, may be a
+// symlink, and each opened descriptor is checked against the name just stated.
+func openAbsoluteDirectoryNoFollow(path string) (int, error) {
+	if !filepath.IsAbs(path) {
+		return -1, fmt.Errorf("root path %q is not absolute", path)
+	}
+	clean := filepath.Clean(path)
+	fd, err := unix.Open(string(filepath.Separator), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return -1, err
+	}
+	if clean == string(filepath.Separator) {
+		return fd, nil
+	}
+	current := ""
+	for _, component := range strings.Split(strings.TrimPrefix(clean, string(filepath.Separator)), string(filepath.Separator)) {
+		current = filepath.Join(current, component)
+		var before unix.Stat_t
+		if statErr := unix.Fstatat(fd, component, &before, unix.AT_SYMLINK_NOFOLLOW); statErr != nil {
+			_ = unix.Close(fd)
+			return -1, fmt.Errorf("stat root component %q: %w", current, statErr)
+		}
+		next, openErr := unix.Openat(fd, component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+		_ = unix.Close(fd)
+		if openErr != nil {
+			return -1, fmt.Errorf("open non-symlink root component %q: %w", current, openErr)
+		}
+		var after unix.Stat_t
+		if statErr := unix.Fstat(next, &after); statErr != nil {
+			_ = unix.Close(next)
+			return -1, fmt.Errorf("stat opened root component %q: %w", current, statErr)
+		}
+		if before.Dev != after.Dev || before.Ino != after.Ino {
+			_ = unix.Close(next)
+			return -1, fmt.Errorf("root component %q changed while it was opened", current)
+		}
+		fd = next
+	}
+	return fd, nil
 }
 
 func cleanRelativeComponents(name string) ([]string, error) {
