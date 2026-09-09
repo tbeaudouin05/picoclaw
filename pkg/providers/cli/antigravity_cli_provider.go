@@ -167,6 +167,7 @@ func (p *AntigravityCliProvider) ChatStreamEvents(
 	var content strings.Builder
 	var rawOutput strings.Builder
 	gotDelta := false
+	stepUpdateCount := 0
 	var terminalResult *antigravityCliJSONResponse
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
@@ -180,6 +181,7 @@ func (p *AntigravityCliProvider) ChatStreamEvents(
 		}
 		switch record.Event {
 		case "step_update":
+			stepUpdateCount++
 			if record.StepUpdate.TextDelta == "" {
 				continue
 			}
@@ -227,7 +229,7 @@ func (p *AntigravityCliProvider) ChatStreamEvents(
 
 	response, err := p.parseJSONResponse(*terminalResult, tools)
 	if err != nil {
-		return nil, err
+		return nil, antigravityCLIResultError(err, terminalResult, gotDelta, stepUpdateCount, stderr.String())
 	}
 	if gotDelta && response.Content == "" && len(response.ToolCalls) == 0 {
 		response.Content = content.String()
@@ -266,6 +268,32 @@ func antigravityCLIStatusError(err, processErr error, stdout, stderr string) err
 		return fmt.Errorf("%w\nprocess error: %v\nraw output: %s", err, processErr, redactAntigravityCLIDiagnostics(stdout))
 	}
 	return fmt.Errorf("%w\nprocess error: %v", err, processErr)
+}
+
+// antigravityCLIResultError preserves the terminal protocol evidence for an
+// otherwise opaque parse failure, especially a SUCCESS result with no usable
+// text or PicoClaw tool call. It records only safe, structured metadata plus
+// redacted stderr before the error reaches logs or fallback classification.
+func antigravityCLIResultError(err error, result *antigravityCliJSONResponse, gotDelta bool, stepUpdateCount int, stderr string) error {
+	if result == nil {
+		return antigravityCLIWithStderr(err, stderr)
+	}
+	usage := result.Usage
+	diagnostic := fmt.Errorf(
+		"%w\nstream diagnostics: status=%q got_delta=%t step_updates=%d response_bytes=%d error_bytes=%d input_tokens=%d output_tokens=%d thinking_tokens=%d cache_read_tokens=%d total_tokens=%d",
+		err,
+		result.Status,
+		gotDelta,
+		stepUpdateCount,
+		len(result.Response),
+		len(result.Error),
+		usage.InputTokens,
+		usage.OutputTokens,
+		usage.ThinkingTokens,
+		usage.CacheReadTokens,
+		usage.TotalTokens,
+	)
+	return antigravityCLIWithStderr(diagnostic, stderr)
 }
 
 // redactAntigravityCLIDiagnostics removes credentials from diagnostics while

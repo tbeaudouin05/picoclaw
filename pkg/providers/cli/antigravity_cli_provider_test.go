@@ -448,6 +448,34 @@ func TestAntigravityCliChatStreamEventsTerminalErrorIncludesStderrAndRedactsCred
 	}
 }
 
+func TestAntigravityCliChatStreamEventsEmptyResponseIncludesDiagnosticsAndRedactedStderr(t *testing.T) {
+	stderr := "access_token=stderr-access-token provider note\n"
+	p := NewAntigravityCliProvider("")
+	p.command = createMockAntigravityCLIWithStderr(t,
+		"{\"event\":\"step_update\",\"step_update\":{}}\n"+
+			"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"\",\"usage\":{\"input_tokens\":7,\"output_tokens\":0,\"thinking_tokens\":3,\"cache_read_tokens\":2,\"total_tokens\":12}}}\n", stderr)
+
+	_, err := p.ChatStreamEvents(context.Background(), []Message{{Role: "user", Content: "hello"}}, nil, "", nil, nil)
+	if err == nil {
+		t.Fatal("ChatStreamEvents() expected error")
+	}
+	got := err.Error()
+	for _, want := range []string{
+		"antigravity cli returned an empty response",
+		`stream diagnostics: status="SUCCESS" got_delta=false step_updates=1 response_bytes=0 error_bytes=0 input_tokens=7 output_tokens=0 thinking_tokens=3 cache_read_tokens=2 total_tokens=12`,
+		"stderr: access_token=[REDACTED] provider note",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("ChatStreamEvents() error = %q, want %q", got, want)
+		}
+	}
+	for _, secret := range []string{"stderr-access-token"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("ChatStreamEvents() error leaked credential %q: %q", secret, got)
+		}
+	}
+}
+
 func TestAntigravityCliChatStreamEventsFailsFastOnMalformedRecord(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("mock CLI scripts not supported on Windows")
