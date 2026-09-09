@@ -410,6 +410,16 @@ func TestClassifyError_AntigravityCliEmptyResponse(t *testing.T) {
 	}
 }
 
+func TestClassifyError_AntigravityCliNativeToolPermissionDenied(t *testing.T) {
+	result := ClassifyError(errors.New("antigravity cli native_tool_permission_denied"), "antigravity-cli", "antigravity-cli")
+	if result == nil {
+		t.Fatal("expected native-tool permission denial to be classified")
+	}
+	if result.Reason != FailoverNativeToolPermissionDenied || !result.IsRetriable() {
+		t.Fatalf("result = %#v, want retriable native_tool_permission_denied failure", result)
+	}
+}
+
 func TestClassifyError_ProviderModelPropagation(t *testing.T) {
 	err := errors.New("rate limit exceeded")
 	result := ClassifyError(err, "my-provider", "my-model")

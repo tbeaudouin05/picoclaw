@@ -21,6 +21,8 @@ var (
 	antigravityCLIURLCredentialsPattern = regexp.MustCompile(`(?i)(https?://[^:/\s@]+:)[^@\s/]+(@)`)
 )
 
+const antigravityCLINativeToolRepairInstruction = "The prior output was discarded because it attempted an unavailable native tool. Answer directly or use only advertised PicoClaw tools."
+
 // AntigravityCliProvider implements LLMProvider using the local agy CLI.
 // It is intentionally separate from the direct OAuth antigravity provider.
 type AntigravityCliProvider struct {
@@ -61,19 +63,15 @@ func (p *AntigravityCliProvider) buildPrompt(messages []Message, tools []ToolDef
 		}
 	}
 
+	systemParts = append(systemParts,
+		"Do not use any Antigravity-native tools, including file, terminal, browser, search, or IDE tools. "+
+			"All inspection and actions must use only advertised PicoClaw terminal-JSON tools. If no PicoClaw tool is advertised, answer directly.")
+
 	if len(tools) > 0 {
 		systemParts = append(systemParts,
-			"Antigravity-native tools (built-in file, terminal, browser, and other IDE-integrated capabilities) are "+
-				"for read-only inspection ONLY: reading files, listing directories, searching, and viewing state. "+
-				"They MUST NOT be used to make changes or perform any external or stateful action, including but "+
-				"not limited to running commands with side effects, writing or editing files, scheduling jobs, "+
-				"sending messages, opening or modifying GitHub resources, touching databases, or "+
-				"starting/stopping/restarting services. Any such action MUST be performed exclusively through an "+
-				"advertised PicoClaw tool via the terminal JSON text protocol below.\n\n"+
-				"PicoClaw-provided tools use this terminal JSON text protocol and are separate from Antigravity-native "+
-				"tools. To call a PicoClaw tool, emit it only in the final response using the JSON object format "+
-				"below. Never use or represent an Antigravity-native tool call as a PicoClaw tool call. Only call "+
-				"PicoClaw functions advertised below for this request.\n\n"+buildCLIToolsPrompt(tools))
+			"PicoClaw-provided tools use this terminal JSON text protocol. To call a PicoClaw tool, emit it only "+
+				"in the final response using the JSON object format below. Only call PicoClaw functions advertised "+
+				"below for this request.\n\n"+buildCLIToolsPrompt(tools))
 	}
 
 	var parts []string
@@ -136,6 +134,13 @@ func (p *AntigravityCliProvider) ChatStream(
 func (p *AntigravityCliProvider) ChatStreamEvents(
 	ctx context.Context, messages []Message, tools []ToolDefinition, model string, options map[string]any,
 	onChunk func(StreamChunk),
+) (*LLMResponse, error) {
+	return p.chatStreamEvents(ctx, messages, tools, model, options, onChunk, false)
+}
+
+func (p *AntigravityCliProvider) chatStreamEvents(
+	ctx context.Context, messages []Message, tools []ToolDefinition, model string, options map[string]any,
+	onChunk func(StreamChunk), nativeToolRepairAttempted bool,
 ) (*LLMResponse, error) {
 	prompt := p.buildPrompt(messages, tools)
 	prepared, mediaDir, cleanup, err := prepareCLIImageInputs(prompt)
@@ -233,9 +238,21 @@ func (p *AntigravityCliProvider) ChatStreamEvents(
 		_, err := p.parseJSONResponse(*terminalResult, tools)
 		return nil, antigravityCLIWithStderr(err, stderr.String())
 	}
+	if !nativeToolRepairAttempted && !gotDelta && strings.TrimSpace(terminalResult.Response) == "" &&
+		isAntigravityCLINativeToolPermissionDenied(stderr.String()) {
+		repairMessages := append(append([]Message(nil), messages...), Message{
+			Role:    "system",
+			Content: antigravityCLINativeToolRepairInstruction,
+		})
+		return p.chatStreamEvents(ctx, repairMessages, tools, model, options, onChunk, true)
+	}
 
 	response, err := p.parseJSONResponse(*terminalResult, tools)
 	if err != nil {
+		if nativeToolRepairAttempted && !gotDelta && strings.TrimSpace(terminalResult.Response) == "" &&
+			isAntigravityCLINativeToolPermissionDenied(stderr.String()) {
+			return nil, fmt.Errorf("antigravity cli native_tool_permission_denied")
+		}
 		return nil, antigravityCLIResultError(err, terminalResult, gotDelta, stepUpdateCount, stderr.String())
 	}
 	if gotDelta && response.Content == "" && len(response.ToolCalls) == 0 {
@@ -245,6 +262,19 @@ func (p *AntigravityCliProvider) ChatStreamEvents(
 		onChunk(StreamChunk{Content: response.Content})
 	}
 	return response, nil
+}
+
+// isAntigravityCLINativeToolPermissionDenied recognizes the headless CLI
+// denial without confusing ordinary empty responses or filesystem errors with
+// this repair case.
+func isAntigravityCLINativeToolPermissionDenied(stderr string) bool {
+	diagnostic := strings.ToLower(stderr)
+	nativeToolMentioned := strings.Contains(diagnostic, "native tool") || strings.Contains(diagnostic, "ide tool") ||
+		strings.Contains(diagnostic, "built-in tool") || strings.Contains(diagnostic, "command")
+	permissionDenied := strings.Contains(diagnostic, "permission") &&
+		(strings.Contains(diagnostic, "denied") || strings.Contains(diagnostic, "not allowed") ||
+			strings.Contains(diagnostic, "approval") || strings.Contains(diagnostic, "required"))
+	return nativeToolMentioned && permissionDenied
 }
 
 // antigravityCLIExecutionError preserves the CLI's complete stderr on a
