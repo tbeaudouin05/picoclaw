@@ -85,6 +85,33 @@ func createMockAntigravityCLIWithStderr(t *testing.T, stdout, stderr string) str
 	return script
 }
 
+func createMockAntigravityRepairCLI(t *testing.T, requestsFile string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("mock CLI scripts not supported on Windows")
+	}
+	dir := t.TempDir()
+	countFile := filepath.Join(dir, "count")
+	script := filepath.Join(dir, "agy")
+	contents := fmt.Sprintf(`#!/bin/sh
+count=0
+if [ -f %q ]; then count=$(cat %q); fi
+count=$((count + 1))
+printf '%%s' "$count" > %q
+cat >> %q
+if [ "$count" -eq 1 ]; then
+  printf '%%s\n' '{"event":"result","result":{"status":"SUCCESS","response":""}}'
+  printf 'command permission was required and denied in headless mode; access_token=repair-secret\n' >&2
+else
+  printf '%%s\n' '{"event":"result","result":{"status":"SUCCESS","response":"repaired"}}'
+fi
+`, countFile, countFile, countFile, requestsFile)
+	if err := os.WriteFile(script, []byte(contents), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
 func TestAntigravityCliChatUsesSafeScopedInvocationAndTextProtocol(t *testing.T) {
 	workspace := t.TempDir()
 	stateDir := t.TempDir()
@@ -176,15 +203,56 @@ func TestAntigravityCliChatUsesSafeScopedInvocationAndTextProtocol(t *testing.T)
 		"## System Instructions", "System policy.",
 		"## Conversation", "User: List jobs.",
 		"## Available Tools", "cron", "terminal JSON text protocol",
-		"read-only inspection ONLY", "MUST NOT be used to make changes",
-		"running commands with side effects", "writing or editing files", "scheduling jobs",
-		"sending messages", "opening or modifying GitHub resources", "touching databases",
-		"starting/stopping/restarting services",
-		"MUST be performed exclusively through an advertised PicoClaw tool",
+		"Do not use any Antigravity-native tools", "file, terminal, browser, search, or IDE tools",
+		"All inspection and actions must use only advertised PicoClaw terminal-JSON tools",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt missing %q: %s", want, prompt)
 		}
+	}
+}
+
+func TestAntigravityCliChatRetriesHeadlessNativeToolPermissionDenialOnce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock CLI scripts not supported on Windows")
+	}
+	requestsFile := filepath.Join(t.TempDir(), "requests")
+	p := NewAntigravityCliProvider("")
+	p.command = createMockAntigravityRepairCLI(t, requestsFile)
+
+	resp, err := p.Chat(context.Background(), []Message{{Role: "user", Content: "inspect this"}}, []ToolDefinition{{
+		Type: "function", Function: ToolFunctionDefinition{Name: "terminal"},
+	}}, "", nil)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if resp.Content != "repaired" {
+		t.Fatalf("response = %#v, want repaired response", resp)
+	}
+	requests, err := os.ReadFile(requestsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(requests), "\n"); got != 2 {
+		t.Fatalf("request count = %d, want one guarded retry", got)
+	}
+	if strings.Contains(string(requests), "repair-secret") {
+		t.Fatal("retry prompt leaked raw stderr")
+	}
+	if got := strings.Count(string(requests), antigravityCLINativeToolRepairInstruction); got != 1 {
+		t.Fatalf("repair instruction count = %d, want exactly one", got)
+	}
+}
+
+func TestAntigravityCliHeadlessNativeToolPermissionDenialClassifiesAfterRetry(t *testing.T) {
+	p := NewAntigravityCliProvider("")
+	p.command = createMockAntigravityCLIWithStderr(t,
+		`{"event":"result","result":{"status":"SUCCESS","response":""}}`+"\n",
+		"command permission was required and denied in headless mode\n")
+
+	_, err := p.Chat(context.Background(), []Message{{Role: "user", Content: "inspect this"}}, nil, "", nil)
+	if err == nil || !strings.Contains(err.Error(), "native_tool_permission_denied") {
+		t.Fatalf("Chat() error = %v, want native-tool permission classification marker", err)
 	}
 }
 
@@ -334,7 +402,8 @@ func TestAntigravityCliChatStreamEventsUsesCurrentNDJSONAndDoesNotDuplicateFinal
 	if err := json.Unmarshal(requestBytes, &request); err != nil {
 		t.Fatalf("stream stdin request is not JSON: %v", err)
 	}
-	if request.Event != "user" || request.Message.Content != "## Conversation\n\nUser: hello" {
+	if request.Event != "user" || !strings.HasSuffix(request.Message.Content, "## Conversation\n\nUser: hello") ||
+		!strings.Contains(request.Message.Content, "Do not use any Antigravity-native tools") {
 		t.Fatalf("stream stdin request = %#v, want one user prompt", request)
 	}
 }
@@ -378,7 +447,8 @@ func TestAntigravityCliChatLargePromptIsSentViaSingleNDJSONStdinRequest(t *testi
 	if err := json.Unmarshal(requestBytes, &request); err != nil {
 		t.Fatal(err)
 	}
-	if request.Event != "user" || request.Message.Content != "## Conversation\n\nUser: "+largePrompt {
+	if request.Event != "user" || !strings.HasSuffix(request.Message.Content, "## Conversation\n\nUser: "+largePrompt) ||
+		!strings.Contains(request.Message.Content, "Do not use any Antigravity-native tools") {
 		t.Fatalf("large prompt was not preserved in stdin request")
 	}
 }
