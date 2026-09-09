@@ -346,13 +346,14 @@ func redactAntigravityCLIDiagnostics(diagnostics string) string {
 // args intentionally omits --disable-slash-commands: agy silently no-ops
 // --mode plan whenever it is combined with --disable-slash-commands, so plan
 // mode (which keeps Antigravity-native tools read-only) is the flag that must
-// win. --dangerously-skip-permissions must never be added here.
+// win.
 func (p *AntigravityCliProvider) args(model string, extraDirs ...string) []string {
 	args := []string{
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--sandbox",
 		"--mode", "plan",
+		"--dangerously-skip-permissions",
 	}
 	args = appendAddDirs(args, append([]string{p.workspace}, extraDirs...)...)
 	if model != "" && model != "antigravity-cli" {

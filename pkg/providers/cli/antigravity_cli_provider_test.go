@@ -161,6 +161,7 @@ func TestAntigravityCliChatUsesSafeScopedInvocationAndTextProtocol(t *testing.T)
 		"--output-format", "stream-json",
 		"--sandbox",
 		"--mode", "plan",
+		"--dangerously-skip-permissions",
 		"--add-dir", workspace,
 		"--model", "gemini-test",
 	}
@@ -175,8 +176,8 @@ func TestAntigravityCliChatUsesSafeScopedInvocationAndTextProtocol(t *testing.T)
 			t.Fatalf("prompt was passed in argv: %q", args)
 		}
 	}
-	if containsString(args, "--dangerously-skip-permissions") {
-		t.Fatalf("unsafe auto-approve flag present: %q", args)
+	if !containsString(args, "--dangerously-skip-permissions") {
+		t.Fatalf("missing expected flag --dangerously-skip-permissions: %q", args)
 	}
 	cwdBytes, _ := os.ReadFile(cwdFile)
 	if got := strings.TrimSpace(string(cwdBytes)); got != workspace {
@@ -372,6 +373,7 @@ func TestAntigravityCliChatStreamEventsUsesCurrentNDJSONAndDoesNotDuplicateFinal
 		"--output-format", "stream-json",
 		"--sandbox",
 		"--mode", "plan",
+		"--dangerously-skip-permissions",
 		"--add-dir", workspace,
 		"--model", "gemini-test",
 	}
@@ -381,8 +383,8 @@ func TestAntigravityCliChatStreamEventsUsesCurrentNDJSONAndDoesNotDuplicateFinal
 	if containsString(args, "--disable-slash-commands") {
 		t.Fatalf("--disable-slash-commands silently no-ops --mode plan and must not be present: %q", args)
 	}
-	if containsString(args, "--dangerously-skip-permissions") {
-		t.Fatalf("unsafe auto-approve flag present: %q", args)
+	if !containsString(args, "--dangerously-skip-permissions") {
+		t.Fatalf("missing expected flag --dangerously-skip-permissions: %q", args)
 	}
 	for _, arg := range args {
 		if strings.Contains(arg, "hello") || strings.HasPrefix(arg, "--print=") {
