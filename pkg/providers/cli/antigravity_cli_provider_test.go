@@ -63,6 +63,28 @@ func createMockAntigravityFailingCLI(t *testing.T, stdout, stderr string, exitCo
 	return script
 }
 
+func createMockAntigravityCLIWithStderr(t *testing.T, stdout, stderr string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("mock CLI scripts not supported on Windows")
+	}
+	dir := t.TempDir()
+	stdoutFile := filepath.Join(dir, "stdout")
+	stderrFile := filepath.Join(dir, "stderr")
+	if err := os.WriteFile(stdoutFile, []byte(stdout), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stderrFile, []byte(stderr), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(dir, "agy")
+	contents := fmt.Sprintf("#!/bin/sh\ncat >/dev/null\ncat %q\ncat %q >&2\n", stdoutFile, stderrFile)
+	if err := os.WriteFile(script, []byte(contents), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
 func TestAntigravityCliChatUsesSafeScopedInvocationAndTextProtocol(t *testing.T) {
 	workspace := t.TempDir()
 	stateDir := t.TempDir()
@@ -395,6 +417,34 @@ func TestAntigravityCliChatStreamEventsRejectsTerminalError(t *testing.T) {
 	_, err := p.ChatStreamEvents(context.Background(), []Message{{Role: "user", Content: "hello"}}, nil, "", nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "quota exceeded") {
 		t.Fatalf("ChatStreamEvents() error = %v, want terminal error", err)
+	}
+}
+
+func TestAntigravityCliChatStreamEventsTerminalErrorIncludesStderrAndRedactsCredentials(t *testing.T) {
+	terminalError := "request failed; Authorization: Bearer terminal-bearer; api_key=terminal-api-key; endpoint=https://alice:terminal-password@example.test; provider diagnostic"
+	stderr := "retry after 5 seconds\naccess_token=stderr-access-token refresh_token=stderr-refresh-token id_token=stderr-id-token token=stderr-token password=stderr-password secret=stderr-secret\nprovider diagnostic detail\n"
+	p := NewAntigravityCliProvider("")
+	p.command = createMockAntigravityCLIWithStderr(t,
+		fmt.Sprintf("{\"event\":\"result\",\"result\":{\"status\":\"ERROR\",\"error\":%q}}\n", terminalError), stderr)
+
+	_, err := p.ChatStreamEvents(context.Background(), []Message{{Role: "user", Content: "hello"}}, nil, "", nil, nil)
+	if err == nil {
+		t.Fatal("ChatStreamEvents() expected error")
+	}
+	got := err.Error()
+	wantStderr := "stderr: retry after 5 seconds\naccess_token=[REDACTED] refresh_token=[REDACTED] id_token=[REDACTED] token=[REDACTED] password=[REDACTED] secret=[REDACTED]\nprovider diagnostic detail\n"
+	if !strings.Contains(got, wantStderr) {
+		t.Fatalf("ChatStreamEvents() error = %q, want complete redacted stderr %q", got, wantStderr)
+	}
+	for _, want := range []string{"antigravity cli returned ERROR", "stderr: retry after 5 seconds", "provider diagnostic", "provider diagnostic detail", "[REDACTED]"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("ChatStreamEvents() error = %q, want %q", got, want)
+		}
+	}
+	for _, secret := range []string{"terminal-bearer", "terminal-api-key", "terminal-password", "stderr-access-token", "stderr-refresh-token", "stderr-id-token", "stderr-token", "stderr-password", "stderr-secret"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("ChatStreamEvents() error leaked credential %q: %q", secret, got)
+		}
 	}
 }
 

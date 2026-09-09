@@ -7,9 +7,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strings"
 
 	"github.com/sipeed/picoclaw/pkg/isolation"
+)
+
+var (
+	antigravityCLIAuthorizationPattern  = regexp.MustCompile(`(?im)(["']?authorization["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\r\n,;]+)`)
+	antigravityCLICredentialPattern     = regexp.MustCompile(`(?i)(["']?(?:token|access_token|refresh_token|id_token|api[_-]?key|apikey|password|secrets?)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,&\r\n}]+)`)
+	antigravityCLIQueryPattern          = regexp.MustCompile(`(?i)([?&](?:token|access_token|refresh_token|id_token|api[_-]?key|apikey|password|secrets?)=)[^&#\s]+`)
+	antigravityCLIBearerPattern         = regexp.MustCompile(`(?i)\bbearer\s+[^\s,;]+`)
+	antigravityCLIURLCredentialsPattern = regexp.MustCompile(`(?i)(https?://[^:/\s@]+:)[^@\s/]+(@)`)
 )
 
 // AntigravityCliProvider implements LLMProvider using the local agy CLI.
@@ -195,6 +204,10 @@ func (p *AntigravityCliProvider) ChatStreamEvents(
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		if terminalResult != nil && terminalResult.Status != "SUCCESS" {
+			_, terminalErr := p.parseJSONResponse(*terminalResult, tools)
+			return nil, antigravityCLIStatusError(terminalErr, err, rawOutput.String(), stderr.String())
+		}
 		return nil, antigravityCLIExecutionError(err, rawOutput.String(), stderr.String())
 	}
 	if terminalResult == nil {
@@ -205,6 +218,11 @@ func (p *AntigravityCliProvider) ChatStreamEvents(
 	// only a response with neither terminal text nor deltas is retryable.
 	if gotDelta && strings.TrimSpace(terminalResult.Response) == "" {
 		terminalResult.Response = content.String()
+	}
+
+	if terminalResult.Status != "SUCCESS" {
+		_, err := p.parseJSONResponse(*terminalResult, tools)
+		return nil, antigravityCLIWithStderr(err, stderr.String())
 	}
 
 	response, err := p.parseJSONResponse(*terminalResult, tools)
@@ -220,17 +238,44 @@ func (p *AntigravityCliProvider) ChatStreamEvents(
 	return response, nil
 }
 
-// antigravityCLIExecutionError preserves the CLI's stderr when it provides a
+// antigravityCLIExecutionError preserves the CLI's complete stderr on a
 // classified failure. If stderr is empty, preserve both the original process
 // error and raw stdout so callers can diagnose otherwise-unclassified exits.
 func antigravityCLIExecutionError(err error, stdout, stderr string) error {
-	if stderrText := strings.TrimSpace(stderr); stderrText != "" {
-		return fmt.Errorf("antigravity cli error: %s", stderrText)
+	if stderr != "" {
+		return fmt.Errorf("antigravity cli error: %s", redactAntigravityCLIDiagnostics(stderr))
 	}
-	if stdoutText := strings.TrimSpace(stdout); stdoutText != "" {
-		return fmt.Errorf("antigravity cli unclassified error: %w\nraw output: %s", err, stdoutText)
+	if stdout != "" {
+		return fmt.Errorf("antigravity cli unclassified error: %w\nraw output: %s", err, redactAntigravityCLIDiagnostics(stdout))
 	}
 	return fmt.Errorf("antigravity cli unclassified error: %w", err)
+}
+
+func antigravityCLIWithStderr(err error, stderr string) error {
+	if stderr == "" {
+		return err
+	}
+	return fmt.Errorf("%w\nstderr: %s", err, redactAntigravityCLIDiagnostics(stderr))
+}
+
+func antigravityCLIStatusError(err, processErr error, stdout, stderr string) error {
+	if stderr != "" {
+		return antigravityCLIWithStderr(err, stderr)
+	}
+	if stdout != "" {
+		return fmt.Errorf("%w\nprocess error: %v\nraw output: %s", err, processErr, redactAntigravityCLIDiagnostics(stdout))
+	}
+	return fmt.Errorf("%w\nprocess error: %v", err, processErr)
+}
+
+// redactAntigravityCLIDiagnostics removes credentials from diagnostics while
+// leaving ordinary provider output intact and untruncated.
+func redactAntigravityCLIDiagnostics(diagnostics string) string {
+	diagnostics = antigravityCLIAuthorizationPattern.ReplaceAllString(diagnostics, "${1}[REDACTED]")
+	diagnostics = antigravityCLICredentialPattern.ReplaceAllString(diagnostics, "${1}[REDACTED]")
+	diagnostics = antigravityCLIQueryPattern.ReplaceAllString(diagnostics, "${1}[REDACTED]")
+	diagnostics = antigravityCLIBearerPattern.ReplaceAllString(diagnostics, "Bearer [REDACTED]")
+	return antigravityCLIURLCredentialsPattern.ReplaceAllString(diagnostics, "${1}[REDACTED]${2}")
 }
 
 func (p *AntigravityCliProvider) args(model string, extraDirs ...string) []string {
@@ -273,7 +318,7 @@ func (p *AntigravityCliProvider) parseJSONResponse(result antigravityCliJSONResp
 		if errText == "" {
 			errText = "unknown error"
 		}
-		return nil, fmt.Errorf("antigravity cli returned %s: %s", result.Status, errText)
+		return nil, fmt.Errorf("antigravity cli returned %s: %s", result.Status, redactAntigravityCLIDiagnostics(errText))
 	}
 
 	toolCalls := filterAntigravityTerminalToolCalls(extractTerminalToolCallsFromText(result.Response), tools)
