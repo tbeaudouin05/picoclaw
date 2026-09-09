@@ -63,10 +63,17 @@ func (p *AntigravityCliProvider) buildPrompt(messages []Message, tools []ToolDef
 
 	if len(tools) > 0 {
 		systemParts = append(systemParts,
-			"PicoClaw-provided tools use a terminal JSON text protocol and are separate from Antigravity-native tools. "+
-				"To call a PicoClaw tool, emit it only in the final response using the JSON object format below. "+
-				"Never use or represent an Antigravity-native tool call as a PicoClaw tool call. Only call PicoClaw "+
-				"functions advertised below for this request.\n\n"+buildCLIToolsPrompt(tools))
+			"Antigravity-native tools (built-in file, terminal, browser, and other IDE-integrated capabilities) are "+
+				"for read-only inspection ONLY: reading files, listing directories, searching, and viewing state. "+
+				"They MUST NOT be used to make changes or perform any external or stateful action, including but "+
+				"not limited to running commands with side effects, writing or editing files, scheduling jobs, "+
+				"sending messages, opening or modifying GitHub resources, touching databases, or "+
+				"starting/stopping/restarting services. Any such action MUST be performed exclusively through an "+
+				"advertised PicoClaw tool via the terminal JSON text protocol below.\n\n"+
+				"PicoClaw-provided tools use this terminal JSON text protocol and are separate from Antigravity-native "+
+				"tools. To call a PicoClaw tool, emit it only in the final response using the JSON object format "+
+				"below. Never use or represent an Antigravity-native tool call as a PicoClaw tool call. Only call "+
+				"PicoClaw functions advertised below for this request.\n\n"+buildCLIToolsPrompt(tools))
 	}
 
 	var parts []string
@@ -306,12 +313,16 @@ func redactAntigravityCLIDiagnostics(diagnostics string) string {
 	return antigravityCLIURLCredentialsPattern.ReplaceAllString(diagnostics, "${1}[REDACTED]${2}")
 }
 
+// args intentionally omits --disable-slash-commands: agy silently no-ops
+// --mode plan whenever it is combined with --disable-slash-commands, so plan
+// mode (which keeps Antigravity-native tools read-only) is the flag that must
+// win. --dangerously-skip-permissions must never be added here.
 func (p *AntigravityCliProvider) args(model string, extraDirs ...string) []string {
 	args := []string{
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--sandbox",
-		"--disable-slash-commands",
+		"--mode", "plan",
 	}
 	args = appendAddDirs(args, append([]string{p.workspace}, extraDirs...)...)
 	if model != "" && model != "antigravity-cli" {

@@ -129,13 +129,19 @@ func TestAntigravityCliChatUsesSafeScopedInvocationAndTextProtocol(t *testing.T)
 		t.Fatal(err)
 	}
 	args := strings.Split(strings.TrimSpace(string(argsBytes)), "\n")
-	for _, want := range []string{"--sandbox", "--disable-slash-commands", "--add-dir", workspace, "--model", "gemini-test"} {
-		if !containsString(args, want) {
-			t.Errorf("args missing %q: %q", want, args)
-		}
+	wantArgs := []string{
+		"--input-format", "stream-json",
+		"--output-format", "stream-json",
+		"--sandbox",
+		"--mode", "plan",
+		"--add-dir", workspace,
+		"--model", "gemini-test",
 	}
-	if containsString(args, "--mode") || containsString(args, "plan") {
-		t.Fatalf("incompatible plan mode flags present: %q", args)
+	if strings.Join(args, "\x00") != strings.Join(wantArgs, "\x00") {
+		t.Fatalf("args = %q, want exact invocation %q", args, wantArgs)
+	}
+	if containsString(args, "--disable-slash-commands") {
+		t.Fatalf("--disable-slash-commands silently no-ops --mode plan and must not be present: %q", args)
 	}
 	for _, arg := range args {
 		if strings.Contains(arg, "List jobs.") || strings.HasPrefix(arg, "--print=") {
@@ -170,6 +176,11 @@ func TestAntigravityCliChatUsesSafeScopedInvocationAndTextProtocol(t *testing.T)
 		"## System Instructions", "System policy.",
 		"## Conversation", "User: List jobs.",
 		"## Available Tools", "cron", "terminal JSON text protocol",
+		"read-only inspection ONLY", "MUST NOT be used to make changes",
+		"running commands with side effects", "writing or editing files", "scheduling jobs",
+		"sending messages", "opening or modifying GitHub resources", "touching databases",
+		"starting/stopping/restarting services",
+		"MUST be performed exclusively through an advertised PicoClaw tool",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt missing %q: %s", want, prompt)
@@ -288,13 +299,22 @@ func TestAntigravityCliChatStreamEventsUsesCurrentNDJSONAndDoesNotDuplicateFinal
 		t.Fatal(err)
 	}
 	args := strings.Split(strings.TrimSpace(string(argsBytes)), "\n")
-	for _, want := range []string{"--input-format", "stream-json", "--output-format", "stream-json", "--sandbox", "--disable-slash-commands", "--add-dir", workspace, "--model", "gemini-test"} {
-		if !containsString(args, want) {
-			t.Errorf("args missing %q: %q", want, args)
-		}
+	wantArgs := []string{
+		"--input-format", "stream-json",
+		"--output-format", "stream-json",
+		"--sandbox",
+		"--mode", "plan",
+		"--add-dir", workspace,
+		"--model", "gemini-test",
 	}
-	if containsString(args, "--mode") || containsString(args, "plan") {
-		t.Fatalf("incompatible plan mode flags present: %q", args)
+	if strings.Join(args, "\x00") != strings.Join(wantArgs, "\x00") {
+		t.Fatalf("args = %q, want exact invocation %q", args, wantArgs)
+	}
+	if containsString(args, "--disable-slash-commands") {
+		t.Fatalf("--disable-slash-commands silently no-ops --mode plan and must not be present: %q", args)
+	}
+	if containsString(args, "--dangerously-skip-permissions") {
+		t.Fatalf("unsafe auto-approve flag present: %q", args)
 	}
 	for _, arg := range args {
 		if strings.Contains(arg, "hello") || strings.HasPrefix(arg, "--print=") {
