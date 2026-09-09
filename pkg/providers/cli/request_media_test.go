@@ -2,6 +2,7 @@ package cliprovider
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -283,8 +284,24 @@ func TestCLIProviderImageCopyLifecycle(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if want := "[image:" + copiedPath + "]"; !strings.Contains(string(prompt), want) {
-				t.Fatalf("child prompt = %q, want exact rewritten tag %q", prompt, want)
+			promptText := string(prompt)
+			if tc.provider == "antigravity" {
+				var request struct {
+					Event   string `json:"event"`
+					Message struct {
+						Content string `json:"content"`
+					} `json:"message"`
+				}
+				if err := json.Unmarshal(prompt, &request); err != nil {
+					t.Fatalf("antigravity stdin request is not JSON: %v", err)
+				}
+				if request.Event != "user" {
+					t.Fatalf("antigravity stdin event = %q, want user", request.Event)
+				}
+				promptText = request.Message.Content
+			}
+			if want := "[image:" + copiedPath + "]"; !strings.Contains(promptText, want) {
+				t.Fatalf("child prompt = %q, want exact rewritten tag %q", promptText, want)
 			}
 			copied, err := os.ReadFile(filepath.Join(state, "copied"))
 			if err != nil || string(copied) != "image bytes" {
@@ -397,10 +414,7 @@ func createBlockingMediaCLI(t *testing.T, state, provider string, stream bool) s
 		output = `{"type":"result","result":"ok"}`
 	}
 	if provider == "antigravity" {
-		output = `{"status":"SUCCESS","response":"ok"}`
-		if stream {
-			output = `{"event":"result","result":{"status":"SUCCESS","response":"ok"}}`
-		}
+		output = `{"event":"result","result":{"status":"SUCCESS","response":"ok"}}`
 	}
 	script := filepath.Join(state, provider)
 	contents := fmt.Sprintf(`#!/bin/sh
@@ -409,17 +423,16 @@ dir=
 previous=
 for arg do
 	if [ "$previous" = "--add-dir" ]; then dir=$arg; fi
-	case "$arg" in --print=*) printf '%%s' "${arg#--print=}" > %q;; esac
 	previous=$arg
 done
-if [ %q = claude ]; then cat > %q; fi
+if [ %q = claude ] || [ %q = antigravity ]; then cat > %q; fi
 set -- "$dir"/*
 cat "$1" > %q
 printf ready > %q
 cat %q >/dev/null
 printf '%%s\n' %q
-`, filepath.Join(state, "args"), filepath.Join(state, "prompt"), provider,
-		filepath.Join(state, "prompt"), filepath.Join(state, "copied"),
+`, filepath.Join(state, "args"), provider, provider, filepath.Join(state, "prompt"),
+		filepath.Join(state, "copied"),
 		filepath.Join(state, "ready"), filepath.Join(state, "release"), output)
 	if err := os.WriteFile(script, []byte(contents), 0o755); err != nil {
 		t.Fatal(err)

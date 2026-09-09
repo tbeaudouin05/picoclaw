@@ -37,18 +37,13 @@ func TestRunToolLoopReturnsUnknownAntigravityCallErrorInNextPrompt(t *testing.T)
 	countFile := filepath.Join(dir, "count")
 	script := filepath.Join(dir, "agy")
 	contents := `#!/bin/sh
-for arg do
-	case "$arg" in
-	--print=*)
-		printf '%s\n---PROMPT---\n' "${arg#--print=}" >> "` + promptsFile + `"
-		;;
-	esac
-done
+sed 's/\\"/"/g' >> "` + promptsFile + `"
+printf '%s\n' '---PROMPT---' >> "` + promptsFile + `"
 if [ ! -f "` + countFile + `" ]; then
 	: > "` + countFile + `"
-	printf '%s' '{"status":"SUCCESS","response":"{\"tool_calls\":[{\"id\":\"call_missing\",\"type\":\"function\",\"function\":{\"name\":\"missing_tool\",\"arguments\":\"{\\\"query\\\":\\\"status\\\"}\"}}]}"}'
+	printf '%s' ` + strconv.Quote(`{"event":"result","result":{"status":"SUCCESS","response":`+strconv.Quote(`{"tool_calls":[{"id":"call_missing","type":"function","function":{"name":"missing_tool","arguments":"{\"query\":\"status\"}"}}]}`)+`}}`) + `
 else
-	printf '%s' '{"status":"SUCCESS","response":"Handled missing tool."}'
+	printf '%s' '{"event":"result","result":{"status":"SUCCESS","response":"Handled missing tool."}}'
 fi
 `
 	if err := os.WriteFile(script, []byte(contents), 0o755); err != nil {
@@ -147,18 +142,13 @@ func runAntigravityToolLoop(
 		t.Fatal(err)
 	}
 	contents := `#!/bin/sh
-for arg do
-	case "$arg" in
-	--print=*)
-		printf '%s\n---PROMPT---\n' "${arg#--print=}" >> "` + promptsFile + `"
-		;;
-	esac
-done
+sed 's/\\"/"/g' >> "` + promptsFile + `"
+printf '%s\n' '---PROMPT---' >> "` + promptsFile + `"
 if [ ! -f "` + countFile + `" ]; then
 	: > "` + countFile + `"
-	printf '%s' ` + strconv.Quote(`{"status":"SUCCESS","response":`+strconv.Quote(response)+`}`) + `
+	printf '%s' ` + strconv.Quote(`{"event":"result","result":{"status":"SUCCESS","response":`+strconv.Quote(response)+`}}`) + `
 else
-	printf '%s' '{"status":"SUCCESS","response":"Handled tool result."}'
+	printf '%s' '{"event":"result","result":{"status":"SUCCESS","response":"Handled tool result."}}'
 fi
 `
 	if err := os.WriteFile(script, []byte(contents), 0o755); err != nil {

@@ -24,34 +24,11 @@ func NewAntigravityCliProvider(workspace string) *AntigravityCliProvider {
 	return &AntigravityCliProvider{command: "agy", workspace: workspace}
 }
 
-// Chat executes agy in sandboxed, noninteractive print mode.
+// Chat executes a single agy stream-json turn and returns its terminal result.
 func (p *AntigravityCliProvider) Chat(
 	ctx context.Context, messages []Message, tools []ToolDefinition, model string, options map[string]any,
 ) (*LLMResponse, error) {
-	prompt := p.buildPrompt(messages, tools)
-	prepared, mediaDir, cleanup, err := prepareCLIImageInputs(prompt)
-	if err != nil {
-		return nil, err
-	}
-	defer cleanup()
-	prompt = prepared[0]
-	args := p.args(prompt, "json", model, mediaDir)
-
-	cmd := exec.CommandContext(ctx, p.command, args...)
-	if p.workspace != "" {
-		cmd.Dir = p.workspace
-	}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := isolation.Run(cmd); err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, antigravityCLIExecutionError(err, stdout.String(), stderr.String())
-	}
-
-	return p.parseResponse(stdout.String(), tools)
+	return p.ChatStreamEvents(ctx, messages, tools, model, options, nil)
 }
 
 // GetDefaultModel returns the provider's model sentinel.
@@ -151,7 +128,11 @@ func (p *AntigravityCliProvider) ChatStreamEvents(
 	}
 	defer cleanup()
 	prompt = prepared[0]
-	args := p.args(prompt, "stream-json", model, mediaDir)
+	request, err := antigravityCLIRequest(prompt)
+	if err != nil {
+		return nil, err
+	}
+	args := p.args(model, mediaDir)
 
 	cmd := exec.CommandContext(ctx, p.command, args...)
 	if p.workspace != "" {
@@ -161,6 +142,9 @@ func (p *AntigravityCliProvider) ChatStreamEvents(
 	if err != nil {
 		return nil, fmt.Errorf("failed to create antigravity cli stdout pipe: %w", err)
 	}
+	// agy's stream-json input protocol accepts one NDJSON user event per turn.
+	// Using stdin keeps arbitrarily large prompts out of argv.
+	cmd.Stdin = bytes.NewReader(request)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := isolation.Start(cmd); err != nil {
@@ -249,10 +233,10 @@ func antigravityCLIExecutionError(err error, stdout, stderr string) error {
 	return fmt.Errorf("antigravity cli unclassified error: %w", err)
 }
 
-func (p *AntigravityCliProvider) args(prompt, outputFormat, model string, extraDirs ...string) []string {
+func (p *AntigravityCliProvider) args(model string, extraDirs ...string) []string {
 	args := []string{
-		"--print=" + prompt,
-		"--output-format", outputFormat,
+		"--input-format", "stream-json",
+		"--output-format", "stream-json",
 		"--sandbox",
 		"--disable-slash-commands",
 	}
@@ -261,6 +245,23 @@ func (p *AntigravityCliProvider) args(prompt, outputFormat, model string, extraD
 		args = append(args, "--model", model)
 	}
 	return args
+}
+
+// antigravityCLIRequest encodes exactly one stream-json user event, including
+// its newline NDJSON delimiter.
+func antigravityCLIRequest(prompt string) ([]byte, error) {
+	request := struct {
+		Event   string `json:"event"`
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	}{Event: "user"}
+	request.Message.Content = prompt
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode antigravity cli request: %w", err)
+	}
+	return append(encoded, '\n'), nil
 }
 
 func (p *AntigravityCliProvider) parseJSONResponse(result antigravityCliJSONResponse, tools []ToolDefinition) (*LLMResponse, error) {

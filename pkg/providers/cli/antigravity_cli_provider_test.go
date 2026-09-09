@@ -2,6 +2,7 @@ package cliprovider
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 var _ LLMProvider = (*AntigravityCliProvider)(nil)
@@ -18,6 +20,9 @@ func createMockAntigravityCLI(t *testing.T, argsFile, printFile, cwdFile, output
 	if runtime.GOOS == "windows" {
 		t.Skip("mock CLI scripts not supported on Windows")
 	}
+	if strings.HasPrefix(output, `{"status":`) {
+		output = `{"event":"result","result":` + output + `}`
+	}
 	dir := t.TempDir()
 	outputFile := filepath.Join(dir, "output.json")
 	if err := os.WriteFile(outputFile, []byte(output), 0o644); err != nil {
@@ -26,11 +31,7 @@ func createMockAntigravityCLI(t *testing.T, argsFile, printFile, cwdFile, output
 	script := filepath.Join(dir, "agy")
 	contents := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$@" > '%s'
-for arg do
-	case "$arg" in
-	--print=*) printf '%%s' "${arg#--print=}" > '%s' ;;
-	esac
-done
+cat > '%s'
 pwd > '%s'
 cat '%s'
 `, argsFile, printFile, cwdFile, outputFile)
@@ -114,8 +115,10 @@ func TestAntigravityCliChatUsesSafeScopedInvocationAndTextProtocol(t *testing.T)
 	if containsString(args, "--mode") || containsString(args, "plan") {
 		t.Fatalf("incompatible plan mode flags present: %q", args)
 	}
-	if !containsStringPrefix(args, "--print=") {
-		t.Fatalf("args missing attached print prompt: %q", args)
+	for _, arg := range args {
+		if strings.Contains(arg, "List jobs.") || strings.HasPrefix(arg, "--print=") {
+			t.Fatalf("prompt was passed in argv: %q", args)
+		}
 	}
 	if containsString(args, "--dangerously-skip-permissions") {
 		t.Fatalf("unsafe auto-approve flag present: %q", args)
@@ -128,7 +131,19 @@ func TestAntigravityCliChatUsesSafeScopedInvocationAndTextProtocol(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	prompt := string(promptBytes)
+	var request struct {
+		Event   string `json:"event"`
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(promptBytes, &request); err != nil {
+		t.Fatalf("stdin request is not JSON: %v", err)
+	}
+	if request.Event != "user" {
+		t.Fatalf("stdin request event = %q, want user", request.Event)
+	}
+	prompt := request.Message.Content
 	for _, want := range []string{
 		"## System Instructions", "System policy.",
 		"## Conversation", "User: List jobs.",
@@ -251,13 +266,78 @@ func TestAntigravityCliChatStreamEventsUsesCurrentNDJSONAndDoesNotDuplicateFinal
 		t.Fatal(err)
 	}
 	args := strings.Split(strings.TrimSpace(string(argsBytes)), "\n")
-	for _, want := range []string{"--output-format", "stream-json", "--sandbox", "--disable-slash-commands", "--add-dir", workspace, "--model", "gemini-test"} {
+	for _, want := range []string{"--input-format", "stream-json", "--output-format", "stream-json", "--sandbox", "--disable-slash-commands", "--add-dir", workspace, "--model", "gemini-test"} {
 		if !containsString(args, want) {
 			t.Errorf("args missing %q: %q", want, args)
 		}
 	}
 	if containsString(args, "--mode") || containsString(args, "plan") {
 		t.Fatalf("incompatible plan mode flags present: %q", args)
+	}
+	for _, arg := range args {
+		if strings.Contains(arg, "hello") || strings.HasPrefix(arg, "--print=") {
+			t.Fatalf("prompt was passed in argv: %q", args)
+		}
+	}
+	requestBytes, err := os.ReadFile(filepath.Join(stateDir, "print"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request struct {
+		Event   string `json:"event"`
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(requestBytes, &request); err != nil {
+		t.Fatalf("stream stdin request is not JSON: %v", err)
+	}
+	if request.Event != "user" || request.Message.Content != "## Conversation\n\nUser: hello" {
+		t.Fatalf("stream stdin request = %#v, want one user prompt", request)
+	}
+}
+
+func TestAntigravityCliChatLargePromptIsSentViaSingleNDJSONStdinRequest(t *testing.T) {
+	stateDir := t.TempDir()
+	argsFile := filepath.Join(stateDir, "args")
+	stdinFile := filepath.Join(stateDir, "stdin")
+	p := NewAntigravityCliProvider("")
+	p.command = createMockAntigravityCLI(t, argsFile, stdinFile, filepath.Join(stateDir, "cwd"),
+		`{"event":"result","result":{"status":"SUCCESS","response":"ok"}}`)
+
+	largePrompt := strings.Repeat("large prompt ", 256*1024) // 3 MiB
+	resp, err := p.Chat(context.Background(), []Message{{Role: "user", Content: largePrompt}}, nil, "", nil)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if resp.Content != "ok" {
+		t.Fatalf("response = %#v, want ok", resp)
+	}
+	argsBytes, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(argsBytes), largePrompt[:64]) {
+		t.Fatal("large prompt was passed in argv")
+	}
+	requestBytes, err := os.ReadFile(stdinFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(string(requestBytes), "\n") || strings.Count(string(requestBytes), "\n") != 1 {
+		t.Fatalf("stdin = %q, want exactly one NDJSON record", requestBytes[:min(len(requestBytes), 128)])
+	}
+	var request struct {
+		Event   string `json:"event"`
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(requestBytes, &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.Event != "user" || request.Message.Content != "## Conversation\n\nUser: "+largePrompt {
+		t.Fatalf("large prompt was not preserved in stdin request")
 	}
 }
 
@@ -318,6 +398,28 @@ func TestAntigravityCliChatStreamEventsRejectsTerminalError(t *testing.T) {
 	}
 }
 
+func TestAntigravityCliChatStreamEventsFailsFastOnMalformedRecord(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock CLI scripts not supported on Windows")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "agy")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ncat >/dev/null\nprintf 'not json\\n'\nwhile :; do :; done\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := NewAntigravityCliProvider("")
+	p.command = script
+
+	started := time.Now()
+	_, err := p.ChatStreamEvents(context.Background(), []Message{{Role: "user", Content: "hello"}}, nil, "", nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "failed to parse antigravity cli stream record") {
+		t.Fatalf("ChatStreamEvents() error = %v, want stream parse error", err)
+	}
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("ChatStreamEvents() returned after %s, want immediate child termination", elapsed)
+	}
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
@@ -327,18 +429,9 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
-func containsStringPrefix(values []string, prefix string) bool {
-	for _, value := range values {
-		if strings.HasPrefix(value, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
 func TestAntigravityCliChatNonZeroExitUsesStderrWhenPresent(t *testing.T) {
 	p := NewAntigravityCliProvider("")
-	p.command = createMockAntigravityFailingCLI(t, "ignored output", "quota exceeded", 1)
+	p.command = createMockAntigravityFailingCLI(t, `{"event":"init"}`, "quota exceeded", 1)
 
 	_, err := p.Chat(context.Background(), []Message{{Role: "user", Content: "hello"}}, nil, "", nil)
 	if err == nil {
@@ -351,13 +444,13 @@ func TestAntigravityCliChatNonZeroExitUsesStderrWhenPresent(t *testing.T) {
 
 func TestAntigravityCliChatNonZeroExitWithoutStderrIncludesRawOutput(t *testing.T) {
 	p := NewAntigravityCliProvider("")
-	p.command = createMockAntigravityFailingCLI(t, "credit balance exhausted", "", 1)
+	p.command = createMockAntigravityFailingCLI(t, `{"event":"init"}`, "", 1)
 
 	_, err := p.Chat(context.Background(), []Message{{Role: "user", Content: "hello"}}, nil, "", nil)
 	if err == nil {
 		t.Fatal("Chat() expected error")
 	}
-	for _, want := range []string{"unclassified", "exit status 1", "raw output: credit balance exhausted"} {
+	for _, want := range []string{"unclassified", "exit status 1", `raw output: {"event":"init"}`} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("Chat() error = %q, want %q", err, want)
 		}
