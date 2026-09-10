@@ -463,16 +463,14 @@ func redactAntigravityCLIDiagnostics(diagnostics string) string {
 	return antigravityCLIURLCredentialsPattern.ReplaceAllString(diagnostics, "${1}[REDACTED]${2}")
 }
 
-// args intentionally omits --disable-slash-commands: agy silently no-ops
-// --mode plan whenever it is combined with --disable-slash-commands, so plan
-// mode (which keeps Antigravity-native tools read-only) is the flag that must
-// win.
+// args intentionally omits --disable-slash-commands and configures
+// --mode accept-edits so that requests run in accept-edits mode.
 func (p *AntigravityCliProvider) args(model string, extraDirs ...string) []string {
 	args := []string{
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--sandbox",
-		"--mode", "plan",
+		"--mode", "accept-edits",
 		"--dangerously-skip-permissions",
 	}
 	args = appendAddDirs(args, append([]string{p.workspace}, extraDirs...)...)

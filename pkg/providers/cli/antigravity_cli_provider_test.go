@@ -160,7 +160,7 @@ func TestAntigravityCliChatUsesSafeScopedInvocationAndTextProtocol(t *testing.T)
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--sandbox",
-		"--mode", "plan",
+		"--mode", "accept-edits",
 		"--dangerously-skip-permissions",
 		"--add-dir", workspace,
 		"--model", "gemini-test",
@@ -169,7 +169,7 @@ func TestAntigravityCliChatUsesSafeScopedInvocationAndTextProtocol(t *testing.T)
 		t.Fatalf("args = %q, want exact invocation %q", args, wantArgs)
 	}
 	if containsString(args, "--disable-slash-commands") {
-		t.Fatalf("--disable-slash-commands silently no-ops --mode plan and must not be present: %q", args)
+		t.Fatalf("--disable-slash-commands must not be present: %q", args)
 	}
 	for _, arg := range args {
 		if strings.Contains(arg, "List jobs.") || strings.HasPrefix(arg, "--print=") {
@@ -372,7 +372,7 @@ func TestAntigravityCliChatStreamEventsUsesCurrentNDJSONAndDoesNotDuplicateFinal
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
 		"--sandbox",
-		"--mode", "plan",
+		"--mode", "accept-edits",
 		"--dangerously-skip-permissions",
 		"--add-dir", workspace,
 		"--model", "gemini-test",
@@ -381,7 +381,7 @@ func TestAntigravityCliChatStreamEventsUsesCurrentNDJSONAndDoesNotDuplicateFinal
 		t.Fatalf("args = %q, want exact invocation %q", args, wantArgs)
 	}
 	if containsString(args, "--disable-slash-commands") {
-		t.Fatalf("--disable-slash-commands silently no-ops --mode plan and must not be present: %q", args)
+		t.Fatalf("--disable-slash-commands must not be present: %q", args)
 	}
 	if !containsString(args, "--dangerously-skip-permissions") {
 		t.Fatalf("missing expected flag --dangerously-skip-permissions: %q", args)
