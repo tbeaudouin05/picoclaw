@@ -479,6 +479,61 @@ func TestAntigravityCliChatStreamEventsUsesDeltasWhenSuccessfulTerminalResponseI
 	}
 }
 
+func TestAntigravityCliChatStreamEventsStreamsCompletedNativeToolStepsUIOnly(t *testing.T) {
+	stateDir := t.TempDir()
+	p := NewAntigravityCliProvider("")
+	p.command = createMockAntigravityCLI(t,
+		filepath.Join(stateDir, "args"), filepath.Join(stateDir, "print"), filepath.Join(stateDir, "cwd"),
+		"{\"event\":\"step_update\",\"step_update\":{\"text_delta\":\"Working\"}}\n"+
+			"{\"event\":\"step_update\",\"step_update\":{\"state\":\"DONE\",\"step_type\":\"tool\",\"tool_name\":\"terminal\",\"tool_info\":{\"name\":\"run_command\",\"parameters\":{\"command\":\"pwd\"},\"output\":\"/workspace\",\"error\":\"secret error\"}}}\n"+
+			"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"done\"}}\n")
+
+	var chunks []StreamChunk
+	resp, err := p.ChatStreamEvents(context.Background(), []Message{{Role: "user", Content: "hello"}}, nil, "", nil, func(chunk StreamChunk) {
+		chunks = append(chunks, chunk)
+	})
+	if err != nil {
+		t.Fatalf("ChatStreamEvents() error = %v", err)
+	}
+	if len(chunks) != 2 || chunks[0].Content != "Working" || len(chunks[1].ToolCalls) != 1 {
+		t.Fatalf("chunks = %#v, want text followed by one native tool chunk", chunks)
+	}
+	call := chunks[1].ToolCalls[0]
+	if call.Type != "function" || call.Name != "run_command" || call.Function == nil || call.Function.Name != "run_command" {
+		t.Fatalf("streamed tool call = %#v, want run_command function", call)
+	}
+	if call.Function.Arguments != `{"command":"pwd"}` || call.Arguments["command"] != "pwd" {
+		t.Fatalf("streamed tool arguments = %#v, want only command", call)
+	}
+	if strings.Contains(call.Function.Arguments, "output") || strings.Contains(call.Function.Arguments, "error") {
+		t.Fatalf("streamed tool arguments leaked native result: %q", call.Function.Arguments)
+	}
+	if resp.Content != "done" || resp.FinishReason != "stop" || len(resp.ToolCalls) != 0 {
+		t.Fatalf("response = %#v, want terminal text without executable tool calls", resp)
+	}
+}
+
+func TestAntigravityCliChatStreamEventsIgnoresIncompleteOrNonToolSteps(t *testing.T) {
+	stateDir := t.TempDir()
+	p := NewAntigravityCliProvider("")
+	p.command = createMockAntigravityCLI(t,
+		filepath.Join(stateDir, "args"), filepath.Join(stateDir, "print"), filepath.Join(stateDir, "cwd"),
+		"{\"event\":\"step_update\",\"step_update\":{\"state\":\"RUNNING\",\"step_type\":\"tool\",\"tool_name\":\"terminal\",\"tool_info\":{\"name\":\"run_command\",\"parameters\":{\"command\":\"pwd\"}}}}\n"+
+			"{\"event\":\"step_update\",\"step_update\":{\"state\":\"DONE\",\"step_type\":\"analysis\",\"tool_name\":\"terminal\",\"tool_info\":{\"name\":\"run_command\",\"parameters\":{\"command\":\"pwd\"}}}}\n"+
+			"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"done\"}}\n")
+
+	var chunks []StreamChunk
+	_, err := p.ChatStreamEvents(context.Background(), []Message{{Role: "user", Content: "hello"}}, nil, "", nil, func(chunk StreamChunk) {
+		chunks = append(chunks, chunk)
+	})
+	if err != nil {
+		t.Fatalf("ChatStreamEvents() error = %v", err)
+	}
+	if len(chunks) != 1 || chunks[0].Content != "done" || len(chunks[0].ToolCalls) != 0 {
+		t.Fatalf("chunks = %#v, want only terminal text fallback", chunks)
+	}
+}
+
 func TestAntigravityCliChatStreamEventsFallsBackToTerminalResponse(t *testing.T) {
 	stateDir := t.TempDir()
 	p := NewAntigravityCliProvider("")
