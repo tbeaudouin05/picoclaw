@@ -88,6 +88,7 @@ func TestClassifyError_RateLimitPatterns(t *testing.T) {
 		"resource_exhausted",
 		"quota exceeded",
 		"usage limit reached",
+		"antigravity cli error: RESOURCE_EXHAUSTED (429): Individual quota reached",
 	}
 
 	for _, msg := range patterns {

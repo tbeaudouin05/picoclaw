@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/sipeed/picoclaw/pkg/isolation"
 )
@@ -173,8 +174,12 @@ func (p *AntigravityCliProvider) chatStreamEvents(
 	// agy's stream-json input protocol accepts one NDJSON user event per turn.
 	// Using stdin keeps arbitrarily large prompts out of argv.
 	cmd.Stdin = bytes.NewReader(request)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	stderr := newAntigravityCLIStderrMonitor(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	})
+	cmd.Stderr = stderr
 	if err := isolation.Start(cmd); err != nil {
 		return nil, fmt.Errorf("antigravity cli error: %w", err)
 	}
@@ -219,6 +224,10 @@ func (p *AntigravityCliProvider) chatStreamEvents(
 			terminalResult = record.Result
 		}
 	}
+	if stderr.IsQuotaExhausted() {
+		_ = cmd.Wait()
+		return nil, antigravityCLIExecutionError(fmt.Errorf("quota exhausted"), rawOutput.String(), stderr.String())
+	}
 	if err := scanner.Err(); err != nil {
 		terminateAndWait()
 		return nil, fmt.Errorf("failed to read antigravity cli stream: %w", err)
@@ -227,11 +236,17 @@ func (p *AntigravityCliProvider) chatStreamEvents(
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		if stderr.IsQuotaExhausted() {
+			return nil, antigravityCLIExecutionError(err, rawOutput.String(), stderr.String())
+		}
 		if terminalResult != nil && terminalResult.Status != "SUCCESS" {
 			_, terminalErr := p.parseJSONResponse(*terminalResult, tools)
 			return nil, antigravityCLIStatusError(terminalErr, err, rawOutput.String(), stderr.String())
 		}
 		return nil, antigravityCLIExecutionError(err, rawOutput.String(), stderr.String())
+	}
+	if stderr.IsQuotaExhausted() {
+		return nil, antigravityCLIExecutionError(fmt.Errorf("quota exhausted"), rawOutput.String(), stderr.String())
 	}
 	if terminalResult == nil {
 		return nil, fmt.Errorf("antigravity cli stream ended without terminal result")
@@ -310,6 +325,63 @@ func antigravityNativeToolCall(stepUpdate struct {
 			Arguments: argumentsJSON,
 		},
 	}, true
+}
+
+// antigravityCLIStderrMonitor buffers stderr concurrently and scans for
+// terminal quota exhaustion patterns so execution can fail fast instead of
+// waiting for an extended internal retry loop.
+type antigravityCLIStderrMonitor struct {
+	mu          sync.Mutex
+	buf         bytes.Buffer
+	exhausted   bool
+	onExhausted func()
+}
+
+func newAntigravityCLIStderrMonitor(onExhausted func()) *antigravityCLIStderrMonitor {
+	return &antigravityCLIStderrMonitor{
+		onExhausted: onExhausted,
+	}
+}
+
+func (m *antigravityCLIStderrMonitor) Write(p []byte) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n, err := m.buf.Write(p)
+	if !m.exhausted && isAntigravityCLIQuotaExhausted(m.buf.String()) {
+		m.exhausted = true
+		if m.onExhausted != nil {
+			go m.onExhausted()
+		}
+	}
+	return n, err
+}
+
+func (m *antigravityCLIStderrMonitor) String() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.buf.String()
+}
+
+func (m *antigravityCLIStderrMonitor) IsQuotaExhausted() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.exhausted
+}
+
+// isAntigravityCLIQuotaExhausted recognizes unrecoverable credit/quota
+// exhaustion signatures from the agy CLI or underlying Gemini API.
+func isAntigravityCLIQuotaExhausted(diagnostic string) bool {
+	lower := strings.ToLower(diagnostic)
+	if strings.Contains(lower, "individual quota reached") {
+		return true
+	}
+	if strings.Contains(lower, "resource_exhausted") && (strings.Contains(lower, "429") || strings.Contains(lower, "quota")) {
+		return true
+	}
+	if strings.Contains(lower, "quota exceeded") || strings.Contains(lower, "exceeded your current quota") {
+		return true
+	}
+	return false
 }
 
 // isAntigravityCLINativeToolPermissionDenied recognizes the headless CLI

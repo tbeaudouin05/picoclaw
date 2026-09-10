@@ -708,3 +708,59 @@ func TestAntigravityCliChatCancellationReturnsContextError(t *testing.T) {
 		t.Fatalf("Chat() error = %v, want context cancellation", err)
 	}
 }
+
+func TestIsAntigravityCLIQuotaExhausted(t *testing.T) {
+	tests := []struct {
+		diagnostic string
+		want       bool
+	}{
+		{"RESOURCE_EXHAUSTED (429): Individual quota reached", true},
+		{"error: RESOURCE_EXHAUSTED (429)", true},
+		{"RESOURCE_EXHAUSTED: quota exceeded for metric", true},
+		{"exceeded your current quota, please check your plan", true},
+		{"quota exceeded", true},
+		{"429 Too Many Requests", false},
+		{"context deadline exceeded", false},
+		{"connection reset by peer", false},
+		{"model unavailable", false},
+	}
+	for _, tt := range tests {
+		if got := isAntigravityCLIQuotaExhausted(tt.diagnostic); got != tt.want {
+			t.Errorf("isAntigravityCLIQuotaExhausted(%q) = %v, want %v", tt.diagnostic, got, tt.want)
+		}
+	}
+}
+
+func TestAntigravityCliChatStreamEventsFastFailsOnQuotaExhaustion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock CLI scripts not supported on Windows")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "agy")
+	// Mock agy CLI that outputs quota exhaustion on stderr and then sleeps
+	contents := `#!/bin/sh
+cat >/dev/null
+printf 'RESOURCE_EXHAUSTED (429): Individual quota reached\n' >&2
+while :; do :; done
+`
+	if err := os.WriteFile(script, []byte(contents), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := NewAntigravityCliProvider("")
+	p.command = script
+
+	started := time.Now()
+	_, err := p.ChatStreamEvents(context.Background(), []Message{{Role: "user", Content: "hello"}}, nil, "", nil, nil)
+	elapsed := time.Since(started)
+
+	if err == nil {
+		t.Fatal("ChatStreamEvents() expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "RESOURCE_EXHAUSTED") || !strings.Contains(err.Error(), "Individual quota reached") {
+		t.Fatalf("ChatStreamEvents() error = %q, want quota exhaustion details", err.Error())
+	}
+	if elapsed >= 3*time.Second {
+		t.Fatalf("ChatStreamEvents() took %s, want fast-fail in < 3s", elapsed)
+	}
+}
+
