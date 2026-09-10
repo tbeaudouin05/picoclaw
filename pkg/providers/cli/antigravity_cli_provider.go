@@ -103,6 +103,13 @@ type antigravityCliStreamRecord struct {
 	Event      string `json:"event"`
 	StepUpdate struct {
 		TextDelta string `json:"text_delta"`
+		State     string `json:"state"`
+		StepType  string `json:"step_type"`
+		ToolName  string `json:"tool_name"`
+		ToolInfo  struct {
+			Name       string          `json:"name"`
+			Parameters json.RawMessage `json:"parameters"`
+		} `json:"tool_info"`
 	} `json:"step_update"`
 	Result *antigravityCliJSONResponse `json:"result"`
 }
@@ -128,9 +135,9 @@ func (p *AntigravityCliProvider) ChatStream(
 	})
 }
 
-// ChatStreamEvents reads agy's stream-json NDJSON protocol. Only step_update
-// text deltas are emitted before the terminal result; the result itself is
-// emitted as a fallback only when no text delta was received.
+// ChatStreamEvents reads agy's stream-json NDJSON protocol. Text deltas and
+// completed native tool uses are emitted before the terminal result; native
+// tool uses remain UI-only and never become terminal PicoClaw calls.
 func (p *AntigravityCliProvider) ChatStreamEvents(
 	ctx context.Context, messages []Message, tools []ToolDefinition, model string, options map[string]any,
 	onChunk func(StreamChunk),
@@ -194,13 +201,15 @@ func (p *AntigravityCliProvider) chatStreamEvents(
 		switch record.Event {
 		case "step_update":
 			stepUpdateCount++
-			if record.StepUpdate.TextDelta == "" {
-				continue
+			if record.StepUpdate.TextDelta != "" {
+				gotDelta = true
+				content.WriteString(record.StepUpdate.TextDelta)
+				if onChunk != nil {
+					onChunk(StreamChunk{Content: content.String()})
+				}
 			}
-			gotDelta = true
-			content.WriteString(record.StepUpdate.TextDelta)
-			if onChunk != nil {
-				onChunk(StreamChunk{Content: content.String()})
+			if nativeToolCall, ok := antigravityNativeToolCall(record.StepUpdate); ok && onChunk != nil {
+				onChunk(StreamChunk{ToolCalls: []ToolCall{nativeToolCall}})
 			}
 		case "result":
 			if record.Result == nil {
@@ -262,6 +271,45 @@ func (p *AntigravityCliProvider) chatStreamEvents(
 		onChunk(StreamChunk{Content: response.Content})
 	}
 	return response, nil
+}
+
+// antigravityNativeToolCall translates an already-completed agy-native tool
+// step into a display-only stream call. Its output and error are deliberately
+// not represented here, so neither can reach user-facing chunk content.
+func antigravityNativeToolCall(stepUpdate struct {
+	TextDelta string `json:"text_delta"`
+	State     string `json:"state"`
+	StepType  string `json:"step_type"`
+	ToolName  string `json:"tool_name"`
+	ToolInfo  struct {
+		Name       string          `json:"name"`
+		Parameters json.RawMessage `json:"parameters"`
+	} `json:"tool_info"`
+}) (ToolCall, bool) {
+	if stepUpdate.State != "DONE" || stepUpdate.StepType != "tool" {
+		return ToolCall{}, false
+	}
+	name := stepUpdate.ToolInfo.Name
+	if name == "" {
+		name = stepUpdate.ToolName
+	}
+	if name == "" || len(stepUpdate.ToolInfo.Parameters) == 0 {
+		return ToolCall{}, false
+	}
+	var arguments map[string]any
+	if err := json.Unmarshal(stepUpdate.ToolInfo.Parameters, &arguments); err != nil || arguments == nil {
+		return ToolCall{}, false
+	}
+	argumentsJSON := string(stepUpdate.ToolInfo.Parameters)
+	return ToolCall{
+		Type:      "function",
+		Name:      name,
+		Arguments: arguments,
+		Function: &FunctionCall{
+			Name:      name,
+			Arguments: argumentsJSON,
+		},
+	}, true
 }
 
 // isAntigravityCLINativeToolPermissionDenied recognizes the headless CLI
