@@ -40,6 +40,9 @@ func NewCooldownTracker() *CooldownTracker {
 // MarkFailure records a failure for a provider and sets appropriate cooldown.
 // Resets error counts if last failure was more than failureWindow ago.
 func (ct *CooldownTracker) MarkFailure(provider string, reason FailoverReason) {
+	if ct == nil || isNativeToolPermissionDeniedReason(reason) {
+		return
+	}
 	ct.mu.Lock()
 	defer ct.mu.Unlock()
 

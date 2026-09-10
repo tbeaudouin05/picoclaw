@@ -308,7 +308,13 @@ func (fc *FallbackChain) ExecuteCandidate(
 		}
 
 		// Retriable error: mark failure and continue to next candidate.
-		fc.cooldown.MarkFailure(cooldownKey, failErr.Reason)
+		// Native tool permission denial never marks the provider as failed
+		// and never starts a cooldown/backoff.
+		if !isNativeToolPermissionDenied(failErr) {
+			if fc.cooldown != nil {
+				fc.cooldown.MarkFailure(cooldownKey, failErr.Reason)
+			}
+		}
 		result.Attempts = append(result.Attempts, FallbackAttempt{
 			Provider: candidate.Provider,
 			Model:    candidate.Model,
@@ -487,6 +493,10 @@ func AbortFallback(err error) error {
 func isFallbackAbortError(err error) bool {
 	var terminal *fallbackAbortError
 	return errors.As(err, &terminal)
+}
+
+func isNativeToolPermissionDenied(failErr *FailoverError) bool {
+	return failErr != nil && isNativeToolPermissionDeniedReason(failErr.Reason)
 }
 
 func nextFallbackCandidate(candidates []FallbackCandidate, index int) *FallbackCandidate {

@@ -941,3 +941,291 @@ func TestExecuteCandidate_LogsClassifiedHTTP429WithoutErrorText(t *testing.T) {
 		}
 	}
 }
+
+func TestFallback_NativeToolPermissionDeniedMessageNeverStartsCooldown(t *testing.T) {
+	ct := NewCooldownTracker()
+	fc := NewFallbackChain(ct, nil)
+
+	candidates := []FallbackCandidate{
+		makeCandidate("antigravity", "gemini-3-flash"),
+		makeCandidate("anthropic", "claude-opus"),
+	}
+	cand1Key := candidates[0].StableKey()
+
+	callCount := 0
+	run := func(ctx context.Context, candidate FallbackCandidate) (*LLMResponse, error) {
+		callCount++
+		if candidate.Provider == "antigravity" {
+			if callCount == 1 {
+				// First call fails with exact message
+				return nil, errors.New("native tool permission denied")
+			}
+			return &LLMResponse{Content: "flash recovered", FinishReason: "stop"}, nil
+		}
+		return &LLMResponse{Content: "claude fallback response", FinishReason: "stop"}, nil
+	}
+
+	// First execution: candidate 1 fails with native tool permission denied,
+	// ordinary fallback succeeds with candidate 2.
+	res1, err := fc.ExecuteCandidate(context.Background(), candidates, run)
+	if err != nil {
+		t.Fatalf("first ExecuteCandidate() error = %v", err)
+	}
+	if res1.Provider != "anthropic" || res1.Response.Content != "claude fallback response" {
+		t.Fatalf("res1 = %#v, want fallback to anthropic", res1)
+	}
+	if len(res1.Attempts) != 1 {
+		t.Fatalf("res1 attempts = %d, want 1 recorded attempt", len(res1.Attempts))
+	}
+	if res1.Attempts[0].Reason != FailoverNativeToolPermissionDenied {
+		t.Fatalf("res1 attempt reason = %q, want %q", res1.Attempts[0].Reason, FailoverNativeToolPermissionDenied)
+	}
+
+	// Crucial: candidate 1 must NEVER be marked as failed and NEVER put into cooldown.
+	if !ct.IsAvailable(cand1Key) {
+		t.Fatal("candidate 1 must remain available (no cooldown started)")
+	}
+	if ct.ErrorCount(cand1Key) != 0 {
+		t.Fatalf("candidate 1 error count = %d, want 0", ct.ErrorCount(cand1Key))
+	}
+	if ct.CooldownRemaining(cand1Key) != 0 {
+		t.Fatalf("candidate 1 cooldown remaining = %v, want 0", ct.CooldownRemaining(cand1Key))
+	}
+
+	// Second execution: candidate 1 is NOT skipped due to cooldown and is tried immediately.
+	res2, err := fc.ExecuteCandidate(context.Background(), candidates, run)
+	if err != nil {
+		t.Fatalf("second ExecuteCandidate() error = %v", err)
+	}
+	if res2.Provider != "antigravity" || res2.Response.Content != "flash recovered" {
+		t.Fatalf("res2 = %#v, want immediate retry of antigravity succeeding", res2)
+	}
+	if len(res2.Attempts) != 0 {
+		t.Fatalf("res2 attempts = %d, want 0 (first candidate succeeded without fallback)", len(res2.Attempts))
+	}
+}
+
+func TestFallback_NativeToolPermissionDeniedCategoryNeverStartsCooldown(t *testing.T) {
+	ct := NewCooldownTracker()
+	fc := NewFallbackChain(ct, nil)
+
+	candidates := []FallbackCandidate{
+		makeCandidate("antigravity", "gemini-3-flash"),
+		makeCandidate("anthropic", "claude-opus"),
+	}
+	cand1Key := candidates[0].StableKey()
+
+	callCount := 0
+	run := func(ctx context.Context, candidate FallbackCandidate) (*LLMResponse, error) {
+		callCount++
+		if candidate.Provider == "antigravity" {
+			if callCount == 1 {
+				// First call fails with exact FailoverNativeToolPermissionDenied category
+				return nil, &FailoverError{
+					Reason:   FailoverNativeToolPermissionDenied,
+					Provider: candidate.Provider,
+					Model:    candidate.Model,
+					Wrapped:  errors.New("command permission was required and denied in headless mode"),
+				}
+			}
+			return &LLMResponse{Content: "flash recovered", FinishReason: "stop"}, nil
+		}
+		return &LLMResponse{Content: "claude fallback response", FinishReason: "stop"}, nil
+	}
+
+	res1, err := fc.ExecuteCandidate(context.Background(), candidates, run)
+	if err != nil {
+		t.Fatalf("first ExecuteCandidate() error = %v", err)
+	}
+	if res1.Provider != "anthropic" || res1.Response.Content != "claude fallback response" {
+		t.Fatalf("res1 = %#v, want fallback to anthropic", res1)
+	}
+
+	// Candidate 1 must never be marked as failed or put in cooldown
+	if !ct.IsAvailable(cand1Key) {
+		t.Fatal("candidate 1 must remain available")
+	}
+	if ct.ErrorCount(cand1Key) != 0 {
+		t.Fatalf("candidate 1 error count = %d, want 0", ct.ErrorCount(cand1Key))
+	}
+
+	// Second execution should call candidate 1 without skipping
+	res2, err := fc.ExecuteCandidate(context.Background(), candidates, run)
+	if err != nil {
+		t.Fatalf("second ExecuteCandidate() error = %v", err)
+	}
+	if res2.Provider != "antigravity" || res2.Response.Content != "flash recovered" {
+		t.Fatalf("res2 = %#v, want immediate reuse of antigravity", res2)
+	}
+}
+
+func TestFallback_PreservesCooldownForActualProviderHealthFailures(t *testing.T) {
+	ct := NewCooldownTracker()
+	fc := NewFallbackChain(ct, nil)
+
+	candidates := []FallbackCandidate{
+		makeCandidate("openai", "gpt-4"),
+		makeCandidate("anthropic", "claude-opus"),
+	}
+	cand1Key := candidates[0].StableKey()
+
+	run := func(ctx context.Context, candidate FallbackCandidate) (*LLMResponse, error) {
+		if candidate.Provider == "openai" {
+			return nil, errors.New("rate limit exceeded (status: 429)")
+		}
+		return &LLMResponse{Content: "claude response", FinishReason: "stop"}, nil
+	}
+
+	// First execution: candidate 1 fails with rate limit, fallback to candidate 2
+	res1, err := fc.ExecuteCandidate(context.Background(), candidates, run)
+	if err != nil {
+		t.Fatalf("first ExecuteCandidate() error = %v", err)
+	}
+	if res1.Provider != "anthropic" {
+		t.Fatalf("res1 provider = %q, want anthropic", res1.Provider)
+	}
+
+	// Health failure MUST mark failure and start cooldown
+	if ct.IsAvailable(cand1Key) {
+		t.Fatal("candidate 1 must be in cooldown after actual rate limit failure")
+	}
+	if ct.ErrorCount(cand1Key) != 1 {
+		t.Fatalf("candidate 1 error count = %d, want 1", ct.ErrorCount(cand1Key))
+	}
+
+	// Second execution: candidate 1 is skipped due to cooldown
+	res2, err := fc.ExecuteCandidate(context.Background(), candidates, run)
+	if err != nil {
+		t.Fatalf("second ExecuteCandidate() error = %v", err)
+	}
+	if res2.Provider != "anthropic" {
+		t.Fatalf("res2 provider = %q, want anthropic", res2.Provider)
+	}
+	if len(res2.Attempts) != 1 || !res2.Attempts[0].Skipped {
+		t.Fatalf("res2 attempts = %#v, want 1 skipped attempt due to cooldown", res2.Attempts)
+	}
+}
+
+func TestFallback_NativeToolPermissionDeniedAllFailExhaustedNeverStartsCooldown(t *testing.T) {
+	ct := NewCooldownTracker()
+	fc := NewFallbackChain(ct, nil)
+
+	candidates := []FallbackCandidate{
+		makeCandidate("antigravity", "gemini-3-flash"),
+		makeCandidate("openai", "gpt-4"),
+	}
+	cand1Key := candidates[0].StableKey()
+	cand2Key := candidates[1].StableKey()
+
+	run := func(ctx context.Context, candidate FallbackCandidate) (*LLMResponse, error) {
+		if candidate.Provider == "antigravity" {
+			return nil, errors.New("antigravity flash error: native tool permission denied")
+		}
+		return nil, errors.New("rate limit exceeded (status: 429)")
+	}
+
+	_, err := fc.ExecuteCandidate(context.Background(), candidates, run)
+	if err == nil {
+		t.Fatal("expected FallbackExhaustedError when all fail")
+	}
+	var exhausted *FallbackExhaustedError
+	if !errors.As(err, &exhausted) {
+		t.Fatalf("err = %T, want FallbackExhaustedError", err)
+	}
+	if len(exhausted.Attempts) != 2 {
+		t.Fatalf("attempts count = %d, want 2", len(exhausted.Attempts))
+	}
+
+	// Candidate 1 (native tool denial) must NOT be in cooldown
+	if !ct.IsAvailable(cand1Key) {
+		t.Fatal("candidate 1 must NOT be in cooldown")
+	}
+	if ct.ErrorCount(cand1Key) != 0 {
+		t.Fatalf("candidate 1 error count = %d, want 0", ct.ErrorCount(cand1Key))
+	}
+
+	// Candidate 2 (rate limit health failure) MUST be in cooldown
+	if ct.IsAvailable(cand2Key) {
+		t.Fatal("candidate 2 MUST be in cooldown")
+	}
+	if ct.ErrorCount(cand2Key) != 1 {
+		t.Fatalf("candidate 2 error count = %d, want 1", ct.ErrorCount(cand2Key))
+	}
+}
+
+func TestFallback_ProviderHealthFailureWithPermissionDeniedTextStartsCooldown(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "upstream classified rate limit with permission denied in wrapped text",
+			err: &FailoverError{
+				Reason:   FailoverRateLimit,
+				Provider: "antigravity",
+				Model:    "gemini-3-flash",
+				Wrapped:  errors.New("rate limit exceeded (429): native_tool_permission_denied"),
+			},
+		},
+		{
+			name: "raw error classified upstream by status 429 with permission denied text",
+			err:  errors.New("HTTP 429 Too Many Requests: native_tool_permission_denied"),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ct := NewCooldownTracker()
+			fc := NewFallbackChain(ct, nil)
+
+			candidates := []FallbackCandidate{
+				makeCandidate("antigravity", "gemini-3-flash"),
+				makeCandidate("anthropic", "claude-opus"),
+			}
+			cand1Key := candidates[0].StableKey()
+
+			run := func(ctx context.Context, candidate FallbackCandidate) (*LLMResponse, error) {
+				if candidate.Provider == "antigravity" {
+					return nil, tc.err
+				}
+				return &LLMResponse{Content: "claude fallback response", FinishReason: "stop"}, nil
+			}
+
+			// First execution: candidate 1 fails with provider-health reason,
+			// ordinary fallback succeeds with candidate 2.
+			res1, err := fc.ExecuteCandidate(context.Background(), candidates, run)
+			if err != nil {
+				t.Fatalf("first ExecuteCandidate() error = %v", err)
+			}
+			if res1.Provider != "anthropic" || res1.Response.Content != "claude fallback response" {
+				t.Fatalf("res1 = %#v, want fallback to anthropic", res1)
+			}
+			if len(res1.Attempts) != 1 {
+				t.Fatalf("res1 attempts = %d, want 1 recorded attempt", len(res1.Attempts))
+			}
+			if res1.Attempts[0].Reason != FailoverRateLimit {
+				t.Fatalf("res1 attempt reason = %q, want %q", res1.Attempts[0].Reason, FailoverRateLimit)
+			}
+
+			// Provider-health failure MUST start cooldown, even if error text contains native_tool_permission_denied
+			if ct.IsAvailable(cand1Key) {
+				t.Fatal("candidate 1 must be in cooldown after provider-health failure")
+			}
+			if ct.ErrorCount(cand1Key) != 1 {
+				t.Fatalf("candidate 1 error count = %d, want 1", ct.ErrorCount(cand1Key))
+			}
+
+			// Second execution: candidate 1 is skipped due to cooldown
+			res2, err := fc.ExecuteCandidate(context.Background(), candidates, run)
+			if err != nil {
+				t.Fatalf("second ExecuteCandidate() error = %v", err)
+			}
+			if res2.Provider != "anthropic" {
+				t.Fatalf("res2 provider = %q, want anthropic", res2.Provider)
+			}
+			if len(res2.Attempts) != 1 || !res2.Attempts[0].Skipped {
+				t.Fatalf("res2 attempts = %#v, want 1 skipped attempt due to cooldown", res2.Attempts)
+			}
+		})
+	}
+}

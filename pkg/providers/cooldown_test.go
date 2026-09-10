@@ -267,3 +267,37 @@ func TestCooldown_MultipleProviders(t *testing.T) {
 		t.Error("groq should be available")
 	}
 }
+
+func TestCooldown_NativeToolPermissionDeniedNeverStartsCooldown(t *testing.T) {
+	ct := NewCooldownTracker()
+
+	// Exact category FailoverNativeToolPermissionDenied
+	ct.MarkFailure("antigravity", FailoverNativeToolPermissionDenied)
+	if !ct.IsAvailable("antigravity") {
+		t.Fatal("expected provider to remain available after native tool permission denial")
+	}
+	if ct.ErrorCount("antigravity") != 0 {
+		t.Fatalf("expected error count 0, got %d", ct.ErrorCount("antigravity"))
+	}
+	if ct.CooldownRemaining("antigravity") != 0 {
+		t.Fatalf("expected 0 cooldown remaining, got %v", ct.CooldownRemaining("antigravity"))
+	}
+
+	// String reason variant "native tool permission denied"
+	ct.MarkFailure("antigravity", "native tool permission denied")
+	if !ct.IsAvailable("antigravity") {
+		t.Fatal("expected provider to remain available after native tool permission denial message")
+	}
+	if ct.ErrorCount("antigravity") != 0 {
+		t.Fatalf("expected error count 0, got %d", ct.ErrorCount("antigravity"))
+	}
+
+	// Provider health failure should still start cooldown
+	ct.MarkFailure("openai", FailoverRateLimit)
+	if ct.IsAvailable("openai") {
+		t.Fatal("expected provider to be in cooldown after rate limit failure")
+	}
+	if ct.ErrorCount("openai") != 1 {
+		t.Fatalf("expected error count 1, got %d", ct.ErrorCount("openai"))
+	}
+}

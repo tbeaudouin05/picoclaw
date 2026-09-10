@@ -97,6 +97,17 @@ const (
 	FailoverUnknown                    FailoverReason = "unknown"
 )
 
+// isNativeToolPermissionDeniedReason reports whether reason represents a native
+// tool permission denial.
+func isNativeToolPermissionDeniedReason(reason FailoverReason) bool {
+	switch reason {
+	case FailoverNativeToolPermissionDenied, "native tool permission denied", "native-tool-permission-denied":
+		return true
+	default:
+		return false
+	}
+}
+
 // FailoverError wraps an LLM provider error with classification metadata.
 type FailoverError struct {
 	Reason   FailoverReason
