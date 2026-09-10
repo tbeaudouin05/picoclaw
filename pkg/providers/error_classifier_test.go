@@ -411,12 +411,20 @@ func TestClassifyError_AntigravityCliEmptyResponse(t *testing.T) {
 }
 
 func TestClassifyError_AntigravityCliNativeToolPermissionDenied(t *testing.T) {
-	result := ClassifyError(errors.New("antigravity cli native_tool_permission_denied"), "antigravity-cli", "antigravity-cli")
-	if result == nil {
-		t.Fatal("expected native-tool permission denial to be classified")
-	}
-	if result.Reason != FailoverNativeToolPermissionDenied || !result.IsRetriable() {
-		t.Fatalf("result = %#v, want retriable native_tool_permission_denied failure", result)
+	for _, msg := range []string{
+		"antigravity cli native_tool_permission_denied",
+		"native tool permission denied",
+		"antigravity flash error: native tool permission denied",
+		"Native Tool Permission Denied",
+		"antigravity gemini-3-flash: native-tool-permission-denied",
+	} {
+		result := ClassifyError(errors.New(msg), "antigravity-cli", "gemini-3-flash")
+		if result == nil {
+			t.Fatalf("expected error %q to be classified", msg)
+		}
+		if result.Reason != FailoverNativeToolPermissionDenied || !result.IsRetriable() {
+			t.Fatalf("result for %q = %#v, want retriable native_tool_permission_denied failure", msg, result)
+		}
 	}
 }
 
