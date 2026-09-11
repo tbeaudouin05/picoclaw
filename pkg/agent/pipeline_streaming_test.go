@@ -1151,7 +1151,7 @@ func TestConfiguredStreamingTelegramDraftFailureAfterNativeToolFeedbackFallsBack
 	}
 }
 
-func TestConfiguredStreamingTelegramDraftFailureDoesNotHideProviderStreamError(t *testing.T) {
+func TestConfiguredStreamingTelegramDraftAndProviderFailureReturnsProviderError(t *testing.T) {
 	cfg := newConfiguredStreamingTestConfig(t, true, true, nil)
 	msgBus := bus.NewMessageBus()
 	draftErr := errors.New("Bad Request: TEXTDRAFT_PEER_INVALID")
@@ -1167,11 +1167,29 @@ func TestConfiguredStreamingTelegramDraftFailureDoesNotHideProviderStreamError(t
 	}
 	al := NewAgentLoop(cfg, msgBus, provider)
 	opts := configuredStreamingProcessOptions("telegram")
-	opts.SendResponse = true
+	agent := al.GetRegistry().GetDefaultAgent()
+	ts := newTurnState(agent, opts, turnEventScope{})
+	ts.channel = "telegram"
+	ts.chatID = "session-1"
+	exec := newTurnExecution(agent, opts, nil, "", nil)
+	exec.activeProvider = provider
+	exec.activeModelConfig = cfg.ModelList[0]
+	exec.activeModel = "openai/test-model"
+	exec.llmModel = "openai/test-model"
+	exec.llmModelName = "test-model"
+	exec.llmOpts = map[string]any{}
 
-	_, err := al.runAgentLoop(context.Background(), al.GetRegistry().GetDefaultAgent(), opts)
-	if err == nil {
-		t.Fatal("expected provider stream error to remain terminal")
+	_, handled, err := NewPipeline(al).tryConfiguredStreamingLLM(
+		context.Background(), ts, exec, nil, nil, false,
+	)
+	if !handled {
+		t.Fatal("expected configured streaming to handle the provider call")
+	}
+	if !errors.Is(err, providerErr) {
+		t.Fatalf("error = %v, want provider stream error", err)
+	}
+	if isConfiguredStreamingVisibleError(err) {
+		t.Fatalf("error = %v, must not be configured streaming visible error", err)
 	}
 	if provider.streamCalls != 1 || provider.chatCalls != 0 {
 		t.Fatalf("calls = stream:%d chat:%d, want stream:1 chat:0", provider.streamCalls, provider.chatCalls)
@@ -1179,10 +1197,102 @@ func TestConfiguredStreamingTelegramDraftFailureDoesNotHideProviderStreamError(t
 	if streamer.canceled != 1 {
 		t.Fatalf("streamer canceled = %d, want 1", streamer.canceled)
 	}
+}
+
+func TestConfiguredStreamingTelegramDraftAndProviderFailureContinuesFallbackWithNativeToolFeedback(t *testing.T) {
+	cfg := newConfiguredStreamingTestConfig(t, true, true, []string{"fallback-model"})
+	msgBus := bus.NewMessageBus()
+	draftErr := errors.New("Bad Request: TEXTDRAFT_PEER_INVALID")
+	streamer := &failingUpdateStreamer{err: draftErr}
+	msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: streamer})
+	providerErr := errors.New("status: 429 - provider stream failed")
+	provider := &configuredStreamingProvider{
+		eventPlan: []configuredStreamingEventCall{{
+			chunks: []providers.StreamChunk{
+				{ToolCalls: []providers.ToolCall{{
+					ID:        "toolu_time_1",
+					Type:      "function",
+					Name:      "time",
+					Arguments: map[string]any{"timezone": "UTC"},
+				}}},
+				{Content: "partial answer"},
+			},
+			err: providerErr,
+		}},
+		chatResponses: map[string]*providers.LLMResponse{
+			"openai/fallback-model": {Content: "fallback response"},
+		},
+	}
+	al := NewAgentLoop(cfg, msgBus, provider)
+	opts := configuredStreamingProcessOptions("telegram")
+	opts.SendResponse = true
+
+	got, err := al.runAgentLoop(context.Background(), al.GetRegistry().GetDefaultAgent(), opts)
+	if err != nil {
+		t.Fatalf("runAgentLoop() error = %v", err)
+	}
+	if got != "fallback response" {
+		t.Fatalf("response = %q, want fallback response", got)
+	}
+	if provider.streamCalls != 1 || provider.chatCalls != 1 {
+		t.Fatalf("calls = stream:%d chat:%d, want stream:1 chat:1", provider.streamCalls, provider.chatCalls)
+	}
+	if len(provider.chatModels) != 1 || provider.chatModels[0] != "openai/fallback-model" {
+		t.Fatalf("chat models = %v, want [openai/fallback-model]", provider.chatModels)
+	}
+	if streamer.canceled != 1 {
+		t.Fatalf("streamer canceled = %d, want 1", streamer.canceled)
+	}
+
 	select {
 	case outbound := <-msgBus.OutboundChan():
-		t.Fatalf("unexpected normal outbound after provider stream error: %#v", outbound)
-	default:
+		assertNativeToolCallOutbound(t, "telegram", outbound, "time", "UTC")
+	case <-time.After(time.Second):
+		t.Fatal("expected native tool feedback before fallback")
+	}
+	select {
+	case outbound := <-msgBus.OutboundChan():
+		if outbound.Content != "fallback response" {
+			t.Fatalf("outbound content = %q, want fallback response", outbound.Content)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected normal outbound fallback response")
+	}
+}
+
+func TestConfiguredStreamingTelegramDraftAndProviderFailureWithNativeToolFeedbackDeliveryFailureIsTerminal(t *testing.T) {
+	cfg := newConfiguredStreamingTestConfig(t, true, true, []string{"fallback-model"})
+	msgBus := bus.NewMessageBus()
+	draftErr := errors.New("Bad Request: TEXTDRAFT_PEER_INVALID")
+	msgBus.SetStreamDelegate(configuredStreamingDelegate{streamer: &failingUpdateStreamer{err: draftErr}})
+	msgBus.Close()
+	provider := &configuredStreamingProvider{
+		eventPlan: []configuredStreamingEventCall{{
+			chunks: []providers.StreamChunk{
+				{ToolCalls: []providers.ToolCall{{
+					ID:        "toolu_time_1",
+					Type:      "function",
+					Name:      "time",
+					Arguments: map[string]any{"timezone": "UTC"},
+				}}},
+				{Content: "partial answer"},
+			},
+			err: errors.New("provider stream failed"),
+		}},
+		chatResponse: &providers.LLMResponse{Content: "must not be used"},
+	}
+	al := NewAgentLoop(cfg, msgBus, provider)
+
+	_, err := al.runAgentLoop(
+		context.Background(),
+		al.GetRegistry().GetDefaultAgent(),
+		configuredStreamingProcessOptions("telegram"),
+	)
+	if err == nil || !isConfiguredStreamingVisibleError(err) {
+		t.Fatalf("error = %v, want terminal configured streaming delivery error", err)
+	}
+	if provider.streamCalls != 1 || provider.chatCalls != 0 {
+		t.Fatalf("calls = stream:%d chat:%d, want stream:1 chat:0", provider.streamCalls, provider.chatCalls)
 	}
 }
 
