@@ -76,6 +76,9 @@ func (p *ClaudeCliProvider) Chat(
 	// Execute the CLI through the shared isolation wrapper so external provider
 	// processes honor the configured isolation policy.
 	if err := isolation.Run(cmd); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		stderrStr := strings.TrimSpace(stderr.String())
 		stdoutStr := strings.TrimSpace(stdout.String())
 		switch {
@@ -251,10 +254,16 @@ func (p *ClaudeCliProvider) ChatStreamEvents(
 	}
 	if err := scanner.Err(); err != nil {
 		terminateAndWait()
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, fmt.Errorf("failed to read claude cli stream: %w", err)
 	}
 
 	if err := cmd.Wait(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		stderrStr := strings.TrimSpace(stderr.String())
 		if stderrStr != "" {
 			return nil, fmt.Errorf("claude cli error: %s", stderrStr)

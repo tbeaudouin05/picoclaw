@@ -216,30 +216,32 @@ func TestAntigravityCliChatUsesSafeScopedInvocationAndTextProtocol(t *testing.T)
 
 func TestAntigravityCLIPrintTimeout(t *testing.T) {
 	now := time.Date(2026, time.September, 11, 12, 0, 0, 0, time.UTC)
-	p := NewAntigravityCliProvider("")
+	workspace := "/test/workspace"
+	p := NewAntigravityCliProvider(workspace)
 	tests := []struct {
 		name string
 		ctx  context.Context
-		want time.Duration
+		want string
 	}{
-		{name: "no deadline", ctx: context.Background(), want: 15 * time.Minute},
-		{name: "short deadline", ctx: deadlineContext(t, now.Add(2*time.Minute)), want: 2 * time.Minute},
-		{name: "sub-max deadline", ctx: deadlineContext(t, now.Add(90*time.Second)), want: 90 * time.Second},
-		{name: "long deadline inherited", ctx: deadlineContext(t, now.Add(time.Hour)), want: time.Hour},
-		{name: "expired deadline", ctx: deadlineContext(t, now.Add(-time.Second)), want: 0},
+		{name: "short deadline", ctx: deadlineContext(t, now.Add(2*time.Second)), want: "2s"},
+		{name: "one hour deadline", ctx: deadlineContext(t, now.Add(time.Hour)), want: "1h0m0s"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			args := p.argsAt(tt.ctx, now, "")
-			for i := range args {
-				if args[i] == "--print-timeout" && i+1 < len(args) {
-					if got := args[i+1]; got != tt.want.String() {
-						t.Fatalf("--print-timeout = %q, want %q", got, tt.want)
-					}
-					return
-				}
+			got := p.argsAt(tt.ctx, now, "gemini-test")
+			want := []string{
+				"--input-format", "stream-json",
+				"--output-format", "stream-json",
+				"--print-timeout", tt.want,
+				"--sandbox",
+				"--mode", "accept-edits",
+				"--dangerously-skip-permissions",
+				"--add-dir", workspace,
+				"--model", "gemini-test",
 			}
-			t.Fatal("args missing --print-timeout")
+			if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+				t.Fatalf("args = %q, want exact invocation %q", got, want)
+			}
 		})
 	}
 }

@@ -3,6 +3,7 @@ package cliprovider
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -70,6 +71,29 @@ func createSlowMockCLI(t *testing.T, sleepSeconds int) string {
 		t.Fatal(err)
 	}
 	return script
+}
+
+func createScriptedClaudeCLI(t *testing.T, body string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("mock CLI scripts not supported on Windows")
+	}
+
+	script := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
+func callClaudeForContextTest(
+	p *ClaudeCliProvider, stream bool, ctx context.Context,
+) (*LLMResponse, error) {
+	messages := []Message{{Role: "user", Content: "Hello"}}
+	if stream {
+		return p.ChatStreamEvents(ctx, messages, nil, "", nil, nil)
+	}
+	return p.Chat(ctx, messages, nil, "", nil)
 }
 
 // createArgCaptureCLI creates a script that captures CLI args to a file, then outputs JSON.
@@ -385,6 +409,102 @@ func TestChat_ContextCancellation(t *testing.T) {
 	// Should fail well before the full 2s sleep completes
 	if elapsed > 3*time.Second {
 		t.Errorf("Chat() took %v, expected to fail faster via context cancellation", elapsed)
+	}
+}
+
+func TestClaudeCLI_CallerDeadlineIsTheRequestTimeout(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "non-stream"
+		if stream {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			p := NewClaudeCliProvider(t.TempDir())
+			p.command = createScriptedClaudeCLI(t, "exec sleep 10\n")
+			ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+			defer cancel()
+
+			started := time.Now()
+			_, err := callClaudeForContextTest(p, stream, ctx)
+			if !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("error = %v, want explicit context deadline exceeded timeout", err)
+			}
+			if elapsed := time.Since(started); elapsed >= 2*time.Second {
+				t.Fatalf("request returned after %s, want deadline termination", elapsed)
+			}
+		})
+	}
+}
+
+func TestClaudeCLI_CallerCancellationRemainsCancellation(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "non-stream"
+		if stream {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			startedFile := filepath.Join(t.TempDir(), "started")
+			p := NewClaudeCliProvider(t.TempDir())
+			p.command = createScriptedClaudeCLI(t, fmt.Sprintf("printf started > %q\nexec sleep 10\n", startedFile))
+			ctx, cancel := context.WithCancel(context.Background())
+			result := make(chan error, 1)
+			go func() {
+				_, err := callClaudeForContextTest(p, stream, ctx)
+				result <- err
+			}()
+
+			waitUntil := time.Now().Add(2 * time.Second)
+			for {
+				if _, err := os.Stat(startedFile); err == nil {
+					break
+				}
+				if time.Now().After(waitUntil) {
+					cancel()
+					t.Fatal("mock Claude CLI did not start")
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			cancel()
+
+			select {
+			case err := <-result:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("error = %v, want context cancellation", err)
+				}
+				if errors.Is(err, context.DeadlineExceeded) || strings.Contains(strings.ToLower(err.Error()), "timeout") {
+					t.Fatalf("cancellation was recast as timeout: %v", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("request did not return after cancellation")
+			}
+		})
+	}
+}
+
+func TestClaudeCLI_CallerDeadlineDoesNotEndRunningCLIEarly(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "non-stream"
+		if stream {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			p := NewClaudeCliProvider(t.TempDir())
+			p.command = createScriptedClaudeCLI(t, "sleep 0.25\nprintf '%s\\n' '{\"type\":\"result\",\"result\":\"ok\"}'\n")
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			started := time.Now()
+			resp, err := callClaudeForContextTest(p, stream, ctx)
+			if err != nil {
+				t.Fatalf("request error before caller deadline: %v", err)
+			}
+			if elapsed := time.Since(started); elapsed < 200*time.Millisecond {
+				t.Fatalf("mock CLI returned after %s, want it demonstrably still running before output", elapsed)
+			}
+			if resp.Content != "ok" {
+				t.Fatalf("response = %#v, want valid terminal JSON output", resp)
+			}
+		})
 	}
 }
 
