@@ -551,22 +551,58 @@ func filterAntigravityTerminalToolCalls(toolCalls []ToolCall, tools []ToolDefini
 	return toolCalls
 }
 
-// extractTerminalToolCallsFromText accepts a text-protocol call only when the
-// whole trimmed response is one valid tool_calls JSON object. Unlike the shared
-// extractor, it deliberately does not search prose for embedded JSON: agy
-// result text is executable only when it follows the terminal protocol exactly.
+// extractTerminalToolCallsFromText accepts exactly one valid tool_calls JSON
+// object when it is the final non-whitespace content. Leading prose is allowed,
+// but code-formatted JSON, trailing prose, and multiple candidates are not.
+// This is intentionally separate from the shared Claude/Codex extractor.
 func extractTerminalToolCallsFromText(text string) []ToolCall {
-	trimmed := strings.TrimSpace(text)
-	if trimmed == "" || !json.Valid([]byte(trimmed)) {
+	type candidate struct {
+		json string
+		end  int
+	}
+
+	var candidates []candidate
+	for i := 0; i < len(text); {
+		if strings.HasPrefix(text[i:], "```") {
+			end := strings.Index(text[i+3:], "```")
+			if end == -1 {
+				break
+			}
+			i += end + 6
+			continue
+		}
+		if text[i] == '`' {
+			end := strings.IndexByte(text[i+1:], '`')
+			if end == -1 {
+				break
+			}
+			i += end + 2
+			continue
+		}
+		if text[i] != '{' {
+			i++
+			continue
+		}
+
+		decoder := json.NewDecoder(strings.NewReader(text[i:]))
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil || len(raw) == 0 || raw[0] != '{' {
+			i++
+			continue
+		}
+		end := i + int(decoder.InputOffset())
+		var wrapper struct {
+			ToolCalls json.RawMessage `json:"tool_calls"`
+		}
+		if err := json.Unmarshal(raw, &wrapper); err == nil && wrapper.ToolCalls != nil {
+			candidates = append(candidates, candidate{json: string(raw), end: end})
+		}
+		i = end
+	}
+
+	if len(candidates) != 1 || strings.TrimSpace(text[candidates[0].end:]) != "" {
 		return nil
 	}
 
-	var wrapper struct {
-		ToolCalls json.RawMessage `json:"tool_calls"`
-	}
-	if err := json.Unmarshal([]byte(trimmed), &wrapper); err != nil || wrapper.ToolCalls == nil {
-		return nil
-	}
-
-	return extractToolCallsFromJSON(trimmed)
+	return extractToolCallsFromJSON(candidates[0].json)
 }

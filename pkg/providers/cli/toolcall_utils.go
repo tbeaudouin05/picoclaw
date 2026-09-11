@@ -16,17 +16,19 @@ func buildCLIToolsPrompt(tools []ToolDefinition) string {
 	var sb strings.Builder
 
 	sb.WriteString("## Available Tools\n\n")
-	sb.WriteString("When you need to use one of these tools, your final response MUST contain ONLY this JSON object, with no prose or Markdown fences:\n\n")
+	sb.WriteString("Terminal-JSON protocol:\n")
+	sb.WriteString("- When calling a tool, emit exactly one JSON object with a tool_calls field. It must be the final non-whitespace content; prose is allowed only before it.\n")
+	sb.WriteString("- Do not wrap the JSON object in Markdown fences, inline backticks, or quotation marks.\n")
+	sb.WriteString("- Never show JSON unless you are actually calling a tool.\n")
+	sb.WriteString("- Call only the functions advertised below. Otherwise, respond in plain text.\n\n")
 	sb.WriteString(
 		`{"tool_calls":[{"id":"call_xxx","type":"function","function":{"name":"tool_name","arguments":"{...}"}}]}`,
 	)
 	sb.WriteString("\n\n")
-	sb.WriteString("CRITICAL: The 'arguments' field MUST be a JSON-encoded STRING.\n\n")
-	sb.WriteString("Escaping rules (what to type in `function.arguments`):\n")
-	sb.WriteString("- Use `\\n` to represent a real newline character.\n")
-	sb.WriteString("- Use `\\\\n` to represent a literal backslash+n sequence (`\\n`).\n")
+	sb.WriteString("function.arguments MUST be a JSON-encoded string.\n")
+	sb.WriteString("Newline escaping: use \\n for a real newline; use \\\\n for a literal backslash followed by n.\n")
 	sb.WriteString(
-		"- `function.arguments` is a JSON-encoded string, so quotes/backslashes must be escaped in the outer payload.\n\n",
+		"Escape quotes and backslashes for the outer JSON string.\n\n",
 	)
 	sb.WriteString("### Tool Definitions:\n\n")
 

@@ -257,21 +257,43 @@ func TestAntigravityCliHeadlessNativeToolPermissionDenialClassifiesAfterRetry(t 
 	}
 }
 
-func TestAntigravityCliParseResponseDoesNotExecuteProseEmbeddedTextCall(t *testing.T) {
-	result := "I will list the jobs.\n" +
-		`{"tool_calls":[{"id":"call_ok","type":"function","function":{"name":"cron","arguments":"{\"action\":\"list\"}"}}]}`
+func TestAntigravityCliParseResponseTerminalToolCallProtocol(t *testing.T) {
+	call := `{"tool_calls":[{"id":"call_ok","type":"function","function":{"name":"cron","arguments":"{\"action\":\"list\"}"}}]}`
+	tests := []struct {
+		name      string
+		response  string
+		wantCalls int
+		wantText  bool
+	}{
+		{name: "bare valid call", response: call, wantCalls: 1},
+		{name: "leading prose plus trailing call", response: "I will list the jobs.\n" + call, wantCalls: 1},
+		{name: "trailing prose rejection", response: call + "\nDone.", wantText: true},
+		{name: "fenced rejection", response: "```json\n" + call + "\n```", wantText: true},
+		{name: "inline code rejection", response: "Use `" + call + "`", wantText: true},
+		{name: "two candidate rejection", response: call + "\n" + call, wantText: true},
+	}
+
 	p := NewAntigravityCliProvider("")
-	resp, err := p.parseResponse(fmt.Sprintf(`{"status":"SUCCESS","response":%q}`, result), []ToolDefinition{{
-		Type: "function", Function: ToolFunctionDefinition{Name: "cron"},
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.FinishReason != "stop" || len(resp.ToolCalls) != 0 {
-		t.Fatalf("response = %#v, want no executable calls", resp)
-	}
-	if resp.Content != result {
-		t.Fatalf("Content = %q, want prose-prefixed JSON preserved as %q", resp.Content, result)
+	tools := []ToolDefinition{{Type: "function", Function: ToolFunctionDefinition{Name: "cron"}}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp, err := p.parseResponse(fmt.Sprintf(`{"status":"SUCCESS","response":%q}`, tt.response), tools)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(resp.ToolCalls) != tt.wantCalls {
+				t.Fatalf("ToolCalls = %#v, want %d calls", resp.ToolCalls, tt.wantCalls)
+			}
+			if tt.wantCalls > 0 {
+				if resp.FinishReason != "tool_calls" || resp.Content != "" || resp.ToolCalls[0].Name != "cron" {
+					t.Fatalf("response = %#v, want terminal cron call with leading prose suppressed", resp)
+				}
+				return
+			}
+			if resp.FinishReason != "stop" || (tt.wantText && resp.Content != tt.response) {
+				t.Fatalf("response = %#v, want non-executable text preserved", resp)
+			}
+		})
 	}
 }
 
@@ -763,4 +785,3 @@ while :; do :; done
 		t.Fatalf("ChatStreamEvents() took %s, want fast-fail in < 3s", elapsed)
 	}
 }
-
