@@ -159,6 +159,7 @@ func TestAntigravityCliChatUsesSafeScopedInvocationAndTextProtocol(t *testing.T)
 	wantArgs := []string{
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
+		"--print-timeout", "15m0s",
 		"--sandbox",
 		"--mode", "accept-edits",
 		"--dangerously-skip-permissions",
@@ -211,6 +212,43 @@ func TestAntigravityCliChatUsesSafeScopedInvocationAndTextProtocol(t *testing.T)
 			t.Errorf("prompt missing %q: %s", want, prompt)
 		}
 	}
+}
+
+func TestAntigravityCLIPrintTimeout(t *testing.T) {
+	now := time.Date(2026, time.September, 11, 12, 0, 0, 0, time.UTC)
+	p := NewAntigravityCliProvider("")
+	tests := []struct {
+		name string
+		ctx  context.Context
+		want time.Duration
+	}{
+		{name: "no deadline", ctx: context.Background(), want: 15 * time.Minute},
+		{name: "short deadline", ctx: deadlineContext(t, now.Add(2*time.Minute)), want: 2 * time.Minute},
+		{name: "sub-max deadline", ctx: deadlineContext(t, now.Add(90*time.Second)), want: 90 * time.Second},
+		{name: "long deadline capped", ctx: deadlineContext(t, now.Add(time.Hour)), want: 15 * time.Minute},
+		{name: "expired deadline", ctx: deadlineContext(t, now.Add(-time.Second)), want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := p.argsAt(tt.ctx, now, "")
+			for i := range args {
+				if args[i] == "--print-timeout" && i+1 < len(args) {
+					if got := args[i+1]; got != tt.want.String() {
+						t.Fatalf("--print-timeout = %q, want %q", got, tt.want)
+					}
+					return
+				}
+			}
+			t.Fatal("args missing --print-timeout")
+		})
+	}
+}
+
+func deadlineContext(t *testing.T, deadline time.Time) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	t.Cleanup(cancel)
+	return ctx
 }
 
 func TestAntigravityCliChatRetriesHeadlessNativeToolPermissionDenialOnce(t *testing.T) {
@@ -408,6 +446,7 @@ func TestAntigravityCliChatStreamEventsUsesCurrentNDJSONAndDoesNotDuplicateFinal
 	wantArgs := []string{
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
+		"--print-timeout", "15m0s",
 		"--sandbox",
 		"--mode", "accept-edits",
 		"--dangerously-skip-permissions",
@@ -657,6 +696,22 @@ func TestAntigravityCliChatStreamEventsEmptyResponseIncludesDiagnosticsAndRedact
 		if strings.Contains(got, secret) {
 			t.Fatalf("ChatStreamEvents() error leaked credential %q: %q", secret, got)
 		}
+	}
+}
+
+func TestAntigravityCliChatStreamEventsReturnsPrintTimeoutDiagnostic(t *testing.T) {
+	p := NewAntigravityCliProvider("")
+	p.command = createMockAntigravityCLIWithStderr(t,
+		"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"\"}}\n",
+		"[agy] print timeout after 15m\n")
+
+	_, err := p.ChatStreamEvents(context.Background(), []Message{{Role: "user", Content: "hello"}}, nil, "", nil, nil)
+	if err == nil {
+		t.Fatal("ChatStreamEvents() expected error")
+	}
+	if got := err.Error(); !strings.Contains(got, "[agy] print timeout after 15m") ||
+		strings.Contains(got, "antigravity cli returned an empty response") {
+		t.Fatalf("ChatStreamEvents() error = %q, want print-timeout diagnostic", got)
 	}
 }
 

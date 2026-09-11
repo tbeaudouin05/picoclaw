@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sipeed/picoclaw/pkg/isolation"
 )
@@ -23,6 +24,8 @@ var (
 )
 
 const antigravityCLINativeToolRepairInstruction = "The prior output was discarded because it attempted an unavailable native tool. Answer directly or use only advertised PicoClaw tools."
+
+const antigravityCLIPrintTimeoutMax = 15 * time.Minute
 
 // AntigravityCliProvider implements LLMProvider using the local agy CLI.
 // It is intentionally separate from the direct OAuth antigravity provider.
@@ -161,7 +164,7 @@ func (p *AntigravityCliProvider) chatStreamEvents(
 	if err != nil {
 		return nil, err
 	}
-	args := p.args(model, mediaDir)
+	args := p.args(ctx, model, mediaDir)
 
 	cmd := exec.CommandContext(ctx, p.command, args...)
 	if p.workspace != "" {
@@ -247,6 +250,12 @@ func (p *AntigravityCliProvider) chatStreamEvents(
 	}
 	if stderr.IsQuotaExhausted() {
 		return nil, antigravityCLIExecutionError(fmt.Errorf("quota exhausted"), rawOutput.String(), stderr.String())
+	}
+	// agy can report this timeout on stderr while still writing an empty
+	// SUCCESS result. Treat the diagnostic as the terminal failure so fallback
+	// receives a timeout rather than a misleading empty response.
+	if isAntigravityCLIPrintTimeout(stderr.String()) {
+		return nil, antigravityCLIExecutionError(fmt.Errorf("print timeout"), rawOutput.String(), stderr.String())
 	}
 	if terminalResult == nil {
 		return nil, fmt.Errorf("antigravity cli stream ended without terminal result")
@@ -384,6 +393,10 @@ func isAntigravityCLIQuotaExhausted(diagnostic string) bool {
 	return false
 }
 
+func isAntigravityCLIPrintTimeout(diagnostic string) bool {
+	return strings.Contains(strings.ToLower(diagnostic), "[agy] print timeout")
+}
+
 // isAntigravityCLINativeToolPermissionDenied recognizes the headless CLI
 // denial without confusing ordinary empty responses or filesystem errors with
 // this repair case.
@@ -465,10 +478,15 @@ func redactAntigravityCLIDiagnostics(diagnostics string) string {
 
 // args intentionally omits --disable-slash-commands and configures
 // --mode accept-edits so that requests run in accept-edits mode.
-func (p *AntigravityCliProvider) args(model string, extraDirs ...string) []string {
+func (p *AntigravityCliProvider) args(ctx context.Context, model string, extraDirs ...string) []string {
+	return p.argsAt(ctx, time.Now(), model, extraDirs...)
+}
+
+func (p *AntigravityCliProvider) argsAt(ctx context.Context, now time.Time, model string, extraDirs ...string) []string {
 	args := []string{
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
+		"--print-timeout", antigravityCLIPrintTimeout(ctx, now).String(),
 		"--sandbox",
 		"--mode", "accept-edits",
 		"--dangerously-skip-permissions",
@@ -478,6 +496,23 @@ func (p *AntigravityCliProvider) args(model string, extraDirs ...string) []strin
 		args = append(args, "--model", model)
 	}
 	return args
+}
+
+// antigravityCLIPrintTimeout keeps agy's print-mode timeout within the caller's
+// deadline, while still allowing a bounded run for contexts without one.
+func antigravityCLIPrintTimeout(ctx context.Context, now time.Time) time.Duration {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return antigravityCLIPrintTimeoutMax
+	}
+	timeout := deadline.Sub(now)
+	if timeout <= 0 {
+		return 0
+	}
+	if timeout > antigravityCLIPrintTimeoutMax {
+		return antigravityCLIPrintTimeoutMax
+	}
+	return timeout
 }
 
 // antigravityCLIRequest encodes exactly one stream-json user event, including

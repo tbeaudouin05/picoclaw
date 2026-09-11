@@ -44,6 +44,16 @@ func TestClassifyError_ContextDeadlineExceeded(t *testing.T) {
 	}
 }
 
+func TestClassifyError_AgyPrintTimeout(t *testing.T) {
+	result := ClassifyError(errors.New("antigravity cli error: [agy] print timeout after 15m"), "antigravity-cli", "test")
+	if result == nil {
+		t.Fatal("expected print timeout to be classified")
+	}
+	if result.Reason != FailoverTimeout {
+		t.Errorf("reason = %q, want timeout", result.Reason)
+	}
+}
+
 func TestClassifyError_StatusCodes(t *testing.T) {
 	tests := []struct {
 		status int
