@@ -25,7 +25,7 @@ var (
 
 const antigravityCLINativeToolRepairInstruction = "The prior output was discarded because it attempted an unavailable native tool. Answer directly or use only advertised PicoClaw tools."
 
-const antigravityCLIPrintTimeoutMax = 15 * time.Minute
+const antigravityCLIPrintTimeoutFallback = 15 * time.Minute
 
 // AntigravityCliProvider implements LLMProvider using the local agy CLI.
 // It is intentionally separate from the direct OAuth antigravity provider.
@@ -498,19 +498,16 @@ func (p *AntigravityCliProvider) argsAt(ctx context.Context, now time.Time, mode
 	return args
 }
 
-// antigravityCLIPrintTimeout keeps agy's print-mode timeout within the caller's
-// deadline, while still allowing a bounded run for contexts without one.
+// antigravityCLIPrintTimeout inherits the caller's remaining deadline when one
+// exists, while still allowing a bounded run for contexts without one.
 func antigravityCLIPrintTimeout(ctx context.Context, now time.Time) time.Duration {
 	deadline, ok := ctx.Deadline()
 	if !ok {
-		return antigravityCLIPrintTimeoutMax
+		return antigravityCLIPrintTimeoutFallback
 	}
 	timeout := deadline.Sub(now)
 	if timeout <= 0 {
 		return 0
-	}
-	if timeout > antigravityCLIPrintTimeoutMax {
-		return antigravityCLIPrintTimeoutMax
 	}
 	return timeout
 }

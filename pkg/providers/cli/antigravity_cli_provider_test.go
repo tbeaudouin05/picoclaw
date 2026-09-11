@@ -225,7 +225,7 @@ func TestAntigravityCLIPrintTimeout(t *testing.T) {
 		{name: "no deadline", ctx: context.Background(), want: 15 * time.Minute},
 		{name: "short deadline", ctx: deadlineContext(t, now.Add(2*time.Minute)), want: 2 * time.Minute},
 		{name: "sub-max deadline", ctx: deadlineContext(t, now.Add(90*time.Second)), want: 90 * time.Second},
-		{name: "long deadline capped", ctx: deadlineContext(t, now.Add(time.Hour)), want: 15 * time.Minute},
+		{name: "long deadline inherited", ctx: deadlineContext(t, now.Add(time.Hour)), want: time.Hour},
 		{name: "expired deadline", ctx: deadlineContext(t, now.Add(-time.Second)), want: 0},
 	}
 	for _, tt := range tests {
