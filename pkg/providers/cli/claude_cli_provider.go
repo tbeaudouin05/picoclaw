@@ -344,13 +344,14 @@ func (p *ClaudeCliProvider) parseClaudeCliJSONResponse(
 	// Preserve each parsed tool call—whether advertised or unadvertised/unknown—
 	// so PicoClaw standard ToolRegistry execution returns its normal unknown-tool
 	// error as feedback to the model on the next turn.
-	toolCalls := p.extractToolCalls(resp.Result)
+	classification := classifyTextProtocolToolCalls(resp.Result)
+	toolCalls := classification.ToolCalls
 
 	finishReason := "stop"
 	content := resp.Result
 	if len(toolCalls) > 0 {
 		finishReason = "tool_calls"
-		content = p.stripToolCallsJSON(resp.Result)
+		content = classification.Content
 	}
 
 	var usage *UsageInfo

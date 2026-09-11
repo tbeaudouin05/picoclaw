@@ -260,17 +260,19 @@ func TestAntigravityCliHeadlessNativeToolPermissionDenialClassifiesAfterRetry(t 
 func TestAntigravityCliParseResponseTerminalToolCallProtocol(t *testing.T) {
 	call := `{"tool_calls":[{"id":"call_ok","type":"function","function":{"name":"cron","arguments":"{\"action\":\"list\"}"}}]}`
 	tests := []struct {
-		name      string
-		response  string
-		wantCalls int
-		wantText  bool
+		name        string
+		response    string
+		wantValid   bool
+		wantInvalid bool
 	}{
-		{name: "bare valid call", response: call, wantCalls: 1},
-		{name: "leading prose plus trailing call", response: "I will list the jobs.\n" + call, wantCalls: 1},
-		{name: "trailing prose rejection", response: call + "\nDone.", wantText: true},
-		{name: "fenced rejection", response: "```json\n" + call + "\n```", wantText: true},
-		{name: "inline code rejection", response: "Use `" + call + "`", wantText: true},
-		{name: "two candidate rejection", response: call + "\n" + call, wantText: true},
+		{name: "bare valid call", response: call, wantValid: true},
+		{name: "leading prose plus trailing call", response: "I will list the jobs.\n" + call, wantValid: true},
+		{name: "trailing prose rejection", response: call + "\nDone.", wantInvalid: true},
+		{name: "fenced rejection", response: "```json\n" + call + "\n```", wantInvalid: true},
+		{name: "inline code rejection", response: "Use `" + call + "`", wantInvalid: true},
+		{name: "malformed rejection", response: `{"tool_calls":[}`, wantInvalid: true},
+		{name: "malformed function arguments rejection", response: `{"tool_calls":[{"id":"call_bad","type":"function","function":{"name":"cron","arguments":"{not-json}"}}]}`, wantInvalid: true},
+		{name: "two candidate rejection", response: call + "\n" + call, wantInvalid: true},
 	}
 
 	p := NewAntigravityCliProvider("")
@@ -281,19 +283,32 @@ func TestAntigravityCliParseResponseTerminalToolCallProtocol(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(resp.ToolCalls) != tt.wantCalls {
-				t.Fatalf("ToolCalls = %#v, want %d calls", resp.ToolCalls, tt.wantCalls)
+			if len(resp.ToolCalls) != 1 {
+				t.Fatalf("ToolCalls = %#v, want one call", resp.ToolCalls)
 			}
-			if tt.wantCalls > 0 {
+			if tt.wantValid {
 				if resp.FinishReason != "tool_calls" || resp.Content != "" || resp.ToolCalls[0].Name != "cron" {
 					t.Fatalf("response = %#v, want terminal cron call with leading prose suppressed", resp)
 				}
 				return
 			}
-			if resp.FinishReason != "stop" || (tt.wantText && resp.Content != tt.response) {
-				t.Fatalf("response = %#v, want non-executable text preserved", resp)
+			if !tt.wantInvalid || resp.FinishReason != "tool_calls" || resp.Content != "" ||
+				resp.ToolCalls[0].NonExecutableReason != invalidTextProtocolToolCallReason {
+				t.Fatalf("response = %#v, want synthetic protocol feedback call", resp)
 			}
 		})
+	}
+}
+
+func TestAntigravityCliParseResponseOrdinaryJSONMentioningToolCallsIsText(t *testing.T) {
+	p := NewAntigravityCliProvider("")
+	result := `{"topic":"tool_calls","enabled":true}`
+	resp, err := p.parseResponse(fmt.Sprintf(`{"status":"SUCCESS","response":%q}`, result), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Content != result || resp.FinishReason != "stop" || len(resp.ToolCalls) != 0 {
+		t.Fatalf("response = %#v, want ordinary JSON preserved as text", resp)
 	}
 }
 

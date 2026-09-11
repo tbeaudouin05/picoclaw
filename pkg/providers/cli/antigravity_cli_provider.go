@@ -509,7 +509,11 @@ func (p *AntigravityCliProvider) parseJSONResponse(result antigravityCliJSONResp
 		return nil, fmt.Errorf("antigravity cli returned %s: %s", result.Status, redactAntigravityCLIDiagnostics(errText))
 	}
 
-	toolCalls := filterAntigravityTerminalToolCalls(extractTerminalToolCallsFromText(result.Response), tools)
+	classification := classifyTextProtocolToolCalls(result.Response)
+	toolCalls := classification.ToolCalls
+	if len(toolCalls) > 0 && toolCalls[0].NonExecutableReason == "" {
+		toolCalls = filterAntigravityTerminalToolCalls(toolCalls, tools)
+	}
 	content := result.Response
 	if strings.TrimSpace(content) == "" && len(toolCalls) == 0 {
 		return nil, fmt.Errorf("antigravity cli returned an empty response")
@@ -549,60 +553,4 @@ func filterAntigravityTerminalToolCalls(toolCalls []ToolCall, tools []ToolDefini
 		}
 	}
 	return toolCalls
-}
-
-// extractTerminalToolCallsFromText accepts exactly one valid tool_calls JSON
-// object when it is the final non-whitespace content. Leading prose is allowed,
-// but code-formatted JSON, trailing prose, and multiple candidates are not.
-// This is intentionally separate from the shared Claude/Codex extractor.
-func extractTerminalToolCallsFromText(text string) []ToolCall {
-	type candidate struct {
-		json string
-		end  int
-	}
-
-	var candidates []candidate
-	for i := 0; i < len(text); {
-		if strings.HasPrefix(text[i:], "```") {
-			end := strings.Index(text[i+3:], "```")
-			if end == -1 {
-				break
-			}
-			i += end + 6
-			continue
-		}
-		if text[i] == '`' {
-			end := strings.IndexByte(text[i+1:], '`')
-			if end == -1 {
-				break
-			}
-			i += end + 2
-			continue
-		}
-		if text[i] != '{' {
-			i++
-			continue
-		}
-
-		decoder := json.NewDecoder(strings.NewReader(text[i:]))
-		var raw json.RawMessage
-		if err := decoder.Decode(&raw); err != nil || len(raw) == 0 || raw[0] != '{' {
-			i++
-			continue
-		}
-		end := i + int(decoder.InputOffset())
-		var wrapper struct {
-			ToolCalls json.RawMessage `json:"tool_calls"`
-		}
-		if err := json.Unmarshal(raw, &wrapper); err == nil && wrapper.ToolCalls != nil {
-			candidates = append(candidates, candidate{json: string(raw), end: end})
-		}
-		i = end
-	}
-
-	if len(candidates) != 1 || strings.TrimSpace(text[candidates[0].end:]) != "" {
-		return nil
-	}
-
-	return extractToolCallsFromJSON(candidates[0].json)
 }

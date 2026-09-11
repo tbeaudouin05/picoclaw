@@ -2,6 +2,7 @@ package cliprovider
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1039,6 +1040,22 @@ func TestParseClaudeCliResponse_TextOnly(t *testing.T) {
 	}
 }
 
+func TestParseClaudeCliResponse_OrdinaryJSONMentioningToolCallsIsText(t *testing.T) {
+	p := NewClaudeCliProvider("")
+	result := `{"topic":"tool_calls","enabled":true}`
+	output, err := json.Marshal(claudeCliJSONResponse{Type: "result", Result: result})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := p.parseClaudeCliResponse(string(output), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Content != result || resp.FinishReason != "stop" || len(resp.ToolCalls) != 0 {
+		t.Fatalf("response = %#v, want ordinary JSON preserved as text", resp)
+	}
+}
+
 func TestParseClaudeCliResponse_EmptyResult(t *testing.T) {
 	p := NewClaudeCliProvider("/workspace")
 	output := `{"type":"result","subtype":"success","is_error":false,"result":"","session_id":"abc"}`
@@ -1165,6 +1182,49 @@ func TestParseClaudeCliResponse_PreservesUnadvertisedToolCalls(t *testing.T) {
 	}
 	if resp.ToolCalls[0].Arguments["foo"] != "bar" {
 		t.Errorf("ToolCalls[0].Arguments[foo] = %v, want bar", resp.ToolCalls[0].Arguments["foo"])
+	}
+}
+
+func TestParseClaudeCliResponse_StrictTerminalToolCallProtocol(t *testing.T) {
+	call := `{"tool_calls":[{"id":"call_ok","type":"function","function":{"name":"cron","arguments":"{}"}}]}`
+	tests := []struct {
+		name      string
+		result    string
+		wantValid bool
+	}{
+		{name: "valid", result: "Leading prose.\n" + call, wantValid: true},
+		{name: "fenced", result: "```json\n" + call + "\n```"},
+		{name: "inline formatted", result: "`" + call + "`"},
+		{name: "malformed", result: `{"tool_calls":[}`},
+		{name: "malformed function arguments", result: `{"tool_calls":[{"id":"call_bad","type":"function","function":{"name":"cron","arguments":"{not-json}"}}]}`},
+		{name: "duplicate", result: call + "\n" + call},
+		{name: "trailing prose", result: call + "\nDone."},
+	}
+	p := NewClaudeCliProvider("")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			output, err := json.Marshal(claudeCliJSONResponse{Type: "result", Result: tt.result})
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := p.parseClaudeCliResponse(string(output), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.FinishReason != "tool_calls" || resp.Content != "" && !tt.wantValid || len(resp.ToolCalls) != 1 {
+				t.Fatalf("response = %#v, want one terminal tool call", resp)
+			}
+			if tt.wantValid {
+				if resp.Content != "Leading prose." || resp.ToolCalls[0].Name != "cron" || resp.ToolCalls[0].NonExecutableReason != "" {
+					t.Fatalf("response = %#v, want accepted cron call", resp)
+				}
+				return
+			}
+			if resp.Content != "" || resp.ToolCalls[0].NonExecutableReason != invalidTextProtocolToolCallReason ||
+				!strings.Contains(resp.ToolCalls[0].NonExecutableReason, "do not quote tool calls") {
+				t.Fatalf("response = %#v, want specific synthetic protocol feedback", resp)
+			}
+		})
 	}
 }
 
