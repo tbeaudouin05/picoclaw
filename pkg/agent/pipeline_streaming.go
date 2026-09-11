@@ -133,7 +133,24 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 		)
 	}
 	logConfiguredStreamingSummary(ts, exec, streamStart, chunkCount, firstChunkAt, lastChunkAt, streamErr)
-	if deliveryErr := firstError(publisher.Err(), nativeToolFeedbackErr); deliveryErr != nil {
+	telegramDraftAndProviderFailed := ts.channel == "telegram" && publisher.Err() != nil && streamErr != nil && nativeToolFeedbackErr == nil
+	if telegramDraftAndProviderFailed {
+		// Telegram drafts are cosmetic previews. A failed draft must not make a
+		// provider failure look like client-visible output, because that would
+		// stop the normal provider fallback chain.
+		logTelegramDraftProviderFailure(
+			ts,
+			exec,
+			publisher,
+			streamStart,
+			chunkCount,
+			firstChunkAt,
+			lastChunkAt,
+			nativeToolFeedbackPublished,
+			streamErr,
+		)
+	}
+	if deliveryErr := firstError(publisher.Err(), nativeToolFeedbackErr); deliveryErr != nil && !telegramDraftAndProviderFailed {
 		// Telegram drafts are only a streaming preview. If sendMessageDraft fails
 		// after the provider has produced a complete response, discard the failed
 		// streamer and let the normal outbound path deliver that response instead.
@@ -161,19 +178,25 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 		return nil, true, providers.AbortFallback(configuredStreamingVisibleError{err: deliveryErr})
 	}
 	if streamErr != nil {
-		if !publisher.UserVisible() && !nativeToolFeedbackPublished {
+		if telegramDraftAndProviderFailed || (!publisher.UserVisible() && !nativeToolFeedbackPublished) {
 			logFields := map[string]any{
 				"agent_id": ts.agent.ID,
 				"channel":  ts.channel,
 				"model":    exec.llmModel,
 				"error":    streamErr.Error(),
 			}
+			continueMessage := "ChatStream failed before visible output; continuing fallback chain"
+			retryMessage := "ChatStream failed before visible output; retrying with Chat"
+			if telegramDraftAndProviderFailed {
+				continueMessage = "ChatStream failed after Telegram draft failure; continuing fallback chain"
+				retryMessage = "ChatStream failed after Telegram draft failure; retrying with Chat"
+			}
 			if !retryPrimaryChat {
-				logger.WarnCF("agent", "ChatStream failed before visible output; continuing fallback chain", logFields)
+				logger.WarnCF("agent", continueMessage, logFields)
 				publisher.Cancel(ctx)
 				return nil, true, streamErr
 			}
-			logger.WarnCF("agent", "ChatStream failed before visible output; retrying with Chat", logFields)
+			logger.WarnCF("agent", retryMessage, logFields)
 			publisher.Cancel(ctx)
 			fallbackResponse, err := exec.activeProvider.Chat(
 				ctx,
@@ -195,6 +218,46 @@ func (p *Pipeline) tryConfiguredStreamingLLM(
 	}
 
 	return response, true, nil
+}
+
+func logTelegramDraftProviderFailure(
+	ts *turnState,
+	exec *turnExecution,
+	publisher *streamingChunkPublisher,
+	streamStart time.Time,
+	chunkCount int,
+	firstChunkAt time.Time,
+	lastChunkAt time.Time,
+	nativeToolFeedbackPublished bool,
+	providerErr error,
+) {
+	fields := map[string]any{
+		"chunks":                         chunkCount,
+		"draft_user_visible":             publisher.UserVisible(),
+		"draft_touched":                  publisher.Touched(),
+		"native_tool_feedback_published": nativeToolFeedbackPublished,
+		"provider_error":                 providerErr.Error(),
+	}
+	if publisher.Err() != nil {
+		fields["draft_error"] = publisher.Err().Error()
+	}
+	if !streamStart.IsZero() {
+		fields["duration_ms"] = time.Since(streamStart).Milliseconds()
+	}
+	if ts != nil {
+		fields["agent_id"] = ts.agent.ID
+		fields["channel"] = ts.channel
+	}
+	if exec != nil {
+		fields["model"] = exec.llmModel
+	}
+	if !firstChunkAt.IsZero() {
+		fields["first_chunk_ms"] = firstChunkAt.Sub(streamStart).Milliseconds()
+	}
+	if !firstChunkAt.IsZero() && !lastChunkAt.IsZero() {
+		fields["chunk_span_ms"] = lastChunkAt.Sub(firstChunkAt).Milliseconds()
+	}
+	logger.WarnCF("agent", "Telegram draft and provider stream failed; continuing provider fallback", fields)
 }
 
 func logConfiguredStreamingSummary(
@@ -413,6 +476,7 @@ type streamingChunkPublisher struct {
 	modelName          string
 	published          bool
 	reasoningPublished bool
+	touched            bool
 	err                error
 	ts                 *turnState
 }
@@ -424,8 +488,11 @@ func (p *streamingChunkPublisher) Update(ctx context.Context, accumulated string
 	if setter, ok := p.streamer.(interface{ SetModelName(modelName string) }); ok {
 		setter.SetModelName(p.modelName)
 	}
+	p.touched = true
 	if err := p.streamer.Update(ctx, accumulated); err != nil {
-		p.err = err
+		if p.err == nil {
+			p.err = err
+		}
 		logger.WarnCF("agent", "stream update failed", map[string]any{
 			"channel": p.channel,
 			"chat_id": p.chatID,
@@ -447,8 +514,11 @@ func (p *streamingChunkPublisher) UpdateReasoning(ctx context.Context, accumulat
 	if !ok {
 		return
 	}
+	p.touched = true
 	if err := reasoningStreamer.UpdateReasoning(ctx, accumulated); err != nil {
-		p.err = err
+		if p.err == nil {
+			p.err = err
+		}
 		logger.WarnCF("agent", "stream reasoning update failed", map[string]any{
 			"channel": p.channel,
 			"chat_id": p.chatID,
@@ -469,6 +539,10 @@ func (p *streamingChunkPublisher) ReasoningPublished() bool {
 
 func (p *streamingChunkPublisher) UserVisible() bool {
 	return p != nil && (p.published || p.reasoningPublished)
+}
+
+func (p *streamingChunkPublisher) Touched() bool {
+	return p != nil && p.touched
 }
 
 func (p *streamingChunkPublisher) Err() error {
