@@ -112,6 +112,37 @@ fi
 	return script
 }
 
+func createMockAntigravityEmptyFunctionCallRepairCLI(t *testing.T, requestsFile string, exitCode int, alwaysFail bool) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("mock CLI scripts not supported on Windows")
+	}
+	dir := t.TempDir()
+	countFile := filepath.Join(dir, "count")
+	script := filepath.Join(dir, "agy")
+	secondTurn := `printf '{"event":"result","result":{"status":"SUCCESS","response":"repaired"}}\n'`
+	if alwaysFail {
+		secondTurn = fmt.Sprintf("printf '{\"event\":\"result\",\"result\":{\"status\":\"ERROR\",\"error\":\"Function call is empty - no input to parse\"}}\\n'\nexit %d", exitCode)
+	}
+	contents := fmt.Sprintf(`#!/bin/sh
+count=0
+if [ -f %q ]; then count=$(cat %q); fi
+count=$((count + 1))
+printf '%%s' "$count" > %q
+cat >> %q
+if [ "$count" -eq 1 ]; then
+  printf '{"event":"result","result":{"status":"ERROR","error":"Function call is empty - no input to parse"}}\n'
+  exit %d
+else
+  %s
+fi
+`, countFile, countFile, countFile, requestsFile, exitCode, secondTurn)
+	if err := os.WriteFile(script, []byte(contents), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
 func TestAntigravityCliChatUsesSafeScopedInvocationAndTextProtocol(t *testing.T) {
 	workspace := t.TempDir()
 	stateDir := t.TempDir()
@@ -294,6 +325,96 @@ func TestAntigravityCliHeadlessNativeToolPermissionDenialClassifiesAfterRetry(t 
 	_, err := p.Chat(context.Background(), []Message{{Role: "user", Content: "inspect this"}}, nil, "", nil)
 	if err == nil || !strings.Contains(err.Error(), "native_tool_permission_denied") {
 		t.Fatalf("Chat() error = %v, want native-tool permission classification marker", err)
+	}
+}
+
+func TestAntigravityCliChatRetriesEmptyFunctionCallOnce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock CLI scripts not supported on Windows")
+	}
+	requestsFile := filepath.Join(t.TempDir(), "requests")
+	p := NewAntigravityCliProvider("")
+	p.command = createMockAntigravityEmptyFunctionCallRepairCLI(t, requestsFile, 0, false)
+
+	resp, err := p.Chat(context.Background(), []Message{{Role: "user", Content: "inspect this"}}, []ToolDefinition{{
+		Type: "function", Function: ToolFunctionDefinition{Name: "terminal"},
+	}}, "", nil)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if resp.Content != "repaired" {
+		t.Fatalf("response = %#v, want repaired response", resp)
+	}
+	requests, err := os.ReadFile(requestsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(requests), "\n"); got != 2 {
+		t.Fatalf("request count = %d, want one guarded retry", got)
+	}
+	if got := strings.Count(string(requests), antigravityCLIEmptyFunctionCallRepairInstruction); got != 1 {
+		t.Fatalf("repair instruction count = %d, want exactly one", got)
+	}
+}
+
+func TestAntigravityCliChatRetriesEmptyFunctionCallWithNonZeroExit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock CLI scripts not supported on Windows")
+	}
+	requestsFile := filepath.Join(t.TempDir(), "requests")
+	p := NewAntigravityCliProvider("")
+	p.command = createMockAntigravityEmptyFunctionCallRepairCLI(t, requestsFile, 1, false)
+
+	resp, err := p.Chat(context.Background(), []Message{{Role: "user", Content: "inspect this"}}, []ToolDefinition{{
+		Type: "function", Function: ToolFunctionDefinition{Name: "terminal"},
+	}}, "", nil)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	if resp.Content != "repaired" {
+		t.Fatalf("response = %#v, want repaired response", resp)
+	}
+	requests, err := os.ReadFile(requestsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(requests), "\n"); got != 2 {
+		t.Fatalf("request count = %d, want one guarded retry", got)
+	}
+	if got := strings.Count(string(requests), antigravityCLIEmptyFunctionCallRepairInstruction); got != 1 {
+		t.Fatalf("repair instruction count = %d, want exactly one", got)
+	}
+}
+
+func TestAntigravityCliChatEmptyFunctionCallPreservesErrorAfterRetryFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock CLI scripts not supported on Windows")
+	}
+	requestsFile := filepath.Join(t.TempDir(), "requests")
+	p := NewAntigravityCliProvider("")
+	p.command = createMockAntigravityEmptyFunctionCallRepairCLI(t, requestsFile, 1, true)
+
+	_, err := p.Chat(context.Background(), []Message{{Role: "user", Content: "inspect this"}}, nil, "", nil)
+	if err == nil {
+		t.Fatal("Chat() expected error")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "function call is empty") {
+		t.Fatalf("Chat() error = %v, want error to contain 'function call is empty'", err)
+	}
+	requests, err := os.ReadFile(requestsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(requests), "\n"); got != 2 {
+		t.Fatalf("request count = %d, want exactly one guarded retry before failing", got)
+	}
+}
+
+func TestAntigravityCliBuildPrompt_IncludesEmptyFunctionCallWarning(t *testing.T) {
+	p := NewAntigravityCliProvider("")
+	prompt := p.buildPrompt([]Message{{Role: "user", Content: "hello"}}, nil)
+	if !strings.Contains(prompt, "Do not emit native function calls or empty tool calls.") {
+		t.Fatalf("prompt missing warning against empty function calls: %q", prompt)
 	}
 }
 

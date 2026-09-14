@@ -25,6 +25,8 @@ var (
 
 const antigravityCLINativeToolRepairInstruction = "The prior output was discarded because it attempted an unavailable native tool. Answer directly or use only advertised PicoClaw tools."
 
+const antigravityCLIEmptyFunctionCallRepairInstruction = "The prior output failed with error: Function call is empty - no input to parse. Do not invoke native tools or emit empty function calls. Answer directly or use only advertised PicoClaw tools."
+
 const antigravityCLIPrintTimeoutFallback = 15 * time.Minute
 
 // AntigravityCliProvider implements LLMProvider using the local agy CLI.
@@ -69,6 +71,7 @@ func (p *AntigravityCliProvider) buildPrompt(messages []Message, tools []ToolDef
 
 	systemParts = append(systemParts,
 		"Do not use any Antigravity-native tools, including file, terminal, browser, search, or IDE tools. "+
+			"Do not emit native function calls or empty tool calls. "+
 			"All inspection and actions must use only advertised PicoClaw terminal-JSON tools. If no PicoClaw tool is advertised, answer directly.")
 
 	if len(tools) > 0 {
@@ -148,12 +151,12 @@ func (p *AntigravityCliProvider) ChatStreamEvents(
 	ctx context.Context, messages []Message, tools []ToolDefinition, model string, options map[string]any,
 	onChunk func(StreamChunk),
 ) (*LLMResponse, error) {
-	return p.chatStreamEvents(ctx, messages, tools, model, options, onChunk, false)
+	return p.chatStreamEvents(ctx, messages, tools, model, options, onChunk, false, false)
 }
 
 func (p *AntigravityCliProvider) chatStreamEvents(
 	ctx context.Context, messages []Message, tools []ToolDefinition, model string, options map[string]any,
-	onChunk func(StreamChunk), nativeToolRepairAttempted bool,
+	onChunk func(StreamChunk), nativeToolRepairAttempted, emptyFunctionCallRepairAttempted bool,
 ) (*LLMResponse, error) {
 	prompt := p.buildPrompt(messages, tools)
 	prepared, mediaDir, cleanup, err := prepareCLIImageInputs(prompt)
@@ -242,12 +245,28 @@ func (p *AntigravityCliProvider) chatStreamEvents(
 		terminateAndWait()
 		return nil, fmt.Errorf("failed to read antigravity cli stream: %w", err)
 	}
+
+	tryRepairEmptyFunctionCall := func() (*LLMResponse, bool, error) {
+		if !emptyFunctionCallRepairAttempted && isAntigravityCLIEmptyFunctionCall(terminalResult, stderr.String(), rawOutput.String()) {
+			repairMessages := append(append([]Message(nil), messages...), Message{
+				Role:    "system",
+				Content: antigravityCLIEmptyFunctionCallRepairInstruction,
+			})
+			resp, err := p.chatStreamEvents(ctx, repairMessages, tools, model, options, onChunk, nativeToolRepairAttempted, true)
+			return resp, true, err
+		}
+		return nil, false, nil
+	}
+
 	if err := cmd.Wait(); err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
 		if stderr.IsQuotaExhausted() {
 			return nil, antigravityCLIExecutionError(err, rawOutput.String(), stderr.String())
+		}
+		if resp, retried, retryErr := tryRepairEmptyFunctionCall(); retried {
+			return resp, retryErr
 		}
 		if terminalResult != nil && terminalResult.Status != "SUCCESS" {
 			_, terminalErr := p.parseJSONResponse(*terminalResult, tools)
@@ -265,6 +284,9 @@ func (p *AntigravityCliProvider) chatStreamEvents(
 		return nil, antigravityCLIExecutionError(fmt.Errorf("print timeout"), rawOutput.String(), stderr.String())
 	}
 	if terminalResult == nil {
+		if resp, retried, retryErr := tryRepairEmptyFunctionCall(); retried {
+			return resp, retryErr
+		}
 		return nil, fmt.Errorf("antigravity cli stream ended without terminal result")
 	}
 	// agy can put the final text entirely in step updates and leave the
@@ -278,6 +300,9 @@ func (p *AntigravityCliProvider) chatStreamEvents(
 	}
 
 	if terminalResult.Status != "SUCCESS" {
+		if resp, retried, retryErr := tryRepairEmptyFunctionCall(); retried {
+			return resp, retryErr
+		}
 		_, err := p.parseJSONResponse(*terminalResult, tools)
 		return nil, antigravityCLIWithStderr(err, stderr.String())
 	}
@@ -287,11 +312,14 @@ func (p *AntigravityCliProvider) chatStreamEvents(
 			Role:    "system",
 			Content: antigravityCLINativeToolRepairInstruction,
 		})
-		return p.chatStreamEvents(ctx, repairMessages, tools, model, options, onChunk, true)
+		return p.chatStreamEvents(ctx, repairMessages, tools, model, options, onChunk, true, emptyFunctionCallRepairAttempted)
 	}
 
 	response, err := p.parseJSONResponse(*terminalResult, tools)
 	if err != nil {
+		if resp, retried, retryErr := tryRepairEmptyFunctionCall(); retried {
+			return resp, retryErr
+		}
 		if nativeToolRepairAttempted && !gotDelta && strings.TrimSpace(terminalResult.Response) == "" &&
 			isAntigravityCLINativeToolPermissionDenied(stderr.String()) {
 			return nil, fmt.Errorf("antigravity cli native_tool_permission_denied")
@@ -415,6 +443,26 @@ func isAntigravityCLINativeToolPermissionDenied(stderr string) bool {
 		(strings.Contains(diagnostic, "denied") || strings.Contains(diagnostic, "not allowed") ||
 			strings.Contains(diagnostic, "approval") || strings.Contains(diagnostic, "required"))
 	return nativeToolMentioned && permissionDenied
+}
+
+// isAntigravityCLIEmptyFunctionCall reports whether a failure was caused by an empty
+// or malformed native function call.
+func isAntigravityCLIEmptyFunctionCall(result *antigravityCliJSONResponse, stderr, rawOutput string) bool {
+	if result != nil {
+		if strings.Contains(strings.ToLower(result.Error), "function call is empty") {
+			return true
+		}
+		if strings.Contains(strings.ToLower(result.Response), "function call is empty") {
+			return true
+		}
+	}
+	if strings.Contains(strings.ToLower(stderr), "function call is empty") {
+		return true
+	}
+	if strings.Contains(strings.ToLower(rawOutput), "function call is empty") {
+		return true
+	}
+	return false
 }
 
 // antigravityCLIExecutionError preserves the CLI's complete stderr on a
