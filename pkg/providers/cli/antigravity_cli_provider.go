@@ -103,19 +103,21 @@ type antigravityCliUsage struct {
 	TotalTokens     int `json:"total_tokens"`
 }
 
+type antigravityCliStepUpdate struct {
+	TextDelta string `json:"text_delta"`
+	State     string `json:"state"`
+	StepType  string `json:"step_type"`
+	ToolName  string `json:"tool_name"`
+	ToolInfo  struct {
+		Name       string          `json:"name"`
+		Parameters json.RawMessage `json:"parameters"`
+	} `json:"tool_info"`
+}
+
 type antigravityCliStreamRecord struct {
-	Event      string `json:"event"`
-	StepUpdate struct {
-		TextDelta string `json:"text_delta"`
-		State     string `json:"state"`
-		StepType  string `json:"step_type"`
-		ToolName  string `json:"tool_name"`
-		ToolInfo  struct {
-			Name       string          `json:"name"`
-			Parameters json.RawMessage `json:"parameters"`
-		} `json:"tool_info"`
-	} `json:"step_update"`
-	Result *antigravityCliJSONResponse `json:"result"`
+	Event      string                   `json:"event"`
+	StepUpdate antigravityCliStepUpdate `json:"step_update"`
+	Result     *antigravityCliJSONResponse `json:"result"`
 }
 
 func (p *AntigravityCliProvider) parseResponse(output string, tools []ToolDefinition) (*LLMResponse, error) {
@@ -194,6 +196,7 @@ func (p *AntigravityCliProvider) chatStreamEvents(
 	var content strings.Builder
 	var rawOutput strings.Builder
 	gotDelta := false
+	hadNativeTool := false
 	stepUpdateCount := 0
 	var terminalResult *antigravityCliJSONResponse
 	scanner := bufio.NewScanner(stdout)
@@ -218,6 +221,10 @@ func (p *AntigravityCliProvider) chatStreamEvents(
 			}
 			if nativeToolCall, ok := antigravityNativeToolCall(record.StepUpdate); ok && onChunk != nil {
 				onChunk(StreamChunk{ToolCalls: []ToolCall{nativeToolCall}})
+			}
+			if isAntigravityToolStepCompleted(record.StepUpdate) {
+				hadNativeTool = true
+				content.Reset()
 			}
 		case "result":
 			if record.Result == nil {
@@ -263,7 +270,10 @@ func (p *AntigravityCliProvider) chatStreamEvents(
 	// agy can put the final text entirely in step updates and leave the
 	// successful terminal response empty. Those updates are a valid response;
 	// only a response with neither terminal text nor deltas is retryable.
-	if gotDelta && strings.TrimSpace(terminalResult.Response) == "" {
+	// When native tool steps have run, use the isolated post-tool buffer as the
+	// terminal response so intermediate progress updates are omitted.
+	terminalHasToolCalls := len(classifyTextProtocolToolCalls(terminalResult.Response).ToolCalls) > 0
+	if gotDelta && !terminalHasToolCalls && (strings.TrimSpace(terminalResult.Response) == "" || (hadNativeTool && content.Len() > 0)) {
 		terminalResult.Response = content.String()
 	}
 
@@ -297,19 +307,16 @@ func (p *AntigravityCliProvider) chatStreamEvents(
 	return response, nil
 }
 
+// isAntigravityToolStepCompleted reports whether a step update represents a completed
+// or errored native tool execution that ends an intermediate agent step.
+func isAntigravityToolStepCompleted(stepUpdate antigravityCliStepUpdate) bool {
+	return stepUpdate.StepType == "tool" && (stepUpdate.State == "DONE" || stepUpdate.State == "ERROR")
+}
+
 // antigravityNativeToolCall translates an already-completed agy-native tool
 // step into a display-only stream call. Its output and error are deliberately
 // not represented here, so neither can reach user-facing chunk content.
-func antigravityNativeToolCall(stepUpdate struct {
-	TextDelta string `json:"text_delta"`
-	State     string `json:"state"`
-	StepType  string `json:"step_type"`
-	ToolName  string `json:"tool_name"`
-	ToolInfo  struct {
-		Name       string          `json:"name"`
-		Parameters json.RawMessage `json:"parameters"`
-	} `json:"tool_info"`
-}) (ToolCall, bool) {
+func antigravityNativeToolCall(stepUpdate antigravityCliStepUpdate) (ToolCall, bool) {
 	if stepUpdate.State != "DONE" || stepUpdate.StepType != "tool" {
 		return ToolCall{}, false
 	}

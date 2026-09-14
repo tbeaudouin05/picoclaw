@@ -857,3 +857,131 @@ while :; do :; done
 		t.Fatalf("ChatStreamEvents() took %s, want fast-fail in < 3s", elapsed)
 	}
 }
+
+func TestAntigravityCliChatStreamEventsResetsIntermediateBufferOnToolStepsAndKeepsFinalResponse(t *testing.T) {
+	stateDir := t.TempDir()
+	p := NewAntigravityCliProvider("")
+	output := "{\"event\":\"step_update\",\"step_update\":{\"text_delta\":\"I am verifying the printmode types in the background to analyze the output generation behavior. I will check the results once complete.\\n\"}}\n" +
+		"{\"event\":\"step_update\",\"step_update\":{\"state\":\"DONE\",\"step_type\":\"tool\",\"tool_name\":\"terminal\",\"tool_info\":{\"name\":\"run_command\",\"parameters\":{\"command\":\"inspect\"}}}}\n" +
+		"{\"event\":\"step_update\",\"step_update\":{\"text_delta\":\"I am waiting for the background inspection to complete.\\n\"}}\n" +
+		"{\"event\":\"step_update\",\"step_update\":{\"state\":\"DONE\",\"step_type\":\"tool\",\"tool_name\":\"terminal\",\"tool_info\":{\"name\":\"run_command\",\"parameters\":{\"command\":\"status\"}}}}\n" +
+		"{\"event\":\"step_update\",\"step_update\":{\"text_delta\":\"Yes, exactly. The screenshot shows 15 lines of intermediate progress commentary.\"}}\n" +
+		"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"\"}}\n"
+
+	p.command = createMockAntigravityCLI(t,
+		filepath.Join(stateDir, "args"), filepath.Join(stateDir, "print"), filepath.Join(stateDir, "cwd"),
+		output)
+
+	var chunks []StreamChunk
+	resp, err := p.ChatStreamEvents(context.Background(), []Message{{Role: "user", Content: "hello"}}, nil, "", nil, func(chunk StreamChunk) {
+		chunks = append(chunks, chunk)
+	})
+	if err != nil {
+		t.Fatalf("ChatStreamEvents() error = %v", err)
+	}
+
+	wantFinal := "Yes, exactly. The screenshot shows 15 lines of intermediate progress commentary."
+	if resp.Content != wantFinal {
+		t.Fatalf("resp.Content = %q, want only concluding response %q", resp.Content, wantFinal)
+	}
+	if strings.Contains(resp.Content, "verifying") || strings.Contains(resp.Content, "waiting") {
+		t.Fatalf("resp.Content leaked intermediate progress commentary: %q", resp.Content)
+	}
+
+	// Verify streamed chunks: text deltas before tools were streamed, but final turn delta only contains final turn text
+	if len(chunks) != 5 {
+		t.Fatalf("len(chunks) = %d, want 5 chunks", len(chunks))
+	}
+	if !strings.Contains(chunks[0].Content, "I am verifying") {
+		t.Fatalf("chunks[0] = %#v, want first turn text", chunks[0])
+	}
+	if len(chunks[1].ToolCalls) != 1 || chunks[1].ToolCalls[0].Name != "run_command" {
+		t.Fatalf("chunks[1] = %#v, want first tool call", chunks[1])
+	}
+	if !strings.Contains(chunks[2].Content, "I am waiting") {
+		t.Fatalf("chunks[2] = %#v, want second turn text", chunks[2])
+	}
+	if strings.Contains(chunks[2].Content, "I am verifying") {
+		t.Fatalf("chunks[2] leaked first turn text across tool boundary: %q", chunks[2].Content)
+	}
+	if len(chunks[3].ToolCalls) != 1 || chunks[3].ToolCalls[0].Name != "run_command" {
+		t.Fatalf("chunks[3] = %#v, want second tool call", chunks[3])
+	}
+	if chunks[4].Content != wantFinal {
+		t.Fatalf("chunks[4] = %#v, want isolated final turn text %q", chunks[4], wantFinal)
+	}
+}
+
+func TestAntigravityCliChatMultiStepRunDropsIntermediateCommentaryWhenNotStreaming(t *testing.T) {
+	stateDir := t.TempDir()
+	p := NewAntigravityCliProvider("")
+	output := "{\"event\":\"step_update\",\"step_update\":{\"text_delta\":\"I am verifying the printmode types in the background to analyze the output generation behavior.\\n\"}}\n" +
+		"{\"event\":\"step_update\",\"step_update\":{\"state\":\"DONE\",\"step_type\":\"tool\",\"tool_name\":\"terminal\",\"tool_info\":{\"name\":\"run_command\",\"parameters\":{\"command\":\"inspect\"}}}}\n" +
+		"{\"event\":\"step_update\",\"step_update\":{\"text_delta\":\"I am waiting for the background inspection to complete.\\n\"}}\n" +
+		"{\"event\":\"step_update\",\"step_update\":{\"state\":\"DONE\",\"step_type\":\"tool\",\"tool_name\":\"terminal\",\"tool_info\":{\"name\":\"run_command\",\"parameters\":{\"command\":\"status\"}}}}\n" +
+		"{\"event\":\"step_update\",\"step_update\":{\"text_delta\":\"Yes, exactly. Concluding answer only.\"}}\n" +
+		"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"\"}}\n"
+
+	p.command = createMockAntigravityCLI(t,
+		filepath.Join(stateDir, "args"), filepath.Join(stateDir, "print"), filepath.Join(stateDir, "cwd"),
+		output)
+
+	resp, err := p.Chat(context.Background(), []Message{{Role: "user", Content: "hello"}}, nil, "", nil)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	wantFinal := "Yes, exactly. Concluding answer only."
+	if resp.Content != wantFinal {
+		t.Fatalf("resp.Content = %q, want only concluding response %q", resp.Content, wantFinal)
+	}
+	if strings.Contains(resp.Content, "verifying") || strings.Contains(resp.Content, "waiting") {
+		t.Fatalf("resp.Content leaked intermediate progress commentary: %q", resp.Content)
+	}
+}
+
+func TestAntigravityCliChatStreamEventsMultiStepRunOverwritesNonEmptyTerminalResponseWithFinalTurn(t *testing.T) {
+	stateDir := t.TempDir()
+	p := NewAntigravityCliProvider("")
+	output := "{\"event\":\"step_update\",\"step_update\":{\"text_delta\":\"Running checks...\\n\"}}\n" +
+		"{\"event\":\"step_update\",\"step_update\":{\"state\":\"DONE\",\"step_type\":\"tool\",\"tool_name\":\"terminal\",\"tool_info\":{\"name\":\"run_command\",\"parameters\":{\"command\":\"check\"}}}}\n" +
+		"{\"event\":\"step_update\",\"step_update\":{\"text_delta\":\"Final conclusion.\"}}\n" +
+		"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"Running checks...\\nFinal conclusion.\"}}\n"
+
+	p.command = createMockAntigravityCLI(t,
+		filepath.Join(stateDir, "args"), filepath.Join(stateDir, "print"), filepath.Join(stateDir, "cwd"),
+		output)
+
+	resp, err := p.ChatStreamEvents(context.Background(), []Message{{Role: "user", Content: "hello"}}, nil, "", nil, nil)
+	if err != nil {
+		t.Fatalf("ChatStreamEvents() error = %v", err)
+	}
+	if resp.Content != "Final conclusion." {
+		t.Fatalf("resp.Content = %q, want isolated final turn %q", resp.Content, "Final conclusion.")
+	}
+}
+
+func TestAntigravityCliChatStreamEventsToolStepErrorStateResetsBuffer(t *testing.T) {
+	stateDir := t.TempDir()
+	p := NewAntigravityCliProvider("")
+	output := "{\"event\":\"step_update\",\"step_update\":{\"text_delta\":\"Attempting action...\\n\"}}\n" +
+		"{\"event\":\"step_update\",\"step_update\":{\"state\":\"ERROR\",\"step_type\":\"tool\",\"tool_name\":\"terminal\",\"tool_info\":{\"name\":\"run_command\",\"parameters\":{\"command\":\"failing\"}}}}\n" +
+		"{\"event\":\"step_update\",\"step_update\":{\"text_delta\":\"Recovered from error and finished.\"}}\n" +
+		"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"\"}}\n"
+
+	p.command = createMockAntigravityCLI(t,
+		filepath.Join(stateDir, "args"), filepath.Join(stateDir, "print"), filepath.Join(stateDir, "cwd"),
+		output)
+
+	resp, err := p.Chat(context.Background(), []Message{{Role: "user", Content: "hello"}}, nil, "", nil)
+	if err != nil {
+		t.Fatalf("Chat() error = %v", err)
+	}
+	wantFinal := "Recovered from error and finished."
+	if resp.Content != wantFinal {
+		t.Fatalf("resp.Content = %q, want %q", resp.Content, wantFinal)
+	}
+	if strings.Contains(resp.Content, "Attempting action") {
+		t.Fatalf("resp.Content leaked pre-error commentary: %q", resp.Content)
+	}
+}
+
