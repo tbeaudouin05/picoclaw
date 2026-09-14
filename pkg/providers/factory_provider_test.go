@@ -1577,8 +1577,10 @@ func TestCreateProviderFromConfig_ToolSchemaTransformWrapsProvider(t *testing.T)
 	if modelID != "claude-sonnet-4.6" {
 		t.Fatalf("modelID = %q, want %q", modelID, "claude-sonnet-4.6")
 	}
-	if _, ok := provider.(*toolSchemaTransformProvider); !ok {
-		t.Fatalf("provider = %T, want *toolSchemaTransformProvider", provider)
+	switch provider.(type) {
+	case *toolSchemaTransformProvider, *toolSchemaStreamingProvider:
+	default:
+		t.Fatalf("provider = %T, want *toolSchemaTransformProvider or *toolSchemaStreamingProvider", provider)
 	}
 }
 

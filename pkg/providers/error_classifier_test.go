@@ -421,6 +421,23 @@ func TestClassifyError_AntigravityCliEmptyResponse(t *testing.T) {
 	}
 }
 
+func TestClassifyError_AntigravityCliEmptyFunctionCall(t *testing.T) {
+	for _, msg := range []string{
+		"Function call is empty - no input to parse",
+		"antigravity cli returned ERROR: Function call is empty - no input to parse",
+		"function call is empty",
+		"antigravity-cli: failed to parse tool call: Function call is empty - no input to parse",
+	} {
+		result := ClassifyError(errors.New(msg), "antigravity-cli", "gemini-3.8-flash-high")
+		if result == nil {
+			t.Fatalf("expected error %q to be classified", msg)
+		}
+		if result.Reason != FailoverUnknown || !result.IsRetriable() {
+			t.Fatalf("result for %q = %#v, want retriable unknown failure", msg, result)
+		}
+	}
+}
+
 func TestClassifyError_AntigravityCliNativeToolPermissionDenied(t *testing.T) {
 	for _, msg := range []string{
 		"antigravity cli native_tool_permission_denied",
