@@ -112,17 +112,21 @@ fi
 	return script
 }
 
-func createMockAntigravityEmptyFunctionCallRepairCLI(t *testing.T, requestsFile string, exitCode int, alwaysFail bool) string {
+func createMockAntigravityEmptyFunctionCallRepairCLI(t *testing.T, requestsFile string, exitCode int, alwaysFail bool, diagnostic ...string) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("mock CLI scripts not supported on Windows")
+	}
+	diag := "Function call is empty - no input to parse"
+	if len(diagnostic) > 0 && diagnostic[0] != "" {
+		diag = diagnostic[0]
 	}
 	dir := t.TempDir()
 	countFile := filepath.Join(dir, "count")
 	script := filepath.Join(dir, "agy")
 	secondTurn := `printf '{"event":"result","result":{"status":"SUCCESS","response":"repaired"}}\n'`
 	if alwaysFail {
-		secondTurn = fmt.Sprintf("printf '{\"event\":\"result\",\"result\":{\"status\":\"ERROR\",\"error\":\"Function call is empty - no input to parse\"}}\\n'\nexit %d", exitCode)
+		secondTurn = fmt.Sprintf("printf '{\"event\":\"result\",\"result\":{\"status\":\"ERROR\",\"error\":\"%s\"}}\\n'\nexit %d", diag, exitCode)
 	}
 	contents := fmt.Sprintf(`#!/bin/sh
 count=0
@@ -131,12 +135,12 @@ count=$((count + 1))
 printf '%%s' "$count" > %q
 cat >> %q
 if [ "$count" -eq 1 ]; then
-  printf '{"event":"result","result":{"status":"ERROR","error":"Function call is empty - no input to parse"}}\n'
+  printf '{"event":"result","result":{"status":"ERROR","error":"%s"}}\n'
   exit %d
 else
   %s
 fi
-`, countFile, countFile, countFile, requestsFile, exitCode, secondTurn)
+`, countFile, countFile, countFile, requestsFile, diag, exitCode, secondTurn)
 	if err := os.WriteFile(script, []byte(contents), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -332,28 +336,45 @@ func TestAntigravityCliChatRetriesEmptyFunctionCallOnce(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("mock CLI scripts not supported on Windows")
 	}
-	requestsFile := filepath.Join(t.TempDir(), "requests")
-	p := NewAntigravityCliProvider("")
-	p.command = createMockAntigravityEmptyFunctionCallRepairCLI(t, requestsFile, 0, false)
+	tests := []struct {
+		name       string
+		diagnostic string
+	}{
+		{
+			name:       "empty function call",
+			diagnostic: "Function call is empty - no input to parse",
+		},
+		{
+			name:       "malformed function call",
+			diagnostic: "Your previous response contained an improperly formatted function call",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			requestsFile := filepath.Join(t.TempDir(), "requests")
+			p := NewAntigravityCliProvider("")
+			p.command = createMockAntigravityEmptyFunctionCallRepairCLI(t, requestsFile, 0, false, tc.diagnostic)
 
-	resp, err := p.Chat(context.Background(), []Message{{Role: "user", Content: "inspect this"}}, []ToolDefinition{{
-		Type: "function", Function: ToolFunctionDefinition{Name: "terminal"},
-	}}, "", nil)
-	if err != nil {
-		t.Fatalf("Chat() error = %v", err)
-	}
-	if resp.Content != "repaired" {
-		t.Fatalf("response = %#v, want repaired response", resp)
-	}
-	requests, err := os.ReadFile(requestsFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := strings.Count(string(requests), "\n"); got != 2 {
-		t.Fatalf("request count = %d, want one guarded retry", got)
-	}
-	if got := strings.Count(string(requests), antigravityCLIEmptyFunctionCallRepairInstruction); got != 1 {
-		t.Fatalf("repair instruction count = %d, want exactly one", got)
+			resp, err := p.Chat(context.Background(), []Message{{Role: "user", Content: "inspect this"}}, []ToolDefinition{{
+				Type: "function", Function: ToolFunctionDefinition{Name: "terminal"},
+			}}, "", nil)
+			if err != nil {
+				t.Fatalf("Chat() error = %v", err)
+			}
+			if resp.Content != "repaired" {
+				t.Fatalf("response = %#v, want repaired response", resp)
+			}
+			requests, err := os.ReadFile(requestsFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Count(string(requests), "\n"); got != 2 {
+				t.Fatalf("request count = %d, want one guarded retry", got)
+			}
+			if got := strings.Count(string(requests), antigravityCLIEmptyFunctionCallRepairInstruction); got != 1 {
+				t.Fatalf("repair instruction count = %d, want exactly one", got)
+			}
+		})
 	}
 }
 
@@ -361,9 +382,99 @@ func TestAntigravityCliChatRetriesEmptyFunctionCallWithNonZeroExit(t *testing.T)
 	if runtime.GOOS == "windows" {
 		t.Skip("mock CLI scripts not supported on Windows")
 	}
+	tests := []struct {
+		name       string
+		diagnostic string
+	}{
+		{
+			name:       "empty function call",
+			diagnostic: "Function call is empty - no input to parse",
+		},
+		{
+			name:       "malformed function call",
+			diagnostic: "Your previous response contained an improperly formatted function call",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			requestsFile := filepath.Join(t.TempDir(), "requests")
+			p := NewAntigravityCliProvider("")
+			p.command = createMockAntigravityEmptyFunctionCallRepairCLI(t, requestsFile, 1, false, tc.diagnostic)
+
+			resp, err := p.Chat(context.Background(), []Message{{Role: "user", Content: "inspect this"}}, []ToolDefinition{{
+				Type: "function", Function: ToolFunctionDefinition{Name: "terminal"},
+			}}, "", nil)
+			if err != nil {
+				t.Fatalf("Chat() error = %v", err)
+			}
+			if resp.Content != "repaired" {
+				t.Fatalf("response = %#v, want repaired response", resp)
+			}
+			requests, err := os.ReadFile(requestsFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Count(string(requests), "\n"); got != 2 {
+				t.Fatalf("request count = %d, want one guarded retry", got)
+			}
+			if got := strings.Count(string(requests), antigravityCLIEmptyFunctionCallRepairInstruction); got != 1 {
+				t.Fatalf("repair instruction count = %d, want exactly one", got)
+			}
+		})
+	}
+}
+
+func TestAntigravityCliChatEmptyFunctionCallPreservesErrorAfterRetryFails(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock CLI scripts not supported on Windows")
+	}
+	tests := []struct {
+		name       string
+		diagnostic string
+		wantSubstr string
+	}{
+		{
+			name:       "empty function call",
+			diagnostic: "Function call is empty - no input to parse",
+			wantSubstr: "function call is empty",
+		},
+		{
+			name:       "malformed function call",
+			diagnostic: "Your previous response contained an improperly formatted function call",
+			wantSubstr: "improperly formatted function call",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			requestsFile := filepath.Join(t.TempDir(), "requests")
+			p := NewAntigravityCliProvider("")
+			p.command = createMockAntigravityEmptyFunctionCallRepairCLI(t, requestsFile, 1, true, tc.diagnostic)
+
+			_, err := p.Chat(context.Background(), []Message{{Role: "user", Content: "inspect this"}}, nil, "", nil)
+			if err == nil {
+				t.Fatal("Chat() expected error")
+			}
+			if !strings.Contains(strings.ToLower(err.Error()), tc.wantSubstr) {
+				t.Fatalf("Chat() error = %v, want error to contain %q", err, tc.wantSubstr)
+			}
+			requests, err := os.ReadFile(requestsFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Count(string(requests), "\n"); got != 2 {
+				t.Fatalf("request count = %d, want exactly one guarded retry before failing", got)
+			}
+		})
+	}
+}
+
+func TestAntigravityCliChatRetriesMalformedFunctionCallOnce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock CLI scripts not supported on Windows")
+	}
 	requestsFile := filepath.Join(t.TempDir(), "requests")
 	p := NewAntigravityCliProvider("")
-	p.command = createMockAntigravityEmptyFunctionCallRepairCLI(t, requestsFile, 1, false)
+	p.command = createMockAntigravityEmptyFunctionCallRepairCLI(t, requestsFile, 0, false, "Your previous response contained an improperly formatted function call")
 
 	resp, err := p.Chat(context.Background(), []Message{{Role: "user", Content: "inspect this"}}, []ToolDefinition{{
 		Type: "function", Function: ToolFunctionDefinition{Name: "terminal"},
@@ -386,20 +497,20 @@ func TestAntigravityCliChatRetriesEmptyFunctionCallWithNonZeroExit(t *testing.T)
 	}
 }
 
-func TestAntigravityCliChatEmptyFunctionCallPreservesErrorAfterRetryFails(t *testing.T) {
+func TestAntigravityCliChatMalformedFunctionCallPreservesErrorAfterRetryFails(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("mock CLI scripts not supported on Windows")
 	}
 	requestsFile := filepath.Join(t.TempDir(), "requests")
 	p := NewAntigravityCliProvider("")
-	p.command = createMockAntigravityEmptyFunctionCallRepairCLI(t, requestsFile, 1, true)
+	p.command = createMockAntigravityEmptyFunctionCallRepairCLI(t, requestsFile, 1, true, "Your previous response contained an improperly formatted function call")
 
 	_, err := p.Chat(context.Background(), []Message{{Role: "user", Content: "inspect this"}}, nil, "", nil)
 	if err == nil {
 		t.Fatal("Chat() expected error")
 	}
-	if !strings.Contains(strings.ToLower(err.Error()), "function call is empty") {
-		t.Fatalf("Chat() error = %v, want error to contain 'function call is empty'", err)
+	if !strings.Contains(strings.ToLower(err.Error()), "improperly formatted function call") {
+		t.Fatalf("Chat() error = %v, want error to contain 'improperly formatted function call'", err)
 	}
 	requests, err := os.ReadFile(requestsFile)
 	if err != nil {
@@ -407,6 +518,70 @@ func TestAntigravityCliChatEmptyFunctionCallPreservesErrorAfterRetryFails(t *tes
 	}
 	if got := strings.Count(string(requests), "\n"); got != 2 {
 		t.Fatalf("request count = %d, want exactly one guarded retry before failing", got)
+	}
+}
+
+func TestIsAntigravityCLIEmptyFunctionCall(t *testing.T) {
+	tests := []struct {
+		name      string
+		result    *antigravityCliJSONResponse
+		stderr    string
+		rawOutput string
+		want      bool
+	}{
+		{
+			name:   "result error empty function call",
+			result: &antigravityCliJSONResponse{Error: "Function call is empty - no input to parse"},
+			want:   true,
+		},
+		{
+			name:   "result error malformed function call",
+			result: &antigravityCliJSONResponse{Error: "Your previous response contained an improperly formatted function call"},
+			want:   true,
+		},
+		{
+			name:   "result response empty function call",
+			result: &antigravityCliJSONResponse{Response: "Error: Function call is empty"},
+			want:   true,
+		},
+		{
+			name:   "result response malformed function call",
+			result: &antigravityCliJSONResponse{Response: "improperly formatted function call"},
+			want:   true,
+		},
+		{
+			name:   "stderr empty function call",
+			stderr: "error: function call is empty",
+			want:   true,
+		},
+		{
+			name:   "stderr malformed function call",
+			stderr: "error: improperly formatted function call detected",
+			want:   true,
+		},
+		{
+			name:      "raw output empty function call",
+			rawOutput: "event: result\nerror: function call is empty\n",
+			want:      true,
+		},
+		{
+			name:      "raw output malformed function call",
+			rawOutput: "event: result\nerror: improperly formatted function call\n",
+			want:      true,
+		},
+		{
+			name:   "unrelated error",
+			result: &antigravityCliJSONResponse{Error: "rate limit exceeded"},
+			stderr: "rate limit exceeded",
+			want:   false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isAntigravityCLIEmptyFunctionCall(tc.result, tc.stderr, tc.rawOutput); got != tc.want {
+				t.Fatalf("isAntigravityCLIEmptyFunctionCall() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

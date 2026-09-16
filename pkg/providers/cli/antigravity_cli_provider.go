@@ -449,17 +449,21 @@ func isAntigravityCLINativeToolPermissionDenied(stderr string) bool {
 // or malformed native function call.
 func isAntigravityCLIEmptyFunctionCall(result *antigravityCliJSONResponse, stderr, rawOutput string) bool {
 	if result != nil {
-		if strings.Contains(strings.ToLower(result.Error), "function call is empty") {
+		if strings.Contains(strings.ToLower(result.Error), "function call is empty") ||
+			strings.Contains(strings.ToLower(result.Error), "improperly formatted function call") {
 			return true
 		}
-		if strings.Contains(strings.ToLower(result.Response), "function call is empty") {
+		if strings.Contains(strings.ToLower(result.Response), "function call is empty") ||
+			strings.Contains(strings.ToLower(result.Response), "improperly formatted function call") {
 			return true
 		}
 	}
-	if strings.Contains(strings.ToLower(stderr), "function call is empty") {
+	if strings.Contains(strings.ToLower(stderr), "function call is empty") ||
+		strings.Contains(strings.ToLower(stderr), "improperly formatted function call") {
 		return true
 	}
-	if strings.Contains(strings.ToLower(rawOutput), "function call is empty") {
+	if strings.Contains(strings.ToLower(rawOutput), "function call is empty") ||
+		strings.Contains(strings.ToLower(rawOutput), "improperly formatted function call") {
 		return true
 	}
 	return false
