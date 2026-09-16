@@ -427,6 +427,8 @@ func TestClassifyError_AntigravityCliEmptyFunctionCall(t *testing.T) {
 		"antigravity cli returned ERROR: Function call is empty - no input to parse",
 		"function call is empty",
 		"antigravity-cli: failed to parse tool call: Function call is empty - no input to parse",
+		"Your previous response contained an improperly formatted function call",
+		"antigravity cli error: Your previous response contained an improperly formatted function call",
 	} {
 		result := ClassifyError(errors.New(msg), "antigravity-cli", "gemini-3.8-flash-high")
 		if result == nil {

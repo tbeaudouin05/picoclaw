@@ -332,7 +332,7 @@ func classifyByMessage(msg string) FailoverReason {
 	}
 	// agy can fail when the underlying model emits an empty tool call during multi-step turns.
 	// That is a provider failure, not a user formatting error, and should trigger fallback.
-	if strings.Contains(msg, "function call is empty") {
+	if strings.Contains(msg, "function call is empty") || strings.Contains(msg, "improperly formatted function call") {
 		return FailoverUnknown
 	}
 	return ""
