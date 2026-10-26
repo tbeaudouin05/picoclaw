@@ -794,6 +794,82 @@ func TestResolveCodexModel(t *testing.T) {
 	}
 }
 
+func TestCodexProvider_ReasoningToolRoundTripJSON(t *testing.T) {
+	for _, summary := range [][]any{{}, {map[string]any{"type": "summary_text", "text": "check"}}} {
+		t.Run(fmt.Sprintf("summary_length=%d", len(summary)), func(t *testing.T) {
+			var requests []map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Errorf("decode request: %v", err)
+					http.Error(w, "invalid json", http.StatusBadRequest)
+					return
+				}
+				requests = append(requests, body)
+				writeCompletedSSE(w, map[string]any{
+					"id": "resp_test", "object": "response", "status": "completed",
+					"output": []any{
+						map[string]any{
+							"type": "reasoning", "id": "rs_round",
+							"summary": summary, "encrypted_content": "encrypted-round",
+						},
+						map[string]any{
+							"type": "function_call", "id": "fc_date", "call_id": "call_date",
+							"name": "date", "arguments": `{}`, "status": "completed",
+						},
+					},
+				})
+			}))
+			defer server.Close()
+
+			p := NewCodexProvider("test-token", "test-account")
+			p.client = createOpenAITestClient(server.URL, "test-token", "test-account")
+			messages := []Message{{Role: "user", Content: "What is the date?"}}
+			first, err := p.Chat(t.Context(), messages, nil, "gpt-5.4", nil)
+			if err != nil {
+				t.Fatalf("first Chat: %v", err)
+			}
+			if len(first.ToolCalls) != 1 || len(first.ReasoningItems) != 1 {
+				t.Fatalf("missing tool call or reasoning: %+v", first)
+			}
+			messages = append(messages, Message{
+				Role: "assistant", ToolCalls: first.ToolCalls, ReasoningItems: first.ReasoningItems,
+			}, Message{Role: "tool", ToolCallID: first.ToolCalls[0].ID, Content: "2026-10-26"})
+			if _, err := p.Chat(t.Context(), messages, nil, "gpt-5.4", nil); err != nil {
+				t.Fatalf("second Chat: %v", err)
+			}
+			if len(requests) != 2 {
+				t.Fatalf("requests = %d, want 2", len(requests))
+			}
+			input, ok := requests[1]["input"].([]any)
+			if !ok || len(input) != 4 {
+				t.Fatalf("input = %#v, want user, reasoning, function call, tool output", requests[1]["input"])
+			}
+			reasoning := input[1].(map[string]any)
+			if reasoning["type"] != "reasoning" || reasoning["id"] != "rs_round" || reasoning["encrypted_content"] != "encrypted-round" {
+				t.Fatalf("reasoning = %#v", reasoning)
+			}
+			gotSummary, err := json.Marshal(reasoning["summary"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantSummary, err := json.Marshal(summary)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(gotSummary) != string(wantSummary) {
+				t.Fatalf("summary = %s, want %s", gotSummary, wantSummary)
+			}
+			if call := input[2].(map[string]any); call["type"] != "function_call" || call["call_id"] != "call_date" || call["name"] != "date" || call["arguments"] != `{}` {
+				t.Fatalf("function call = %#v", call)
+			}
+			if output := input[3].(map[string]any); output["type"] != "function_call_output" || output["call_id"] != "call_date" || output["output"] != "2026-10-26" {
+				t.Fatalf("tool output = %#v", output)
+			}
+		})
+	}
+}
+
 func createOpenAITestClient(baseURL, token, accountID string) *openai.Client {
 	opts := []openaiopt.RequestOption{
 		openaiopt.WithBaseURL(baseURL),

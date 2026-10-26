@@ -142,76 +142,91 @@ func TestProviderChat_ResponsesRequestAndResponse(t *testing.T) {
 }
 
 func TestProviderChat_ReplaysReasoningAndFunctionCallOutput(t *testing.T) {
-	var requests []map[string]any
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("decode request: %v", err)
-		}
-		requests = append(requests, body)
-		writeResponse(t, w, map[string]any{
-			"id":     fmt.Sprintf("resp_%d", len(requests)),
-			"object": "response",
-			"status": "completed",
-			"output": []any{map[string]any{
-				"type":              "reasoning",
-				"id":                "rs_round",
-				"summary":           []any{map[string]any{"type": "summary_text", "text": "check"}},
-				"encrypted_content": "encrypted-round",
-			}},
+	for _, summary := range [][]any{{}, {map[string]any{"type": "summary_text", "text": "check"}}} {
+		t.Run(fmt.Sprintf("summary_length=%d", len(summary)), func(t *testing.T) {
+			var requests []map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Fatalf("decode request: %v", err)
+				}
+				requests = append(requests, body)
+				writeResponse(t, w, map[string]any{
+					"id":     fmt.Sprintf("resp_%d", len(requests)),
+					"object": "response",
+					"status": "completed",
+					"output": []any{map[string]any{
+						"type":              "reasoning",
+						"id":                "rs_round",
+						"summary":           summary,
+						"encrypted_content": "encrypted-round",
+					}},
+				})
+			}))
+			defer server.Close()
+
+			p := NewProvider("key", server.URL, "", "")
+			first, err := p.Chat(t.Context(), []Message{{Role: "user", Content: "weather?"}}, nil, "gpt-5.4", nil)
+			if err != nil {
+				t.Fatalf("first Chat() error = %v", err)
+			}
+			_, err = p.Chat(
+				t.Context(),
+				[]Message{
+					{Role: "user", Content: "weather?"},
+					{
+						Role:                      "assistant",
+						Content:                   "I will check",
+						ReasoningContent:          first.ReasoningContent,
+						ReasoningID:               first.ReasoningID,
+						ReasoningEncryptedContent: first.ReasoningEncryptedContent,
+						ToolCalls: []protocoltypes.ToolCall{{
+							ID:        "call_weather",
+							Name:      "get_weather",
+							Arguments: map[string]any{"city": "Seattle"},
+						}},
+					},
+					{Role: "tool", ToolCallID: "call_weather", Content: `{"temp":72}`},
+				},
+				nil,
+				"gpt-5.4",
+				nil,
+			)
+			if err != nil {
+				t.Fatalf("second Chat() error = %v", err)
+			}
+			if len(requests) != 2 {
+				t.Fatalf("request count = %d, want 2", len(requests))
+			}
+
+			input, ok := requests[1]["input"].([]any)
+			if !ok {
+				t.Fatalf("second input = %#v, want array", requests[1]["input"])
+			}
+			if len(input) != 5 {
+				t.Fatalf("second input length = %d, want 5", len(input))
+			}
+			if got := input[1].(map[string]any); got["type"] != "reasoning" || got["id"] != "rs_round" || got["encrypted_content"] != "encrypted-round" {
+				t.Fatalf("reasoning replay item = %#v", got)
+			}
+			gotSummary, err := json.Marshal(input[1].(map[string]any)["summary"])
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantSummary, err := json.Marshal(summary)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(gotSummary) != string(wantSummary) {
+				t.Fatalf("summary = %s, want %s", gotSummary, wantSummary)
+			}
+			if got := input[3].(map[string]any); got["type"] != "function_call" || got["call_id"] != "call_weather" {
+				t.Fatalf("function call item = %#v", got)
+			}
+			if got := input[4].(map[string]any); got["type"] != "function_call_output" || got["call_id"] != "call_weather" || got["output"] != `{"temp":72}` {
+				t.Fatalf("function call output item = %#v", got)
+			}
 		})
-	}))
-	defer server.Close()
-
-	p := NewProvider("key", server.URL, "", "")
-	first, err := p.Chat(t.Context(), []Message{{Role: "user", Content: "weather?"}}, nil, "gpt-5.4", nil)
-	if err != nil {
-		t.Fatalf("first Chat() error = %v", err)
-	}
-	_, err = p.Chat(
-		t.Context(),
-		[]Message{
-			{Role: "user", Content: "weather?"},
-			{
-				Role:                      "assistant",
-				Content:                   "I will check",
-				ReasoningContent:          first.ReasoningContent,
-				ReasoningID:               first.ReasoningID,
-				ReasoningEncryptedContent: first.ReasoningEncryptedContent,
-				ToolCalls: []protocoltypes.ToolCall{{
-					ID:        "call_weather",
-					Name:      "get_weather",
-					Arguments: map[string]any{"city": "Seattle"},
-				}},
-			},
-			{Role: "tool", ToolCallID: "call_weather", Content: `{"temp":72}`},
-		},
-		nil,
-		"gpt-5.4",
-		nil,
-	)
-	if err != nil {
-		t.Fatalf("second Chat() error = %v", err)
-	}
-	if len(requests) != 2 {
-		t.Fatalf("request count = %d, want 2", len(requests))
-	}
-
-	input, ok := requests[1]["input"].([]any)
-	if !ok {
-		t.Fatalf("second input = %#v, want array", requests[1]["input"])
-	}
-	if len(input) != 5 {
-		t.Fatalf("second input length = %d, want 5", len(input))
-	}
-	if got := input[1].(map[string]any); got["type"] != "reasoning" || got["id"] != "rs_round" || got["encrypted_content"] != "encrypted-round" {
-		t.Fatalf("reasoning replay item = %#v", got)
-	}
-	if got := input[3].(map[string]any); got["type"] != "function_call" || got["call_id"] != "call_weather" {
-		t.Fatalf("function call item = %#v", got)
-	}
-	if got := input[4].(map[string]any); got["type"] != "function_call_output" || got["call_id"] != "call_weather" || got["output"] != `{"temp":72}` {
-		t.Fatalf("function call output item = %#v", got)
 	}
 }
 

@@ -153,6 +153,52 @@ func TestTranslateMessages_ReplaysEncryptedReasoningBeforeAssistantOutput(t *tes
 	}
 }
 
+// Check the SDK's custom JSON marshaler, since a nil Summary is omitted on the wire.
+func TestTranslateMessages_ReasoningSummaryJSON(t *testing.T) {
+	for _, summary := range []string{"", "Check the date"} {
+		for _, legacy := range []bool{false, true} {
+			t.Run(fmt.Sprintf("summary=%q/legacy=%t", summary, legacy), func(t *testing.T) {
+				msg := protocoltypes.Message{Role: "assistant", Content: "Done"}
+				if legacy {
+					msg.ReasoningID = "rs_test"
+					msg.ReasoningContent = summary
+					msg.ReasoningEncryptedContent = "opaque-test"
+				} else {
+					msg.ReasoningItems = []protocoltypes.ReasoningItem{{
+						ID: "rs_test", Summary: summary, EncryptedContent: "opaque-test",
+					}}
+				}
+				input, _ := TranslateMessages([]protocoltypes.Message{msg})
+				raw, err := json.Marshal(input)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var items []map[string]json.RawMessage
+				if err := json.Unmarshal(raw, &items); err != nil {
+					t.Fatal(err)
+				}
+				if len(items) != 2 {
+					t.Fatalf("input = %s, want reasoning followed by assistant output", raw)
+				}
+				wantSummary := `[]`
+				if summary != "" {
+					wantSummary = `[{"text":"Check the date","type":"summary_text"}]`
+				}
+				if got := string(items[0]["summary"]); got != wantSummary {
+					t.Errorf("summary JSON = %q, want %s; input = %s", got, wantSummary, raw)
+				}
+				for key, want := range map[string]string{
+					"type": `"reasoning"`, "id": `"rs_test"`, "encrypted_content": `"opaque-test"`,
+				} {
+					if got := string(items[0][key]); got != want {
+						t.Errorf("%s = %s, want %s", key, got, want)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestTranslateMessages_AssistantWithoutToolCalls(t *testing.T) {
 	msgs := []protocoltypes.Message{
 		{Role: "assistant", Content: "Sure thing"},

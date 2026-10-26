@@ -64,8 +64,10 @@ func TranslateMessages(messages []protocoltypes.Message) (input responses.Respon
 				if item.EncryptedContent == "" {
 					continue
 				}
+				// A non-nil slice keeps the required summary on the wire despite SDK omitzero.
 				reasoning := &responses.ResponseReasoningItemParam{
 					ID:               item.ID,
+					Summary:          []responses.ResponseReasoningItemSummaryParam{},
 					EncryptedContent: openai.Opt(item.EncryptedContent),
 				}
 				if item.Summary != "" {
