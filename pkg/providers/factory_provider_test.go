@@ -146,6 +146,52 @@ func TestCreateProviderFromConfig_OpenAI(t *testing.T) {
 	if modelID != "gpt-4o" {
 		t.Errorf("modelID = %q, want %q", modelID, "gpt-4o")
 	}
+	if _, ok := provider.(*HTTPProvider); !ok {
+		t.Fatalf("explicit OpenAI api_base should use Chat Completions HTTPProvider, got %T", provider)
+	}
+}
+
+func TestCreateProviderFromConfig_OpenAIDefaultUsesResponsesProvider(t *testing.T) {
+	cfg := &config.ModelConfig{
+		ModelName: "test-openai-default",
+		Model:     "openai/gpt-5.4",
+	}
+	cfg.SetAPIKey("test-key")
+
+	provider, modelID, err := CreateProviderFromConfig(cfg)
+	if err != nil {
+		t.Fatalf("CreateProviderFromConfig() error = %v", err)
+	}
+	if modelID != "gpt-5.4" {
+		t.Fatalf("modelID = %q, want gpt-5.4", modelID)
+	}
+	if _, ok := provider.(*OpenAIProvider); !ok {
+		t.Fatalf("OpenAI default route should use OpenAIProvider, got %T", provider)
+	}
+}
+
+func TestCreateProviderFromConfig_OpenAIOfficialBaseUsesResponsesProvider(t *testing.T) {
+	for _, apiBase := range []string{
+		"https://api.openai.com/v1",
+		"https://api.openai.com/v1/",
+	} {
+		t.Run(apiBase, func(t *testing.T) {
+			cfg := &config.ModelConfig{
+				ModelName: "test-openai-official",
+				Model:     "openai/gpt-5.4",
+				APIBase:   apiBase,
+			}
+			cfg.SetAPIKey("test-key")
+
+			provider, _, err := CreateProviderFromConfig(cfg)
+			if err != nil {
+				t.Fatalf("CreateProviderFromConfig() error = %v", err)
+			}
+			if _, ok := provider.(*OpenAIProvider); !ok {
+				t.Fatalf("official OpenAI api_base %q should use Responses provider, got %T", apiBase, provider)
+			}
+		})
+	}
 }
 
 func TestCreateProviderFromConfig_UsesExplicitProvider(t *testing.T) {
@@ -221,7 +267,6 @@ func TestCreateProviderFromConfig_DefaultAPIBase(t *testing.T) {
 		name     string
 		protocol string
 	}{
-		{"openai", "openai"},
 		{"venice", "venice"},
 		{"nearai", "nearai"},
 		{"groq", "groq"},

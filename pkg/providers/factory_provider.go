@@ -8,6 +8,7 @@ package providers
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -83,6 +84,21 @@ func ResolveAPIBase(cfg *config.ModelConfig) string {
 	return strings.TrimRight(getDefaultAPIBase(protocol), "/")
 }
 
+func isOfficialOpenAIResponsesBase(apiBase string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(apiBase))
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(parsed.Scheme, "https") &&
+		strings.EqualFold(parsed.Hostname(), "api.openai.com") &&
+		parsed.Port() == "" &&
+		parsed.User == nil &&
+		parsed.RawQuery == "" &&
+		parsed.Fragment == "" &&
+		parsed.RawPath == "" &&
+		(parsed.Path == "/v1" || parsed.Path == "/v1/")
+}
+
 // CreateProviderFromConfig creates a provider based on the ModelConfig.
 // It uses ExtractProtocol to determine which provider to create.
 // Supported protocol families include OpenAI-compatible prefixes (e.g., openai, openrouter, groq),
@@ -117,13 +133,29 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 			return finalizeProviderFromConfig(provider, modelID, cfg)
 		}
 		// OpenAI with API key
-		if cfg.APIKey() == "" && cfg.APIBase == "" {
+		if cfg.APIKey() == "" && strings.TrimSpace(cfg.APIBase) == "" {
 			return nil, "", fmt.Errorf("api_key or api_base is required for HTTP-based protocol %q", protocol)
 		}
-		apiBase := cfg.APIBase
-		if apiBase == "" {
-			apiBase = getDefaultAPIBase(protocol)
+		// The official endpoint uses the native Responses API whether it is
+		// implicit or explicitly configured. Other explicit bases remain on the
+		// legacy Chat Completions provider for custom gateway compatibility.
+		if strings.TrimSpace(cfg.APIBase) == "" || isOfficialOpenAIResponsesBase(cfg.APIBase) {
+			apiBase := strings.TrimSpace(cfg.APIBase)
+			if apiBase == "" {
+				apiBase = getDefaultAPIBase(protocol)
+			}
+			provider := NewOpenAIProviderWithTimeout(
+				cfg.APIKey(),
+				apiBase,
+				cfg.Proxy,
+				userAgent,
+				cfg.RequestTimeout,
+				cfg.ExtraBody,
+				cfg.CustomHeaders,
+			)
+			return finalizeProviderFromConfig(provider, modelID, cfg)
 		}
+		apiBase := cfg.APIBase
 		provider := NewHTTPProviderWithMaxTokensFieldAndRequestTimeout(
 			cfg.APIKey(),
 			apiBase,

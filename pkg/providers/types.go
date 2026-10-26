@@ -13,6 +13,7 @@ type (
 	LLMResponse            = protocoltypes.LLMResponse
 	StreamChunk            = protocoltypes.StreamChunk
 	UsageInfo              = protocoltypes.UsageInfo
+	ReasoningItem          = protocoltypes.ReasoningItem
 	Message                = protocoltypes.Message
 	ToolDefinition         = protocoltypes.ToolDefinition
 	ToolFunctionDefinition = protocoltypes.ToolFunctionDefinition

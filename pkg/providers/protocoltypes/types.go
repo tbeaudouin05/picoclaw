@@ -31,13 +31,16 @@ type FunctionCall struct {
 }
 
 type LLMResponse struct {
-	Content          string            `json:"content"`
-	ReasoningContent string            `json:"reasoning_content,omitempty"`
-	ToolCalls        []ToolCall        `json:"tool_calls,omitempty"`
-	FinishReason     string            `json:"finish_reason"`
-	Usage            *UsageInfo        `json:"usage,omitempty"`
-	Reasoning        string            `json:"reasoning"`
-	ReasoningDetails []ReasoningDetail `json:"reasoning_details"`
+	Content                   string            `json:"content"`
+	ReasoningContent          string            `json:"reasoning_content,omitempty"`
+	ReasoningID               string            `json:"reasoning_id,omitempty"`
+	ReasoningEncryptedContent string            `json:"reasoning_encrypted_content,omitempty"`
+	ReasoningItems            []ReasoningItem   `json:"reasoning_items,omitempty"`
+	ToolCalls                 []ToolCall        `json:"tool_calls,omitempty"`
+	FinishReason              string            `json:"finish_reason"`
+	Usage                     *UsageInfo        `json:"usage,omitempty"`
+	Reasoning                 string            `json:"reasoning"`
+	ReasoningDetails          []ReasoningDetail `json:"reasoning_details"`
 }
 
 type StreamChunk struct {
@@ -54,6 +57,15 @@ type ReasoningDetail struct {
 	Index  int    `json:"index"`
 	Type   string `json:"type"`
 	Text   string `json:"text"`
+}
+
+// ReasoningItem stores the stateless Responses API replay fields for one
+// reasoning output item. EncryptedContent is opaque and must not be rendered
+// as user-visible reasoning text.
+type ReasoningItem struct {
+	ID               string `json:"id,omitempty"`
+	Summary          string `json:"summary,omitempty"`
+	EncryptedContent string `json:"encrypted_content,omitempty"`
 }
 
 type UsageInfo struct {
@@ -93,17 +105,20 @@ type Attachment struct {
 }
 
 type Message struct {
-	Role             string         `json:"role"`
-	Content          string         `json:"content"`
-	ModelName        string         `json:"model_name,omitempty"`
-	CreatedAt        *time.Time     `json:"created_at,omitempty"`
-	Timestamp        int64          `json:"timestamp,omitempty"`
-	Media            []string       `json:"media,omitempty"`
-	Attachments      []Attachment   `json:"attachments,omitempty"`
-	ReasoningContent string         `json:"reasoning_content,omitempty"`
-	SystemParts      []ContentBlock `json:"system_parts,omitempty"` // structured system blocks for cache-aware adapters
-	ToolCalls        []ToolCall     `json:"tool_calls,omitempty"`
-	ToolCallID       string         `json:"tool_call_id,omitempty"`
+	Role                      string          `json:"role"`
+	Content                   string          `json:"content"`
+	ModelName                 string          `json:"model_name,omitempty"`
+	CreatedAt                 *time.Time      `json:"created_at,omitempty"`
+	Timestamp                 int64           `json:"timestamp,omitempty"`
+	Media                     []string        `json:"media,omitempty"`
+	Attachments               []Attachment    `json:"attachments,omitempty"`
+	ReasoningContent          string          `json:"reasoning_content,omitempty"`
+	ReasoningID               string          `json:"reasoning_id,omitempty"`
+	ReasoningEncryptedContent string          `json:"reasoning_encrypted_content,omitempty"`
+	ReasoningItems            []ReasoningItem `json:"reasoning_items,omitempty"`
+	SystemParts               []ContentBlock  `json:"system_parts,omitempty"` // structured system blocks for cache-aware adapters
+	ToolCalls                 []ToolCall      `json:"tool_calls,omitempty"`
+	ToolCallID                string          `json:"tool_call_id,omitempty"`
 
 	// Prompt metadata is internal to the agent runtime. It records where a
 	// message or system part came from without changing provider/session JSON.

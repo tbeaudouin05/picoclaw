@@ -116,6 +116,17 @@ This design also enables **multi-agent support** with flexible provider selectio
 }
 ```
 
+#### OpenAI API-key routing
+
+For an API-key authenticated `openai` entry, omit `api_base` to use the
+official stateless Responses API (`/v1/responses`). The same route is used
+when `api_base` is explicitly set to `https://api.openai.com/v1` (with an
+optional trailing slash). PicoClaw sends `store: false` and replays encrypted
+reasoning items across turns. Other explicit `api_base` values remain on the
+existing OpenAI-compatible Chat Completions route (`/chat/completions`), which
+preserves custom gateway compatibility. OpenAI OAuth/token entries continue to
+use the Codex provider.
+
 #### `model_list` Entry Fields
 
 | Field | Type | Required | Description                                                                                                                                                                                                                                 |

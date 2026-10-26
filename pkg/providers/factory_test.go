@@ -28,6 +28,48 @@ func TestCreateProviderReturnsHTTPProviderForOpenRouter(t *testing.T) {
 	}
 }
 
+func TestCreateProviderRoutesOpenAIModelConfigByEndpoint(t *testing.T) {
+	tests := []struct {
+		name    string
+		apiBase string
+	}{
+		{name: "official", apiBase: "https://api.openai.com/v1/"},
+		{name: "custom", apiBase: "https://proxy.example.test/v1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.DefaultConfig()
+			cfg.Agents.Defaults.ModelName = "test-openai"
+			modelCfg := &config.ModelConfig{
+				ModelName: "test-openai",
+				Model:     "openai/gpt-5.4",
+				APIBase:   tt.apiBase,
+			}
+			modelCfg.SetAPIKey("test-key")
+			cfg.ModelList = []*config.ModelConfig{modelCfg}
+
+			provider, modelID, err := CreateProvider(cfg)
+			if err != nil {
+				t.Fatalf("CreateProvider() error = %v", err)
+			}
+			if modelID != "gpt-5.4" {
+				t.Fatalf("model ID = %q, want gpt-5.4", modelID)
+			}
+			switch tt.name {
+			case "official":
+				if _, ok := provider.(*OpenAIProvider); !ok {
+					t.Fatalf("official endpoint provider = %T, want *OpenAIProvider", provider)
+				}
+			case "custom":
+				if _, ok := provider.(*HTTPProvider); !ok {
+					t.Fatalf("custom endpoint provider = %T, want *HTTPProvider", provider)
+				}
+			}
+		})
+	}
+}
+
 func TestCreateProviderResolvesRawDefaultFromProviderTemplate(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Agents.Defaults.ModelName = "openrouter/deepseek/deepseek-v3.2"

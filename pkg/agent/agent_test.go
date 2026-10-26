@@ -2367,6 +2367,7 @@ func (m *simpleMockProvider) GetDefaultModel() string {
 type reasoningContentProvider struct {
 	response         string
 	reasoningContent string
+	reasoningItems   []providers.ReasoningItem
 }
 
 func (m *reasoningContentProvider) Chat(
@@ -2379,6 +2380,7 @@ func (m *reasoningContentProvider) Chat(
 	return &providers.LLMResponse{
 		Content:          m.response,
 		ReasoningContent: m.reasoningContent,
+		ReasoningItems:   m.reasoningItems,
 		ToolCalls:        []providers.ToolCall{},
 	}, nil
 }
@@ -2503,8 +2505,10 @@ func (m *messageToolProvider) GetDefaultModel() string {
 }
 
 type reasoningVisibleToolProvider struct {
-	filePath string
-	calls    int
+	filePath            string
+	calls               int
+	toolReasoningItems  []providers.ReasoningItem
+	finalReasoningItems []providers.ReasoningItem
 }
 
 func (m *reasoningVisibleToolProvider) Chat(
@@ -2519,6 +2523,7 @@ func (m *reasoningVisibleToolProvider) Chat(
 		return &providers.LLMResponse{
 			Content:          "I'll inspect that file now.",
 			ReasoningContent: "Read the file before answering.",
+			ReasoningItems:   m.toolReasoningItems,
 			ToolCalls: []providers.ToolCall{{
 				ID:        "call_read_file",
 				Type:      "function",
@@ -2527,7 +2532,11 @@ func (m *reasoningVisibleToolProvider) Chat(
 			}},
 		}, nil
 	}
-	return &providers.LLMResponse{Content: "DONE"}, nil
+	return &providers.LLMResponse{
+		Content:          "DONE",
+		ReasoningContent: "Final turn reasoning.",
+		ReasoningItems:   m.finalReasoningItems,
+	}, nil
 }
 
 func (m *reasoningVisibleToolProvider) GetDefaultModel() string {
@@ -6266,6 +6275,11 @@ func TestProcessMessage_PersistsReasoningContentInSessionHistory(t *testing.T) {
 	provider := &reasoningContentProvider{
 		response:         "final answer",
 		reasoningContent: "thinking trace",
+		reasoningItems: []providers.ReasoningItem{{
+			ID:               "rs_final",
+			Summary:          "final plan",
+			EncryptedContent: "encrypted-final",
+		}},
 	}
 	al := NewAgentLoop(cfg, msgBus, provider)
 
@@ -6302,6 +6316,10 @@ func TestProcessMessage_PersistsReasoningContentInSessionHistory(t *testing.T) {
 	if last.ReasoningContent != "thinking trace" {
 		t.Fatalf("last message reasoning_content = %q, want %q", last.ReasoningContent, "thinking trace")
 	}
+	if len(last.ReasoningItems) != 1 || last.ReasoningItems[0].ID != "rs_final" ||
+		last.ReasoningItems[0].EncryptedContent != "encrypted-final" {
+		t.Fatalf("last message reasoning_items = %+v, want encrypted final item", last.ReasoningItems)
+	}
 }
 
 func TestProcessMessage_PersistsReasoningToolResponseAsSingleAssistantRecord(t *testing.T) {
@@ -6318,7 +6336,19 @@ func TestProcessMessage_PersistsReasoningToolResponseAsSingleAssistantRecord(t *
 	cfg.Agents.Defaults.MaxToolIterations = 10
 
 	msgBus := bus.NewMessageBus()
-	provider := &reasoningVisibleToolProvider{filePath: inspectPath}
+	provider := &reasoningVisibleToolProvider{
+		filePath: inspectPath,
+		toolReasoningItems: []providers.ReasoningItem{{
+			ID:               "rs_tool",
+			Summary:          "tool plan",
+			EncryptedContent: "encrypted-tool",
+		}},
+		finalReasoningItems: []providers.ReasoningItem{{
+			ID:               "rs_final_tool",
+			Summary:          "final tool plan",
+			EncryptedContent: "encrypted-final-tool",
+		}},
+	}
 	al := NewAgentLoop(cfg, msgBus, provider)
 
 	response, err := al.processMessage(context.Background(), bus.InboundMessage{
@@ -6362,11 +6392,23 @@ func TestProcessMessage_PersistsReasoningToolResponseAsSingleAssistantRecord(t *
 	if assistantWithToolCall.ReasoningContent != "Read the file before answering." {
 		t.Fatalf("assistant reasoning_content = %q, want preserved", assistantWithToolCall.ReasoningContent)
 	}
+	if len(assistantWithToolCall.ReasoningItems) != 1 ||
+		assistantWithToolCall.ReasoningItems[0].EncryptedContent != "encrypted-tool" {
+		t.Fatalf("assistant reasoning_items = %+v, want encrypted tool item", assistantWithToolCall.ReasoningItems)
+	}
 	if len(assistantWithToolCall.ToolCalls) != 1 {
 		t.Fatalf("assistant tool calls = %+v, want single read_file tool", assistantWithToolCall.ToolCalls)
 	}
 	if got := providers.NormalizeToolCall(assistantWithToolCall.ToolCalls[0]).Name; got != "read_file" {
 		t.Fatalf("assistant tool calls = %+v, want single read_file tool", assistantWithToolCall.ToolCalls)
+	}
+	last := history[len(history)-1]
+	if last.Role != "assistant" || last.Content != "DONE" || last.ReasoningContent != "Final turn reasoning." {
+		t.Fatalf("final assistant history message = %+v, want DONE with final reasoning", last)
+	}
+	if len(last.ReasoningItems) != 1 || last.ReasoningItems[0].ID != "rs_final_tool" ||
+		last.ReasoningItems[0].EncryptedContent != "encrypted-final-tool" {
+		t.Fatalf("final reasoning_items = %+v, want encrypted final item", last.ReasoningItems)
 	}
 
 	sessionDir := filepath.Join(tmpDir, "sessions")
@@ -6398,6 +6440,7 @@ func TestProcessMessage_PersistsReasoningToolResponseAsSingleAssistantRecord(t *
 	}
 
 	matchingRecords := 0
+	finalRecords := 0
 	for _, line := range lines {
 		var msg providers.Message
 		if err := json.Unmarshal([]byte(line), &msg); err != nil {
@@ -6405,6 +6448,12 @@ func TestProcessMessage_PersistsReasoningToolResponseAsSingleAssistantRecord(t *
 		}
 		if msg.Role != "assistant" {
 			continue
+		}
+		if msg.Content == "DONE" {
+			finalRecords++
+			if len(msg.ReasoningItems) != 1 || msg.ReasoningItems[0].EncryptedContent != "encrypted-final-tool" {
+				t.Fatalf("final assistant jsonl record = %+v, want encrypted final item", msg)
+			}
 		}
 		if msg.Content == "I'll inspect that file now." || msg.ReasoningContent == "Read the file before answering." {
 			matchingRecords++
@@ -6414,6 +6463,8 @@ func TestProcessMessage_PersistsReasoningToolResponseAsSingleAssistantRecord(t *
 			}
 			if msg.Content != "I'll inspect that file now." ||
 				msg.ReasoningContent != "Read the file before answering." ||
+				len(msg.ReasoningItems) != 1 ||
+				msg.ReasoningItems[0].EncryptedContent != "encrypted-tool" ||
 				len(msg.ToolCalls) != 1 ||
 				toolName != "read_file" {
 				t.Fatalf("assistant jsonl record = %+v, want content+reasoning+tool_calls in one line", msg)
@@ -6422,6 +6473,9 @@ func TestProcessMessage_PersistsReasoningToolResponseAsSingleAssistantRecord(t *
 	}
 	if matchingRecords != 1 {
 		t.Fatalf("matching assistant jsonl records = %d, want exactly 1 canonical assistant record", matchingRecords)
+	}
+	if finalRecords != 1 {
+		t.Fatalf("final assistant jsonl records = %d, want exactly 1 persisted final record", finalRecords)
 	}
 }
 

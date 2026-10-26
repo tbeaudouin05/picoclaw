@@ -115,6 +115,44 @@ func TestTranslateMessages_AssistantWithToolCalls(t *testing.T) {
 	}
 }
 
+func TestTranslateMessages_ReplaysEncryptedReasoningBeforeAssistantOutput(t *testing.T) {
+	msgs := []protocoltypes.Message{
+		{Role: "user", Content: "Solve this"},
+		{
+			Role:                      "assistant",
+			Content:                   "The answer is 42",
+			ReasoningContent:          "I worked it out",
+			ReasoningID:               "rs_123",
+			ReasoningEncryptedContent: "encrypted-reasoning",
+		},
+	}
+
+	input, _ := TranslateMessages(msgs)
+	if len(input) != 3 {
+		t.Fatalf("len(input) = %d, want 3", len(input))
+	}
+	if input[1].OfReasoning == nil {
+		t.Fatal("expected reasoning replay item before assistant message")
+	}
+	if input[1].OfReasoning.ID != "rs_123" {
+		t.Errorf("reasoning ID = %q, want rs_123", input[1].OfReasoning.ID)
+	}
+	if !input[1].OfReasoning.EncryptedContent.Valid() {
+		t.Fatal("reasoning encrypted content should be present")
+	}
+	raw, err := json.Marshal(input[1].OfReasoning.EncryptedContent)
+	if err != nil {
+		t.Fatalf("marshal encrypted content: %v", err)
+	}
+	var got string
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode encrypted content: %v", err)
+	}
+	if got != "encrypted-reasoning" {
+		t.Errorf("encrypted content = %q, want encrypted-reasoning", got)
+	}
+}
+
 func TestTranslateMessages_AssistantWithoutToolCalls(t *testing.T) {
 	msgs := []protocoltypes.Message{
 		{Role: "assistant", Content: "Sure thing"},
@@ -298,6 +336,28 @@ func TestTranslateTools_DescriptionOmittedWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestTranslateTools_SerializesStrictFalse(t *testing.T) {
+	result := TranslateTools([]protocoltypes.ToolDefinition{{
+		Type: "function",
+		Function: protocoltypes.ToolFunctionDefinition{
+			Name:       "lookup",
+			Parameters: map[string]any{"type": "object"},
+		},
+	}}, false)
+
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal tools: %v", err)
+	}
+	var encoded []map[string]any
+	if err := json.Unmarshal(data, &encoded); err != nil {
+		t.Fatalf("decode tools: %v", err)
+	}
+	if len(encoded) != 1 || encoded[0]["strict"] != false {
+		t.Fatalf("serialized tool = %#v, want strict=false", encoded)
+	}
+}
+
 // --- ParseResponseBody tests ---
 
 func TestParseResponseBody_TextOutput(t *testing.T) {
@@ -409,6 +469,58 @@ func TestParseResponseBody_Reasoning(t *testing.T) {
 	}
 	if result.ReasoningContent != "Thinking about it..." {
 		t.Errorf("ReasoningContent = %q, want %q", result.ReasoningContent, "Thinking about it...")
+	}
+}
+
+func TestParseResponseBody_CapturesEncryptedReasoningReplayFields(t *testing.T) {
+	body := strings.NewReader(`{
+		"id": "resp_replay",
+		"object": "response",
+		"status": "completed",
+		"output": [
+			{
+				"type": "reasoning",
+				"id": "rs_replay",
+				"summary": [{"type": "summary_text", "text": "Plan"}],
+				"encrypted_content": "opaque-reasoning"
+			},
+			{
+				"type": "message",
+				"content": [{"type": "output_text", "text": "Done"}]
+			}
+		],
+		"usage": {"input_tokens": 3, "output_tokens": 4, "total_tokens": 7}
+	}`)
+
+	result, err := ParseResponseBody(body)
+	if err != nil {
+		t.Fatalf("ParseResponseBody error: %v", err)
+	}
+	if result.ReasoningID != "rs_replay" {
+		t.Errorf("ReasoningID = %q, want rs_replay", result.ReasoningID)
+	}
+	if result.ReasoningEncryptedContent != "opaque-reasoning" {
+		t.Errorf("ReasoningEncryptedContent = %q, want opaque-reasoning", result.ReasoningEncryptedContent)
+	}
+	if len(result.ReasoningItems) != 1 || result.ReasoningItems[0].Summary != "Plan" {
+		t.Errorf("ReasoningItems = %+v, want one item with Plan summary", result.ReasoningItems)
+	}
+}
+
+func TestParseResponseFromStruct_CapturesEncryptedReasoningReplayFields(t *testing.T) {
+	result := ParseResponseFromStruct(&responses.Response{
+		Output: []responses.ResponseOutputItemUnion{{
+			Type:             "reasoning",
+			ID:               "rs_struct",
+			Summary:          []responses.ResponseReasoningItemSummary{{Text: "Plan"}},
+			EncryptedContent: "opaque-struct",
+		}},
+	})
+	if result.ReasoningID != "rs_struct" || result.ReasoningEncryptedContent != "opaque-struct" {
+		t.Fatalf("reasoning replay fields = (%q, %q), want (rs_struct, opaque-struct)", result.ReasoningID, result.ReasoningEncryptedContent)
+	}
+	if len(result.ReasoningItems) != 1 || result.ReasoningItems[0].Summary != "Plan" {
+		t.Fatalf("ReasoningItems = %+v, want one item with Plan summary", result.ReasoningItems)
 	}
 }
 

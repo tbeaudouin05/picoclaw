@@ -52,6 +52,31 @@ func TranslateMessages(messages []protocoltypes.Message) (input responses.Respon
 				})
 			}
 		case "assistant":
+			reasoningItems := msg.ReasoningItems
+			if len(reasoningItems) == 0 && msg.ReasoningEncryptedContent != "" {
+				reasoningItems = []protocoltypes.ReasoningItem{{
+					ID:               msg.ReasoningID,
+					Summary:          msg.ReasoningContent,
+					EncryptedContent: msg.ReasoningEncryptedContent,
+				}}
+			}
+			for _, item := range reasoningItems {
+				if item.EncryptedContent == "" {
+					continue
+				}
+				reasoning := &responses.ResponseReasoningItemParam{
+					ID:               item.ID,
+					EncryptedContent: openai.Opt(item.EncryptedContent),
+				}
+				if item.Summary != "" {
+					reasoning.Summary = []responses.ResponseReasoningItemSummaryParam{{
+						Text: item.Summary,
+					}}
+				}
+				input = append(input, responses.ResponseInputItemUnionParam{
+					OfReasoning: reasoning,
+				})
+			}
 			if len(msg.ToolCalls) > 0 {
 				if msg.Content != "" {
 					input = append(input, responses.ResponseInputItemUnionParam{
@@ -216,6 +241,7 @@ func ParseResponseFromStruct(resp *responses.Response) *protocoltypes.LLMRespons
 func parseResponse(apiResp *responses.Response) *protocoltypes.LLMResponse {
 	var content strings.Builder
 	var reasoningContent strings.Builder
+	var reasoningItems []protocoltypes.ReasoningItem
 	var toolCalls []protocoltypes.ToolCall
 
 	for _, item := range apiResp.Output {
@@ -243,6 +269,17 @@ func parseResponse(apiResp *responses.Response) *protocoltypes.LLMResponse {
 			for _, s := range item.Summary {
 				reasoningContent.WriteString(s.Text)
 			}
+			if item.EncryptedContent != "" {
+				var summary strings.Builder
+				for _, s := range item.Summary {
+					summary.WriteString(s.Text)
+				}
+				reasoningItems = append(reasoningItems, protocoltypes.ReasoningItem{
+					ID:               item.ID,
+					Summary:          summary.String(),
+					EncryptedContent: item.EncryptedContent,
+				})
+			}
 		}
 	}
 
@@ -267,12 +304,20 @@ func parseResponse(apiResp *responses.Response) *protocoltypes.LLMResponse {
 			TotalTokens:      int(apiResp.Usage.TotalTokens),
 		}
 	}
+	var reasoningID, reasoningEncryptedContent string
+	if len(reasoningItems) > 0 {
+		reasoningID = reasoningItems[0].ID
+		reasoningEncryptedContent = reasoningItems[0].EncryptedContent
+	}
 
 	return &protocoltypes.LLMResponse{
-		Content:          content.String(),
-		ReasoningContent: reasoningContent.String(),
-		ToolCalls:        toolCalls,
-		FinishReason:     finishReason,
-		Usage:            usage,
+		Content:                   content.String(),
+		ReasoningContent:          reasoningContent.String(),
+		ReasoningID:               reasoningID,
+		ReasoningEncryptedContent: reasoningEncryptedContent,
+		ReasoningItems:            reasoningItems,
+		ToolCalls:                 toolCalls,
+		FinishReason:              finishReason,
+		Usage:                     usage,
 	}
 }

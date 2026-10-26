@@ -43,10 +43,15 @@ func (p *Pipeline) Finalize(
 	ts.setFinalContent(finalContent)
 	if !ts.opts.NoHistory {
 		finalMsg := providers.Message{
-			Role:             "assistant",
-			Content:          finalContent,
-			ModelName:        exec.llmModelName,
-			ReasoningContent: responseReasoningContent(exec.response),
+			Role:      "assistant",
+			Content:   finalContent,
+			ModelName: exec.llmModelName,
+		}
+		if exec.response != nil {
+			finalMsg.ReasoningContent = responseReasoningContent(exec.response)
+			finalMsg.ReasoningID = exec.response.ReasoningID
+			finalMsg.ReasoningEncryptedContent = exec.response.ReasoningEncryptedContent
+			finalMsg.ReasoningItems = exec.response.ReasoningItems
 		}
 		ts.agent.Sessions.AddFullMessage(ts.sessionKey, finalMsg)
 		ts.recordPersistedMessage(finalMsg)
