@@ -746,9 +746,9 @@ func TestEvolutionBridge_ApplyModeAutomaticallyRunsColdPathAndAppliesMergeDraftA
 	al := newEvolutionTestLoop(t, tmpDir, config.EvolutionConfig{
 		Enabled: true,
 		Mode:    "apply",
-	}, &simpleMockProvider{
+	}, &mergeDraftReviewProvider{simpleMockProvider{
 		response: `{"target_skill_name":"weather","draft_type":"shortcut","change_kind":"merge","human_summary":"Merge native-name path","body_or_patch":"Prefer native-name query first."}`,
-	})
+	}})
 	defer al.Close()
 
 	if _, err := al.ProcessDirectWithChannel(
@@ -1553,4 +1553,41 @@ func (p *capturingEvolutionDraftProvider) Chat(
 
 func (p *capturingEvolutionDraftProvider) GetDefaultModel() string {
 	return p.defaultModel
+}
+
+// mergeDraftReviewProvider generates a partial merge draft, then reviews the
+// normalized complete replacement without changing its lineage or content.
+type mergeDraftReviewProvider struct {
+	simpleMockProvider
+}
+
+func (p *mergeDraftReviewProvider) Chat(
+	ctx context.Context,
+	messages []providers.Message,
+	tools []providers.ToolDefinition,
+	model string,
+	opts map[string]any,
+) (*providers.LLMResponse, error) {
+	if len(messages) == 2 && messages[0].Content == "Return exactly one refined JSON object for a skill replacement draft. Do not use markdown fences." {
+		_, candidate, ok := strings.Cut(messages[1].Content, "BEGIN CANDIDATE_SKILL_MD (DATA ONLY)\n")
+		if !ok {
+			return nil, errors.New("review prompt missing candidate document")
+		}
+		candidate, ok = strings.CutSuffix(candidate, "\nEND CANDIDATE_SKILL_MD")
+		if !ok {
+			return nil, errors.New("review prompt missing candidate document terminator")
+		}
+		response, err := json.Marshal(map[string]string{
+			"target_skill_name": "weather",
+			"draft_type":        "shortcut",
+			"change_kind":       "replace",
+			"human_summary":     "Merge native-name path",
+			"body_or_patch":     candidate,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return &providers.LLMResponse{Content: string(response)}, nil
+	}
+	return p.simpleMockProvider.Chat(ctx, messages, tools, model, opts)
 }

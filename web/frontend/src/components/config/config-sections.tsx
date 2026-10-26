@@ -497,7 +497,9 @@ export function EvolutionSection({
       >
         <Input
           value={form.evolutionEnrichmentModel}
-          onChange={(e) => onFieldChange("evolutionEnrichmentModel", e.target.value)}
+          onChange={(e) =>
+            onFieldChange("evolutionEnrichmentModel", e.target.value)
+          }
         />
       </Field>
 
@@ -511,17 +513,28 @@ export function EvolutionSection({
           min={0}
           max={1000}
           value={form.evolutionMinToolCallsForLLMEnrichment}
-          onChange={(e) => onFieldChange("evolutionMinToolCallsForLLMEnrichment", e.target.value)}
+          onChange={(e) =>
+            onFieldChange(
+              "evolutionMinToolCallsForLLMEnrichment",
+              e.target.value,
+            )
+          }
         />
       </Field>
 
-      <Field label="LLM enrichment timeout (seconds)" hint="Defaults to 30 seconds; values are limited to 1–300 seconds." layout="setting-row">
+      <Field
+        label="LLM enrichment timeout (seconds)"
+        hint="Defaults to 30 seconds; values are limited to 1–300 seconds."
+        layout="setting-row"
+      >
         <Input
           type="number"
           min={1}
           max={300}
           value={form.evolutionEnrichmentTimeoutSeconds}
-          onChange={(e) => onFieldChange("evolutionEnrichmentTimeoutSeconds", e.target.value)}
+          onChange={(e) =>
+            onFieldChange("evolutionEnrichmentTimeoutSeconds", e.target.value)
+          }
         />
       </Field>
 

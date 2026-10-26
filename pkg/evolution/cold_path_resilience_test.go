@@ -1080,3 +1080,46 @@ func TestRuntime_RunColdPathOnce_ProviderReviewerOmittedDraftTypeNormalizedAndGa
 		t.Fatalf("draft_type = %q, want %q (restored from candidate)", drafts[0].DraftType, evolution.DraftTypeWorkflow)
 	}
 }
+
+// A reviewer must not undo the normalization of an existing-skill update to
+// replace. Even with a valid complete body, a merge response changes lineage.
+func TestRuntime_RunColdPathOnce_ReviewerChangedChangeKindQuarantines(t *testing.T) {
+	root := t.TempDir()
+	store := evolution.NewStore(evolution.NewPaths(root, ""))
+	skillPath := writeSelfRestartSkill(t, root, selfRestartOriginalBody())
+	seedSelfRestartReadyRule(t, store, root)
+
+	candidate := selfRestartReplaceDraft(root, selfRestartBadHeadingBody())
+	reviewed := selfRestartReplaceDraft(root, selfRestartCorrectedBody())
+	reviewed.ChangeKind = evolution.ChangeKindMerge
+	gen := &scriptedReviewer{first: candidate, reviewed: reviewed}
+	rt := newReviewRuntime(t, root, store, gen)
+
+	err := rt.RunColdPathOnce(context.Background(), root)
+	if !errors.Is(err, evolution.ErrApplyDraftFailed) {
+		t.Fatalf("error = %v, want ErrApplyDraftFailed for changed change_kind", err)
+	}
+	if !strings.Contains(err.Error(), "reviewer changed draft lineage: change kind changed") {
+		t.Fatalf("error = %v, want reviewer change-kind lineage failure", err)
+	}
+	if gen.reviewCalls != 1 {
+		t.Fatalf("reviewCalls = %d, want exactly 1", gen.reviewCalls)
+	}
+	if gen.lastRequest.CandidateDraft.ChangeKind != evolution.ChangeKindReplace {
+		t.Fatalf("review candidate change_kind = %q, want replace", gen.lastRequest.CandidateDraft.ChangeKind)
+	}
+	got, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != selfRestartOriginalBody() {
+		t.Fatalf("skill was modified despite reviewer lineage drift:\n%s", got)
+	}
+	drafts, err := store.LoadDrafts()
+	if err != nil {
+		t.Fatalf("LoadDrafts: %v", err)
+	}
+	if len(drafts) != 1 || drafts[0].Status != evolution.DraftStatusQuarantined {
+		t.Fatalf("drafts = %+v, want one quarantined draft", drafts)
+	}
+}
