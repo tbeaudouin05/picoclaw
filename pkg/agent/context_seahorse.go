@@ -219,8 +219,13 @@ func providerToSeahorseMessage(msg protocoltypes.Message) seahorse.Message {
 		Content:          msg.Content,
 		ModelName:        msg.ModelName,
 		ReasoningContent: msg.ReasoningContent,
-		TokenCount:       tokenizer.EstimateMessageTokens(msg),
-		CreatedAt:        normalizeSeahorseMessageCreatedAt(msg.CreatedAt),
+		ReasoningReplay: seahorse.ReasoningReplay{
+			ReasoningItems:            msg.ReasoningItems,
+			ReasoningID:               msg.ReasoningID,
+			ReasoningEncryptedContent: msg.ReasoningEncryptedContent,
+		},
+		TokenCount: tokenizer.EstimateMessageTokens(msg),
+		CreatedAt:  normalizeSeahorseMessageCreatedAt(msg.CreatedAt),
 	}
 
 	// Convert ToolCalls → MessageParts
@@ -270,10 +275,13 @@ func seahorseToProviderMessages(result *seahorse.AssembleResult) []protocoltypes
 	// Convert assembled messages (which already include summary XML messages)
 	for _, msg := range result.Messages {
 		pm := protocoltypes.Message{
-			Role:             msg.Role,
-			Content:          msg.Content,
-			ModelName:        msg.ModelName,
-			ReasoningContent: msg.ReasoningContent,
+			Role:                      msg.Role,
+			Content:                   msg.Content,
+			ModelName:                 msg.ModelName,
+			ReasoningContent:          msg.ReasoningContent,
+			ReasoningItems:            msg.ReasoningItems,
+			ReasoningID:               msg.ReasoningID,
+			ReasoningEncryptedContent: msg.ReasoningEncryptedContent,
 		}
 
 		// Reconstruct ToolCalls from parts

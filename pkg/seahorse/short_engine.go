@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -263,6 +264,7 @@ func (e *Engine) Ingest(ctx context.Context, sessionKey string, messages []Messa
 				msg.ReasoningContent,
 				msg.TokenCount,
 				msg.CreatedAt,
+				msg.ReasoningReplay,
 			)
 		} else {
 			added, err = e.store.AddMessageWithReasoning(
@@ -274,6 +276,7 @@ func (e *Engine) Ingest(ctx context.Context, sessionKey string, messages []Messa
 				msg.ReasoningContent,
 				msg.TokenCount,
 				msg.CreatedAt,
+				msg.ReasoningReplay,
 			)
 		}
 		if err != nil {
@@ -436,6 +439,10 @@ func (e *Engine) Bootstrap(ctx context.Context, sessionKey string, messages []Me
 		return fmt.Errorf("bootstrap: get messages: %w", err)
 	}
 
+	// Backfill replay metadata lost by older adapters without rebuilding context.
+	if err := e.repairBootstrapReasoningReplay(ctx, dbMsgs, messages); err != nil {
+		return fmt.Errorf("bootstrap: repair reasoning replay: %w", err)
+	}
 	// Migration repair path: old SeaHorse rows may be missing reasoning_content
 	// even though the canonical JSONL history already has it. Backfill those
 	// rows in place so we do not treat this as edited history and leave stale
@@ -587,6 +594,7 @@ func (e *Engine) repairBootstrapReasoningContent(ctx context.Context, dbMsgs, me
 	for i := range overlap {
 		if !messagesMatch(dbMsgs[i], messages[i], messageMatchOptions{
 			IgnoreReasoningContent: true,
+			IgnoreReasoningReplay:  true,
 			IgnoreModelName:        true,
 			IgnoreCreatedAt:        true,
 		}) {
@@ -642,6 +650,7 @@ func (e *Engine) repairBootstrapModelName(ctx context.Context, dbMsgs, messages 
 	for i := range overlap {
 		if !messagesMatch(dbMsgs[i], messages[i], messageMatchOptions{
 			IgnoreReasoningContent: true,
+			IgnoreReasoningReplay:  true,
 			IgnoreModelName:        true,
 			IgnoreCreatedAt:        true,
 		}) {
@@ -697,6 +706,7 @@ func (e *Engine) repairBootstrapCreatedAt(ctx context.Context, dbMsgs, messages 
 	for i := range overlap {
 		if !messagesMatch(dbMsgs[i], messages[i], messageMatchOptions{
 			IgnoreReasoningContent: true,
+			IgnoreReasoningReplay:  true,
 			IgnoreModelName:        true,
 			IgnoreCreatedAt:        true,
 		}) {
@@ -749,6 +759,7 @@ func truncate(s string, maxLen int) string {
 
 type messageMatchOptions struct {
 	IgnoreReasoningContent bool
+	IgnoreReasoningReplay  bool
 	IgnoreModelName        bool
 	IgnoreCreatedAt        bool
 }
@@ -758,6 +769,9 @@ type messageMatchOptions struct {
 // because bootstrap may re-estimate it differently.
 func messagesMatch(a, b Message, opts messageMatchOptions) bool {
 	if a.Role != b.Role {
+		return false
+	}
+	if !opts.IgnoreReasoningReplay && !reasoningReplayEqual(a.ReasoningReplay, b.ReasoningReplay) {
 		return false
 	}
 	if !opts.IgnoreReasoningContent && a.ReasoningContent != b.ReasoningContent {
@@ -818,4 +832,43 @@ func partsMatch(a, b []MessagePart) bool {
 		}
 	}
 	return true
+}
+
+// Repair only absent metadata on otherwise matching history. Conflicts continue
+// through the existing bootstrap reconciliation rather than overwriting data.
+func (e *Engine) repairBootstrapReasoningReplay(ctx context.Context, stored, canonical []Message) error {
+	for i := range min(len(stored), len(canonical)) {
+		if !messagesMatch(stored[i], canonical[i], messageMatchOptions{
+			IgnoreReasoningReplay: true, IgnoreReasoningContent: true,
+			IgnoreModelName: true, IgnoreCreatedAt: true,
+		}) {
+			return nil
+		}
+	}
+	for i := range min(len(stored), len(canonical)) {
+		dst, src := stored[i].ReasoningReplay, canonical[i].ReasoningReplay
+		if len(dst.ReasoningItems) == 0 {
+			dst.ReasoningItems = src.ReasoningItems
+		}
+		if dst.ReasoningID == "" {
+			dst.ReasoningID = src.ReasoningID
+		}
+		if dst.ReasoningEncryptedContent == "" {
+			dst.ReasoningEncryptedContent = src.ReasoningEncryptedContent
+		}
+		if reasoningReplayEqual(dst, stored[i].ReasoningReplay) {
+			continue
+		}
+		if err := e.store.updateMessageReasoningReplay(ctx, stored[i].ID, dst); err != nil {
+			return err
+		}
+		stored[i].ReasoningReplay = dst
+	}
+	return nil
+}
+
+func reasoningReplayEqual(a, b ReasoningReplay) bool {
+	return a.ReasoningID == b.ReasoningID &&
+		a.ReasoningEncryptedContent == b.ReasoningEncryptedContent &&
+		slices.Equal(a.ReasoningItems, b.ReasoningItems)
 }

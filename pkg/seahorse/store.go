@@ -3,6 +3,7 @@ package seahorse
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -177,19 +178,30 @@ func (s *Store) AddMessageWithReasoning(
 	role, content, modelName, reasoningContent string,
 	tokenCount int,
 	createdAt time.Time,
+	replay ...ReasoningReplay,
 ) (*Message, error) {
+	var metadata ReasoningReplay
+	if len(replay) > 0 {
+		metadata = replay[0]
+	}
+	encodedReplay, err := json.Marshal(metadata)
+	if err != nil {
+		return nil, fmt.Errorf("encode reasoning replay: %w", err)
+	}
+
 	storedCreatedAt := normalizeMessageCreatedAt(createdAt)
 	if storedCreatedAt.IsZero() {
 		storedCreatedAt = normalizeMessageCreatedAt(time.Now())
 	}
 	result, err := s.db.ExecContext(
 		ctx,
-		"INSERT INTO messages (conversation_id, role, content, model_name, reasoning_content, token_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		"INSERT INTO messages (conversation_id, role, content, model_name, reasoning_content, reasoning_replay, token_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 		convID,
 		role,
 		content,
 		modelName,
 		reasoningContent,
+		string(encodedReplay),
 		tokenCount,
 		formatSQLiteTime(storedCreatedAt),
 	)
@@ -207,6 +219,7 @@ func (s *Store) AddMessageWithReasoning(
 		Content:          content,
 		ModelName:        modelName,
 		ReasoningContent: reasoningContent,
+		ReasoningReplay:  metadata,
 		TokenCount:       tokenCount,
 		CreatedAt:        storedCreatedAt,
 	}, nil
@@ -259,7 +272,17 @@ func (s *Store) AddMessageWithPartsAndReasoning(
 	reasoningContent string,
 	tokenCount int,
 	createdAt time.Time,
+	replay ...ReasoningReplay,
 ) (*Message, error) {
+	var metadata ReasoningReplay
+	if len(replay) > 0 {
+		metadata = replay[0]
+	}
+	encodedReplay, err := json.Marshal(metadata)
+	if err != nil {
+		return nil, fmt.Errorf("encode reasoning replay: %w", err)
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
@@ -276,12 +299,13 @@ func (s *Store) AddMessageWithPartsAndReasoning(
 
 	result, err := tx.ExecContext(
 		ctx,
-		"INSERT INTO messages (conversation_id, role, content, model_name, reasoning_content, token_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		"INSERT INTO messages (conversation_id, role, content, model_name, reasoning_content, reasoning_replay, token_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 		convID,
 		role,
 		readableContent,
 		modelName,
 		reasoningContent,
+		string(encodedReplay),
 		tokenCount,
 		formatSQLiteTime(storedCreatedAt),
 	)
@@ -323,6 +347,7 @@ func (s *Store) AddMessageWithPartsAndReasoning(
 		Role:             role,
 		ModelName:        modelName,
 		ReasoningContent: reasoningContent,
+		ReasoningReplay:  metadata,
 		TokenCount:       tokenCount,
 		CreatedAt:        storedCreatedAt,
 		Parts:            make([]MessagePart, len(parts)),
@@ -336,7 +361,7 @@ func (s *Store) AddMessageWithPartsAndReasoning(
 
 // GetMessages retrieves messages for a conversation.
 func (s *Store) GetMessages(ctx context.Context, convID int64, limit int, beforeID int64) ([]Message, error) {
-	query := "SELECT message_id, conversation_id, role, content, model_name, reasoning_content, token_count, created_at FROM messages WHERE conversation_id = ?"
+	query := "SELECT message_id, conversation_id, role, content, model_name, reasoning_content, reasoning_replay, token_count, created_at FROM messages WHERE conversation_id = ?"
 	args := []any{convID}
 	if beforeID > 0 {
 		query += " AND message_id < ?"
@@ -357,6 +382,7 @@ func (s *Store) GetMessages(ctx context.Context, convID int64, limit int, before
 	var msgs []Message
 	for rows.Next() {
 		var msg Message
+		var replay string
 		var createdAt string
 		if err := rows.Scan(
 			&msg.ID,
@@ -365,9 +391,13 @@ func (s *Store) GetMessages(ctx context.Context, convID int64, limit int, before
 			&msg.Content,
 			&msg.ModelName,
 			&msg.ReasoningContent,
+			&replay,
 			&msg.TokenCount,
 			&createdAt,
 		); err != nil {
+			return nil, err
+		}
+		if err := decodeReasoningReplay(replay, &msg.ReasoningReplay); err != nil {
 			return nil, err
 		}
 		msg.CreatedAt = parseSQLiteTime(createdAt)
@@ -401,16 +431,20 @@ func (s *Store) GetMessageCount(ctx context.Context, convID int64) (int, error) 
 // GetMessageByID retrieves a single message by ID.
 func (s *Store) GetMessageByID(ctx context.Context, messageID int64) (*Message, error) {
 	var msg Message
+	var replay string
 	var createdAt string
 	err := s.db.QueryRowContext(
 		ctx,
-		"SELECT message_id, conversation_id, role, content, model_name, reasoning_content, token_count, created_at FROM messages WHERE message_id = ?",
+		"SELECT message_id, conversation_id, role, content, model_name, reasoning_content, reasoning_replay, token_count, created_at FROM messages WHERE message_id = ?",
 		messageID,
-	).Scan(&msg.ID, &msg.ConversationID, &msg.Role, &msg.Content, &msg.ModelName, &msg.ReasoningContent, &msg.TokenCount, &createdAt)
+	).Scan(&msg.ID, &msg.ConversationID, &msg.Role, &msg.Content, &msg.ModelName, &msg.ReasoningContent, &replay, &msg.TokenCount, &createdAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("message %d not found", messageID)
 	}
 	if err != nil {
+		return nil, err
+	}
+	if err := decodeReasoningReplay(replay, &msg.ReasoningReplay); err != nil {
 		return nil, err
 	}
 	msg.CreatedAt = parseSQLiteTime(createdAt)
@@ -672,7 +706,7 @@ func (s *Store) LinkSummaryToMessages(ctx context.Context, summaryID string, mes
 func (s *Store) GetSummarySourceMessages(ctx context.Context, summaryID string) ([]Message, error) {
 	rows, err := s.db.QueryContext(
 		ctx,
-		`SELECT m.message_id, m.conversation_id, m.role, m.content, m.model_name, m.reasoning_content, m.token_count, m.created_at
+		`SELECT m.message_id, m.conversation_id, m.role, m.content, m.model_name, m.reasoning_content, m.reasoning_replay, m.token_count, m.created_at
 		 FROM summary_messages sm
 		 JOIN messages m ON m.message_id = sm.message_id
 		 WHERE sm.summary_id = ?
@@ -687,6 +721,7 @@ func (s *Store) GetSummarySourceMessages(ctx context.Context, summaryID string) 
 	var msgs []Message
 	for rows.Next() {
 		var msg Message
+		var replay string
 		var createdAt string
 		if err := rows.Scan(
 			&msg.ID,
@@ -695,9 +730,13 @@ func (s *Store) GetSummarySourceMessages(ctx context.Context, summaryID string) 
 			&msg.Content,
 			&msg.ModelName,
 			&msg.ReasoningContent,
+			&replay,
 			&msg.TokenCount,
 			&createdAt,
 		); err != nil {
+			return nil, err
+		}
+		if err := decodeReasoningReplay(replay, &msg.ReasoningReplay); err != nil {
 			return nil, err
 		}
 		msg.CreatedAt = parseSQLiteTime(createdAt)
@@ -1745,4 +1784,23 @@ func nullString(s string) sql.NullString {
 
 func nullInt64(n int64) sql.NullInt64 {
 	return sql.NullInt64{Int64: n, Valid: n != 0}
+}
+
+func decodeReasoningReplay(raw string, replay *ReasoningReplay) error {
+	if raw == "" {
+		return nil
+	} // Legacy rows predate replay metadata.
+	if err := json.Unmarshal([]byte(raw), replay); err != nil {
+		return fmt.Errorf("decode reasoning replay: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) updateMessageReasoningReplay(ctx context.Context, id int64, replay ReasoningReplay) error {
+	data, err := json.Marshal(replay)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, "UPDATE messages SET reasoning_replay = ? WHERE message_id = ?", string(data), id)
+	return err
 }

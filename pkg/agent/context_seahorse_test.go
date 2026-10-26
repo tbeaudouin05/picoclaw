@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -10,8 +12,10 @@ import (
 	"github.com/sipeed/picoclaw/pkg/bus"
 	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/providers"
+	orc "github.com/sipeed/picoclaw/pkg/providers/openai_responses_common"
 	"github.com/sipeed/picoclaw/pkg/providers/protocoltypes"
 	"github.com/sipeed/picoclaw/pkg/seahorse"
+	"github.com/sipeed/picoclaw/pkg/session"
 )
 
 // seahorseTestProvider implements providers.LLMProvider for seahorse tests.
@@ -1163,5 +1167,162 @@ func TestSeahorseSummarizeSkipsCondensedWhenBelowThreshold(t *testing.T) {
 
 	if tokensBefore < threshold && condensedCount > 0 {
 		t.Errorf("BUG: condensed created when tokens (%d) < threshold (%d)", tokensBefore, threshold)
+	}
+}
+
+// Exercise a subsequent turn through SQLite and the actual Responses translator,
+// including a process restart and bootstrap of histories saved by older adapters.
+func TestSeahorseReasoningReplayOnSubsequentResponsesTurn(t *testing.T) {
+	for _, mode := range []string{"ingest", "bootstrap", "repair"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := context.Background()
+			dbPath := t.TempDir() + "/replay.db"
+			engine, err := seahorse.NewEngine(seahorse.Config{DBPath: dbPath}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sessions := session.NewSessionManager("")
+			mgr := &seahorseContextManager{engine: engine, sessions: sessions}
+			const key = "reasoning-replay"
+			items := []protocoltypes.ReasoningItem{
+				{ID: "rs_1", Summary: "first summary", EncryptedContent: "opaque-one"},
+				{ID: "rs_2", Summary: "second summary", EncryptedContent: "opaque-two"},
+			}
+			history := []protocoltypes.Message{
+				{Role: "user", Content: "look it up"},
+				{Role: "assistant", ReasoningContent: "visible summary", ReasoningItems: items,
+					ReasoningID: "rs_1", ReasoningEncryptedContent: "opaque-one",
+					ToolCalls: []protocoltypes.ToolCall{{ID: "call_1", Type: "function", Function: &protocoltypes.FunctionCall{Name: "lookup", Arguments: `{}`}}}},
+				{Role: "tool", ToolCallID: "call_1", Content: "found"},
+				// Legacy scalar-only replay remains supported as well.
+				{Role: "assistant", Content: "answer", ReasoningID: "rs_legacy", ReasoningContent: "legacy summary", ReasoningEncryptedContent: "opaque-legacy"},
+			}
+			if mode != "bootstrap" {
+				for _, msg := range history {
+					if mode == "repair" {
+						msg.ReasoningItems = nil
+						msg.ReasoningID = ""
+						msg.ReasoningEncryptedContent = ""
+					}
+					if err := mgr.Ingest(ctx, &IngestRequest{SessionKey: key, Message: msg}); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			store := engine.GetRetrieval().Store()
+			var beforeIDs []int64
+			var summaryID string
+			if mode == "repair" {
+				conv, err := store.GetOrCreateConversation(ctx, key)
+				if err != nil {
+					t.Fatal(err)
+				}
+				rows, err := store.GetMessages(ctx, conv.ConversationID, 0, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, row := range rows {
+					beforeIDs = append(beforeIDs, row.ID)
+				}
+				summary, err := store.CreateSummary(ctx, seahorse.CreateSummaryInput{ConversationID: conv.ConversationID, Kind: seahorse.SummaryKindLeaf, Content: "visible summary only", TokenCount: 3})
+				if err != nil {
+					t.Fatal(err)
+				}
+				summaryID = summary.SummaryID
+			}
+			if mode != "ingest" {
+				sessions.GetOrCreate(key)
+				mgr.sessions.SetHistory(key, history)
+				mgr.bootstrapSession(ctx, key)
+				mgr.bootstrapSession(ctx, key) // Idempotent reconciliation.
+			}
+			if err := engine.Close(); err != nil {
+				t.Fatal(err)
+			}
+			engine, err = seahorse.NewEngine(seahorse.Config{DBPath: dbPath}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer engine.Close()
+			mgr.engine = engine
+			store = engine.GetRetrieval().Store()
+			conv, err := store.GetOrCreateConversation(ctx, key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stored, err := store.GetMessages(ctx, conv.ConversationID, 0, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(stored) != len(history) {
+				t.Fatalf("stored count = %d", len(stored))
+			}
+			if mode == "repair" {
+				summary, err := store.GetSummary(ctx, summaryID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if summary == nil || summary.Content != "visible summary only" {
+					t.Fatal("bootstrap changed summary")
+				}
+				for i := range stored {
+					if stored[i].ID != beforeIDs[i] {
+						t.Fatal("bootstrap rebuilt raw history")
+					}
+				}
+			}
+			if !reflect.DeepEqual(stored[1].ReasoningItems, items) || stored[1].ReasoningID != "rs_1" || stored[1].ReasoningEncryptedContent != "opaque-one" || stored[1].ReasoningContent != "visible summary" {
+				t.Fatalf("stored replay = %+v", stored[1])
+			}
+			next := protocoltypes.Message{Role: "user", Content: "what next?"}
+			if err := mgr.Ingest(ctx, &IngestRequest{SessionKey: key, Message: next}); err != nil {
+				t.Fatal(err)
+			}
+			assembled, err := mgr.Assemble(ctx, &AssembleRequest{SessionKey: key, Budget: 10000})
+			if err != nil {
+				t.Fatal(err)
+			}
+			input, _ := orc.TranslateMessages(assembled.History)
+			data, err := json.Marshal(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wire []map[string]any
+			if err := json.Unmarshal(data, &wire); err != nil {
+				t.Fatal(err)
+			}
+			var replay []map[string]any
+			var callIndex, outputIndex int
+			for i, item := range wire {
+				switch item["type"] {
+				case "reasoning":
+					replay = append(replay, item)
+				case "function_call":
+					callIndex = i
+				case "function_call_output":
+					outputIndex = i
+				}
+			}
+			if len(replay) != 3 {
+				t.Fatalf("translated input = %s", data)
+			}
+			for i, want := range append(items, protocoltypes.ReasoningItem{ID: "rs_legacy", Summary: "legacy summary", EncryptedContent: "opaque-legacy"}) {
+				if replay[i]["id"] != want.ID || replay[i]["encrypted_content"] != want.EncryptedContent {
+					t.Fatalf("replay = %s", data)
+				}
+				summary := replay[i]["summary"].([]any)[0].(map[string]any)
+				if summary["text"] != want.Summary {
+					t.Fatalf("summary = %#v", summary)
+				}
+			}
+			if callIndex <= 2 || outputIndex != callIndex+1 || wire[1]["type"] != "reasoning" || wire[2]["type"] != "reasoning" || wire[callIndex]["call_id"] != "call_1" || wire[outputIndex]["call_id"] != "call_1" {
+				t.Fatalf("tool/reasoning order = %s", data)
+			}
+			for _, msg := range assembled.History {
+				if strings.Contains(msg.Content, "opaque-") || strings.Contains(msg.ReasoningContent, "opaque-") {
+					t.Fatal("opaque data leaked into visible text")
+				}
+			}
+		})
 	}
 }

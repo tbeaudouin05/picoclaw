@@ -488,3 +488,91 @@ func writeResponse(t *testing.T, w http.ResponseWriter, response map[string]any)
 		t.Fatalf("encode response: %v", err)
 	}
 }
+
+func TestProviderBuildRequestBody_GeneratedThinkingByModel(t *testing.T) {
+	p := NewProvider("test-key", "https://api.openai.com/v1", "", "")
+	for _, model := range []string{"gpt-4o", "gpt-4.1", "openai/gpt-4o", "gpt-5-chat-latest", "o1-mini", "o1-preview"} {
+		for _, level := range []string{"off", "low", "medium", "high", "xhigh"} {
+			t.Run(model+"/"+level, func(t *testing.T) {
+				for _, stream := range []bool{false, true} {
+					body := p.buildRequestBody(nil, nil, model, map[string]any{"thinking_level": level}, stream)
+					data, err := json.Marshal(body)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var wire map[string]any
+					if err := json.Unmarshal(data, &wire); err != nil {
+						t.Fatal(err)
+					}
+					if _, exists := wire["reasoning"]; exists {
+						t.Fatalf("unexpected reasoning: %s", data)
+					}
+				}
+			})
+		}
+	}
+	for _, tc := range []struct{ model, level, want string }{
+		{"o1", "off", "low"}, {"o3-mini", "off", "low"}, {"o4-mini", "off", "low"},
+		{"gpt-5", "off", "minimal"}, {"gpt-5-mini-2025-08-07", "off", "minimal"},
+		{"gpt-5.1", "off", "none"}, {"gpt-5.4", "off", "none"},
+		{"gpt-5.1-codex", "off", "low"}, {"gpt-6-astra", "off", "low"},
+		{"gpt-5-pro", "low", "high"}, {"gpt-5.2-pro", "off", "medium"},
+		{"o3", "xhigh", "high"}, {"gpt-5.1", "xhigh", "high"},
+		{"gpt-5.4", "medium", "medium"},
+	} {
+		t.Run(tc.model+"/"+tc.level, func(t *testing.T) {
+			body := p.buildRequestBody(nil, nil, tc.model, map[string]any{"thinking_level": tc.level}, false)
+			data, err := json.Marshal(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wire struct {
+				Reasoning struct {
+					Effort string `json:"effort"`
+				} `json:"reasoning"`
+			}
+			if err := json.Unmarshal(data, &wire); err != nil {
+				t.Fatal(err)
+			}
+			if wire.Reasoning.Effort != tc.want {
+				t.Fatalf("body = %s, want effort %q", data, tc.want)
+			}
+		})
+	}
+}
+
+func TestProviderBuildRequestBody_MergesMandatoryInclude(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		include any
+		want    string
+	}{
+		{"additional", []any{"web_search_call.action.sources"}, `["web_search_call.action.sources","reasoning.encrypted_content"]`},
+		{"empty", []any{}, `["reasoning.encrypted_content"]`},
+		{"present", []any{"reasoning.encrypted_content", "web_search_call.action.sources"}, `["reasoning.encrypted_content","web_search_call.action.sources"]`},
+		{"typed", []string{"web_search_call.action.sources"}, `["web_search_call.action.sources","reasoning.encrypted_content"]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			extra := map[string]any{"include": tc.include, "store": true}
+			before, _ := json.Marshal(extra)
+			p := NewProvider("test-key", "https://api.openai.com/v1", "", "", WithExtraBody(extra))
+			for _, stream := range []bool{false, true} {
+				body := p.buildRequestBody(nil, nil, "gpt-5.4", nil, stream)
+				got, err := json.Marshal(body["include"])
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(got) != tc.want {
+					t.Fatalf("include = %s, want %s", got, tc.want)
+				}
+				if body["store"] != false {
+					t.Fatalf("store = %v", body["store"])
+				}
+			}
+			after, _ := json.Marshal(extra)
+			if string(before) != string(after) {
+				t.Fatalf("extra_body mutated: %s -> %s", before, after)
+			}
+		})
+	}
+}

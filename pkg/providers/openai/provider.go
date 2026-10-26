@@ -70,7 +70,7 @@ func WithUserAgent(userAgent string) Option {
 }
 
 // WithExtraBody adds fields to every request body. These fields override the
-// provider's ordinary defaults except for store, which is always false.
+// provider's ordinary defaults except for mandatory stateless replay fields.
 func WithExtraBody(extraBody map[string]any) Option {
 	return func(p *Provider) {
 		p.extraBody = extraBody
@@ -289,7 +289,7 @@ func (p *Provider) buildRequestBody(
 	if cacheKey, ok := options["prompt_cache_key"].(string); ok && cacheKey != "" {
 		requestBody["prompt_cache_key"] = cacheKey
 	}
-	applyReasoningOptions(requestBody, options)
+	applyReasoningOptions(requestBody, options, model)
 
 	// Configured extra fields intentionally have the same precedence as the
 	// OpenAI-compatible provider. The two statelessness invariants and model
@@ -298,9 +298,27 @@ func (p *Provider) buildRequestBody(
 	if isReasoningModel(model) && reasoningEffort(requestBody["reasoning"]) != "none" {
 		delete(requestBody, "temperature")
 	}
-	if _, exists := requestBody["include"]; !exists {
-		requestBody["include"] = []string{"reasoning.encrypted_content"}
+	// Clone configured includes so repeated requests never mutate extraBody.
+	var includes []any
+	switch configured := requestBody["include"].(type) {
+	case []string:
+		for _, value := range configured {
+			includes = append(includes, value)
+		}
+	case []any:
+		includes = append(includes, configured...)
 	}
+	found := false
+	for _, value := range includes {
+		if entry, ok := value.(string); ok && entry == "reasoning.encrypted_content" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		includes = append(includes, "reasoning.encrypted_content")
+	}
+	requestBody["include"] = includes
 	requestBody["store"] = false
 	if stream {
 		requestBody["stream"] = true
@@ -331,7 +349,9 @@ func reasoningEffort(raw any) string {
 	return strings.ToLower(strings.TrimSpace(effort))
 }
 
-func applyReasoningOptions(requestBody map[string]any, options map[string]any) {
+func applyReasoningOptions(requestBody map[string]any, options map[string]any, model string) {
+	// Explicit reasoning options and extra_body retain caller precedence.
+	// Only generated thinking controls are constrained by model capabilities.
 	if raw, ok := options["reasoning"].(map[string]any); ok {
 		requestBody["reasoning"] = maps.Clone(raw)
 	}
@@ -341,16 +361,61 @@ func applyReasoningOptions(requestBody map[string]any, options map[string]any) {
 	}
 
 	level, _ := options["thinking_level"].(string)
-	switch strings.ToLower(strings.TrimSpace(level)) {
-	case "off":
-		setReasoningField(requestBody, "effort", "none")
-	case "low", "medium", "high", "xhigh":
-		setReasoningField(requestBody, "effort", strings.ToLower(strings.TrimSpace(level)))
+	if effort := generatedReasoningEffort(model, level); effort != "" {
+		setReasoningField(requestBody, "effort", effort)
 	}
 
 	if summary, ok := options["reasoning_summary"].(string); ok && strings.TrimSpace(summary) != "" {
 		setReasoningField(requestBody, "summary", summary)
 	}
+}
+
+// generatedReasoningEffort deliberately uses conservative family-compatible
+// values. Off selects a supported effort when reasoning cannot be disabled.
+func generatedReasoningEffort(model, level string) string {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if slash := strings.LastIndexByte(model, '/'); slash >= 0 {
+		model = model[slash+1:]
+	}
+	if !isReasoningModel(model) || strings.Contains(model, "chat") || strings.Contains(model, "search") ||
+		strings.HasPrefix(model, "o1-mini") || strings.HasPrefix(model, "o1-preview") {
+		return ""
+	}
+	level = strings.ToLower(strings.TrimSpace(level))
+	switch level {
+	case "off", "low", "medium", "high", "xhigh":
+	default:
+		return ""
+	}
+	// The original GPT-5 Pro supports only high; later Pro variants support
+	// medium and above. Avoid none/low for all Pro variants.
+	if strings.HasPrefix(model, "gpt-5-pro") {
+		return "high"
+	}
+	if strings.Contains(model, "pro") {
+		if level == "off" || level == "low" {
+			return "medium"
+		}
+	}
+	if level == "xhigh" {
+		return "high"
+	}
+	if level != "off" {
+		return level
+	}
+	// Only known general-purpose GPT-5.1–5.5 families support none.
+	// Codex and future/unknown reasoning families conservatively use low.
+	if !strings.Contains(model, "codex") && !strings.Contains(model, "pro") {
+		for _, family := range []string{"gpt-5.1", "gpt-5.2", "gpt-5.3", "gpt-5.4", "gpt-5.5"} {
+			if model == family || strings.HasPrefix(model, family+"-") {
+				return "none"
+			}
+		}
+	}
+	if model == "gpt-5" || strings.HasPrefix(model, "gpt-5-2025-") || strings.HasPrefix(model, "gpt-5-mini") || strings.HasPrefix(model, "gpt-5-nano") {
+		return "minimal"
+	}
+	return "low"
 }
 
 func setReasoningField(requestBody map[string]any, key, value string) {

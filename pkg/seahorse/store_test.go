@@ -3,6 +3,8 @@ package seahorse
 import (
 	"context"
 	"fmt"
+	"github.com/sipeed/picoclaw/pkg/providers"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -1465,5 +1467,43 @@ func TestStoreReplaceContextItemsWithSummary(t *testing.T) {
 			t.Errorf("duplicate ordinal %d detected", item.Ordinal)
 		}
 		ordinalSet[item.Ordinal] = true
+	}
+}
+
+func TestStoreReasoningReplayReadPaths(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	conv, err := s.GetOrCreateConversation(ctx, "replay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ReasoningReplay{ReasoningID: "rs_1", ReasoningEncryptedContent: "opaque-one", ReasoningItems: []providers.ReasoningItem{
+		{ID: "rs_1", Summary: "summary one", EncryptedContent: "opaque-one"},
+		{ID: "rs_2", Summary: "summary two", EncryptedContent: "opaque-two"},
+	}}
+	msg, err := s.AddMessageWithReasoning(ctx, conv.ConversationID, "assistant", "answer", "gpt-5", "visible", 5, time.Time{}, want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetMessageByID(ctx, msg.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.ReasoningReplay, want) {
+		t.Fatalf("by ID: %+v", got.ReasoningReplay)
+	}
+	summary, err := s.CreateSummary(ctx, CreateSummaryInput{ConversationID: conv.ConversationID, Kind: SummaryKindLeaf, Content: "visible summary", TokenCount: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.LinkSummaryToMessages(ctx, summary.SummaryID, []int64{msg.ID}); err != nil {
+		t.Fatal(err)
+	}
+	sources, err := s.GetSummarySourceMessages(ctx, summary.SummaryID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sources) != 1 || !reflect.DeepEqual(sources[0].ReasoningReplay, want) {
+		t.Fatalf("sources: %+v", sources)
 	}
 }

@@ -48,6 +48,7 @@ func runSchema(db *sql.DB) error {
 			content         TEXT NOT NULL DEFAULT '',
 			model_name      TEXT NOT NULL DEFAULT '',
 			reasoning_content TEXT NOT NULL DEFAULT '',
+			reasoning_replay TEXT NOT NULL DEFAULT '',
 			token_count     INTEGER NOT NULL DEFAULT 0,
 			created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 		)`,
@@ -163,6 +164,9 @@ func runSchema(db *sql.DB) error {
 	if err := ensureMessagesReasoningContentColumn(db); err != nil {
 		return err
 	}
+	if err := ensureMessagesReasoningReplayColumn(db); err != nil {
+		return err
+	}
 	if err := ensureMessagesModelNameColumn(db); err != nil {
 		return err
 	}
@@ -180,6 +184,21 @@ func ensureMessagesReasoningContentColumn(db *sql.DB) error {
 
 	if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN reasoning_content TEXT NOT NULL DEFAULT ''`); err != nil {
 		return fmt.Errorf("add messages.reasoning_content: %w", err)
+	}
+	return nil
+}
+
+// Use the same additive, idempotent migration as other optional message metadata.
+func ensureMessagesReasoningReplayColumn(db *sql.DB) error {
+	hasColumn, err := tableHasColumn(db, "messages", "reasoning_replay")
+	if err != nil {
+		return fmt.Errorf("check messages.reasoning_replay: %w", err)
+	}
+	if hasColumn {
+		return nil
+	}
+	if _, err := db.Exec(`ALTER TABLE messages ADD COLUMN reasoning_replay TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("add messages.reasoning_replay: %w", err)
 	}
 	return nil
 }

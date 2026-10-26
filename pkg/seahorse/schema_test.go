@@ -377,3 +377,34 @@ func TestFTS5SQLConstants(t *testing.T) {
 		t.Errorf("sqlCreateMessagesFTS failed: %v", err)
 	}
 }
+
+func TestRunSchemaMigratesReasoningReplayWithoutChangingLegacyRows(t *testing.T) {
+	db := openTestDB(t)
+	_, err := db.Exec(`CREATE TABLE messages (
+		message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+		conversation_id INTEGER NOT NULL, role TEXT NOT NULL,
+		content TEXT NOT NULL DEFAULT '', model_name TEXT NOT NULL DEFAULT '',
+		reasoning_content TEXT NOT NULL DEFAULT '', token_count INTEGER NOT NULL DEFAULT 0,
+		created_at TEXT NOT NULL DEFAULT (datetime('now'))
+	);
+	INSERT INTO messages (conversation_id, role, content, reasoning_content)
+	VALUES (1, 'assistant', 'legacy answer', 'visible reasoning')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := runSchema(db); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var content, reasoning, replay string
+	if err := db.QueryRow(`SELECT content, reasoning_content, reasoning_replay FROM messages WHERE message_id = 1`).Scan(&content, &reasoning, &replay); err != nil {
+		t.Fatal(err)
+	}
+	if content != "legacy answer" || reasoning != "visible reasoning" || replay != "" {
+		t.Fatalf("legacy row changed: %q / %q / %q", content, reasoning, replay)
+	}
+	if err := decodeReasoningReplay(replay, &ReasoningReplay{}); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -16,8 +16,17 @@ const (
 	SummaryKindCondensed SummaryKind = "condensed"
 )
 
+// ReasoningReplay keeps opaque Responses replay metadata separate from visible text.
+// The collection preserves every item; scalar fields support older sessions.
+type ReasoningReplay struct {
+	ReasoningItems            []providers.ReasoningItem `json:"reasoningItems,omitempty"`
+	ReasoningID               string                    `json:"reasoningId,omitempty"`
+	ReasoningEncryptedContent string                    `json:"reasoningEncryptedContent,omitempty"`
+}
+
 // Message represents a single chat message with role and content.
 type Message struct {
+	ReasoningReplay
 	ID               int64         `json:"id"`
 	ConversationID   int64         `json:"conversationId"`
 	Role             string        `json:"role"`
